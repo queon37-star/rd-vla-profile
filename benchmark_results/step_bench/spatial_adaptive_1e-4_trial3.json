@@ -1,0 +1,208 @@
+{
+  "config": "GenerateConfig(model_family='openvla', pretrained_checkpoint='outputs/12_24-24_24_Spatial_40k', use_minivlm=True, use_film=False, num_images_in_input=2, use_proprio=True, center_crop=True, num_open_loop_steps=8, unnorm_key='libero_spatial_no_noops', load_in_8bit=False, load_in_4bit=False, task_suite_name='libero_spatial', num_steps_wait=10, num_trials_per_task=3, task_id=None, initial_states_path='DEFAULT', env_img_res=256, run_id_note=None, local_log_dir='./experiments/logs', use_wandb=False, wandb_entity='your-wandb-entity', wandb_project='your-wandb-project', seed=7, save_version='rd-vla', phase='Inference', use_recurrent=True, recurrence_strategy='kl_divergence', recurrent_num_iter=12, recurrence_kl_thresh=0.0001, recurrence_cos_thresh=0.999, recurrence_max_iter=32, num_exec_actions=5, adaptive_exec=False, adaptive_exec_threshold=4, adaptive_exec_low=4, adaptive_exec_high=8, use_linear_decay_horizon=False, dynamic_exec=False, dynamic_exec_warmup=5, json_log_file='benchmark_results/step_bench/spatial_adaptive_1e-4_trial3.json', step_log_file='')",
+  "tasks": {
+    "pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate": [
+      {
+        "episode": 0,
+        "success": true,
+        "num_predictions": 16,
+        "avg_iters": 11.625
+      },
+      {
+        "episode": 1,
+        "success": true,
+        "num_predictions": 16,
+        "avg_iters": 11.6875
+      },
+      {
+        "episode": 2,
+        "success": true,
+        "num_predictions": 17,
+        "avg_iters": 11.764705882352942
+      }
+    ],
+    "pick_up_the_black_bowl_next_to_the_ramekin_and_place_it_on_the_plate": [
+      {
+        "episode": 0,
+        "success": true,
+        "num_predictions": 21,
+        "avg_iters": 10.285714285714286
+      },
+      {
+        "episode": 1,
+        "success": true,
+        "num_predictions": 17,
+        "avg_iters": 12.529411764705882
+      },
+      {
+        "episode": 2,
+        "success": true,
+        "num_predictions": 21,
+        "avg_iters": 10.80952380952381
+      }
+    ],
+    "pick_up_the_black_bowl_from_table_center_and_place_it_on_the_plate": [
+      {
+        "episode": 0,
+        "success": true,
+        "num_predictions": 20,
+        "avg_iters": 10.15
+      },
+      {
+        "episode": 1,
+        "success": true,
+        "num_predictions": 19,
+        "avg_iters": 10.421052631578947
+      },
+      {
+        "episode": 2,
+        "success": true,
+        "num_predictions": 18,
+        "avg_iters": 10.38888888888889
+      }
+    ],
+    "pick_up_the_black_bowl_on_the_cookie_box_and_place_it_on_the_plate": [
+      {
+        "episode": 0,
+        "success": true,
+        "num_predictions": 16,
+        "avg_iters": 10.125
+      },
+      {
+        "episode": 1,
+        "success": true,
+        "num_predictions": 16,
+        "avg_iters": 11.0
+      },
+      {
+        "episode": 2,
+        "success": true,
+        "num_predictions": 18,
+        "avg_iters": 11.833333333333334
+      }
+    ],
+    "pick_up_the_black_bowl_in_the_top_drawer_of_the_wooden_cabinet_and_place_it_on_the_plate": [
+      {
+        "episode": 0,
+        "success": true,
+        "num_predictions": 25,
+        "avg_iters": 9.88
+      },
+      {
+        "episode": 1,
+        "success": true,
+        "num_predictions": 37,
+        "avg_iters": 13.45945945945946
+      },
+      {
+        "episode": 2,
+        "success": true,
+        "num_predictions": 26,
+        "avg_iters": 11.0
+      }
+    ],
+    "pick_up_the_black_bowl_on_the_ramekin_and_place_it_on_the_plate": [
+      {
+        "episode": 0,
+        "success": true,
+        "num_predictions": 17,
+        "avg_iters": 12.058823529411764
+      },
+      {
+        "episode": 1,
+        "success": true,
+        "num_predictions": 17,
+        "avg_iters": 13.882352941176471
+      },
+      {
+        "episode": 2,
+        "success": true,
+        "num_predictions": 15,
+        "avg_iters": 11.733333333333333
+      }
+    ],
+    "pick_up_the_black_bowl_next_to_the_cookie_box_and_place_it_on_the_plate": [
+      {
+        "episode": 0,
+        "success": true,
+        "num_predictions": 23,
+        "avg_iters": 10.73913043478261
+      },
+      {
+        "episode": 1,
+        "success": true,
+        "num_predictions": 22,
+        "avg_iters": 10.318181818181818
+      },
+      {
+        "episode": 2,
+        "success": true,
+        "num_predictions": 20,
+        "avg_iters": 10.55
+      }
+    ],
+    "pick_up_the_black_bowl_on_the_stove_and_place_it_on_the_plate": [
+      {
+        "episode": 0,
+        "success": true,
+        "num_predictions": 22,
+        "avg_iters": 11.590909090909092
+      },
+      {
+        "episode": 1,
+        "success": true,
+        "num_predictions": 24,
+        "avg_iters": 11.25
+      },
+      {
+        "episode": 2,
+        "success": true,
+        "num_predictions": 23,
+        "avg_iters": 10.565217391304348
+      }
+    ],
+    "pick_up_the_black_bowl_next_to_the_plate_and_place_it_on_the_plate": [
+      {
+        "episode": 0,
+        "success": true,
+        "num_predictions": 19,
+        "avg_iters": 11.263157894736842
+      },
+      {
+        "episode": 1,
+        "success": true,
+        "num_predictions": 19,
+        "avg_iters": 11.263157894736842
+      },
+      {
+        "episode": 2,
+        "success": true,
+        "num_predictions": 27,
+        "avg_iters": 12.592592592592593
+      }
+    ],
+    "pick_up_the_black_bowl_on_the_wooden_cabinet_and_place_it_on_the_plate": [
+      {
+        "episode": 0,
+        "success": true,
+        "num_predictions": 23,
+        "avg_iters": 10.91304347826087
+      },
+      {
+        "episode": 1,
+        "success": true,
+        "num_predictions": 27,
+        "avg_iters": 11.555555555555555
+      },
+      {
+        "episode": 2,
+        "success": true,
+        "num_predictions": 24,
+        "avg_iters": 11.0
+      }
+    ]
+  },
+  "overall_success_rate": 1.0,
+  "total_episodes": 30,
+  "total_successes": 30
+}

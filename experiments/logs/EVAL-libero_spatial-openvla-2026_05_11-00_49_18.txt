@@ -1,0 +1,33 @@
+Task suite: libero_spatial
+Running only task 0
+Using default initial states
+
+Task: pick up the black bowl between the plate and the ramekin and place it on the plate
+Starting episode 1...
+  Action inference latency: 417.86 ms, iters=None
+  Action inference latency: 179.21 ms, iters=None
+  Action inference latency: 157.28 ms, iters=None
+  Action inference latency: 165.84 ms, iters=None
+  Action inference latency: 145.17 ms, iters=None
+  Action inference latency: 134.32 ms, iters=None
+  Action inference latency: 135.33 ms, iters=None
+  Action inference latency: 146.71 ms, iters=None
+  Action inference latency: 129.84 ms, iters=None
+  Action inference latency: 135.05 ms, iters=None
+  Action inference latency: 131.95 ms, iters=None
+  Action inference latency: 124.71 ms, iters=None
+  Action inference latency: 125.11 ms, iters=None
+  Action inference latency: 140.77 ms, iters=None
+  Action inference latency: 133.18 ms, iters=None
+  Action latency summary: 15 preds, avg=160.16 ms, p95=250.81 ms
+Saved rollout MP4 (with stats) at path ./rollouts/rd-vla/2026_05_11/2026_05_11-00_49_18--episode=1--success=True--task=pick_up_the_black_bowl_between_the_plate_and_the_r.mp4
+Success: True
+# episodes completed so far: 1
+# successes: 1 (100.0%)
+Current task success rate: 1.0
+Current total success rate: 1.0
+Saved JSON results to profiling/results/fixed_rec32.json
+Final results:
+Total episodes: 1
+Total successes: 1
+Overall success rate: 1.0000 (100.0%)

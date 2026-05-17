@@ -1,0 +1,16 @@
+{
+  "config": "GenerateConfig(model_family='openvla', pretrained_checkpoint='outputs/12_24-24_24_Spatial_40k', use_minivlm=True, use_film=False, num_images_in_input=2, use_proprio=True, center_crop=True, num_open_loop_steps=8, unnorm_key='libero_spatial_no_noops', load_in_8bit=False, load_in_4bit=False, task_suite_name='libero_spatial', num_steps_wait=10, num_trials_per_task=1, task_id=0, initial_states_path='DEFAULT', env_img_res=256, run_id_note=None, local_log_dir='./experiments/logs', use_wandb=False, wandb_entity='your-wandb-entity', wandb_project='your-wandb-project', seed=7, save_version='rd-vla', phase='Inference', use_recurrent=True, recurrence_strategy='fixed', recurrent_num_iter=32, recurrence_kl_thresh=0.001, recurrence_cos_thresh=0.999, recurrence_max_iter=32, num_exec_actions=5, adaptive_exec=False, adaptive_exec_threshold=4, adaptive_exec_low=4, adaptive_exec_high=8, use_linear_decay_horizon=False, dynamic_exec=False, dynamic_exec_warmup=5, json_log_file='profiling/results/steady/fixed_rec32_steady.json')",
+  "tasks": {
+    "pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate": [
+      {
+        "episode": 0,
+        "success": true,
+        "num_predictions": 0,
+        "avg_iters": null
+      }
+    ]
+  },
+  "overall_success_rate": 1.0,
+  "total_episodes": 1,
+  "total_successes": 1
+}

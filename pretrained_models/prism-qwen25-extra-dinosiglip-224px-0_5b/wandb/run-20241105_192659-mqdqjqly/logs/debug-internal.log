@@ -1,0 +1,16 @@
+{"time":"2024-11-05T19:26:59.314379425-08:00","level":"INFO","msg":"using version","core version":"0.18.5"}
+{"time":"2024-11-05T19:26:59.314391049-08:00","level":"INFO","msg":"created symlink","path":"runs/prism-qwen25-extra-dinosiglip-224px+0_5b+stage-finetune+x7/wandb/run-20241105_192659-mqdqjqly/logs/debug-core.log"}
+{"time":"2024-11-05T19:26:59.533339524-08:00","level":"INFO","msg":"created new stream","id":"mqdqjqly"}
+{"time":"2024-11-05T19:26:59.533372406-08:00","level":"INFO","msg":"stream: started","id":"mqdqjqly"}
+{"time":"2024-11-05T19:26:59.533420404-08:00","level":"INFO","msg":"sender: started","stream_id":"mqdqjqly"}
+{"time":"2024-11-05T19:26:59.533413693-08:00","level":"INFO","msg":"writer: Do: started","stream_id":{"value":"mqdqjqly"}}
+{"time":"2024-11-05T19:26:59.533432721-08:00","level":"INFO","msg":"handler: started","stream_id":{"value":"mqdqjqly"}}
+{"time":"2024-11-05T19:26:59.715136674-08:00","level":"INFO","msg":"Starting system monitor"}
+{"time":"2024-11-05T19:27:18.2081844-08:00","level":"INFO","msg":"stream: closing","id":"mqdqjqly"}
+{"time":"2024-11-05T19:27:18.20827275-08:00","level":"INFO","msg":"Stopping system monitor"}
+{"time":"2024-11-05T19:27:18.209227648-08:00","level":"INFO","msg":"Stopped system monitor"}
+{"time":"2024-11-05T19:27:18.690761255-08:00","level":"INFO","msg":"fileTransfer: Close: file transfer manager closed"}
+{"time":"2024-11-05T19:27:18.88603778-08:00","level":"INFO","msg":"handler: closed","stream_id":{"value":"mqdqjqly"}}
+{"time":"2024-11-05T19:27:18.886115295-08:00","level":"INFO","msg":"writer: Close: closed","stream_id":{"value":"mqdqjqly"}}
+{"time":"2024-11-05T19:27:18.88614639-08:00","level":"INFO","msg":"sender: closed","stream_id":"mqdqjqly"}
+{"time":"2024-11-05T19:27:18.887360713-08:00","level":"INFO","msg":"stream: closed","id":"mqdqjqly"}

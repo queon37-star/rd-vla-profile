@@ -1,0 +1,98 @@
+2026-05-11 02:03:40.266222: I tensorflow/core/util/port.cc:113] oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders. To turn them off, set the environment variable `TF_ENABLE_ONEDNN_OPTS=0`.
+2026-05-11 02:03:40.488186: E external/local_xla/xla/stream_executor/cuda/cuda_dnn.cc:9261] Unable to register cuDNN factory: Attempting to register factory for plugin cuDNN when one has already been registered
+2026-05-11 02:03:40.488310: E external/local_xla/xla/stream_executor/cuda/cuda_fft.cc:607] Unable to register cuFFT factory: Attempting to register factory for plugin cuFFT when one has already been registered
+2026-05-11 02:03:40.519792: E external/local_xla/xla/stream_executor/cuda/cuda_blas.cc:1515] Unable to register cuBLAS factory: Attempting to register factory for plugin cuBLAS when one has already been registered
+2026-05-11 02:03:40.589064: I tensorflow/core/platform/cpu_feature_guard.cc:182] This TensorFlow binary is optimized to use available CPU instructions in performance-critical operations.
+To enable the following instructions: AVX2 AVX512F AVX512_VNNI AVX512_BF16 FMA, in other operations, rebuild TensorFlow with the appropriate compiler flags.
+2026-05-11 02:03:41.457402: W tensorflow/compiler/tf2tensorrt/utils/py_utils.cc:38] TF-TRT Warning: Could not find TensorRT
+[robosuite WARNING] No private macro file found! (macros.py:53)
+[robosuite WARNING] It is recommended to use a private macro file (macros.py:54)
+[robosuite WARNING] To setup, run: python /home/siwon/miniconda3/envs/rdvla_env/lib/python3.10/site-packages/robosuite/scripts/setup_macros.py (macros.py:55)
+Gym has been unmaintained since 2022 and does not support NumPy 2.0 amongst other critical functionality.
+Please upgrade to Gymnasium, the maintained drop-in replacement of Gym, or contact the authors of your software and request that they upgrade.
+Users of this version of Gym should be able to simply replace 'import gym' with 'import gymnasium as gym' in the vast majority of cases.
+See the migration guide at https://gymnasium.farama.org/introduction/migration_guide/ for additional information.
+2026-05-11 02:03:45.069523: I external/local_xla/xla/stream_executor/cuda/cuda_executor.cc:887] could not open file to read NUMA node: /sys/bus/pci/devices/0000:01:00.0/numa_node
+Your kernel may have been built without NUMA support.
+2026-05-11 02:03:45.073985: I external/local_xla/xla/stream_executor/cuda/cuda_executor.cc:887] could not open file to read NUMA node: /sys/bus/pci/devices/0000:01:00.0/numa_node
+Your kernel may have been built without NUMA support.
+2026-05-11 02:03:45.074036: I external/local_xla/xla/stream_executor/cuda/cuda_executor.cc:887] could not open file to read NUMA node: /sys/bus/pci/devices/0000:01:00.0/numa_node
+Your kernel may have been built without NUMA support.
+Using LIBERO constants:
+  NUM_ACTIONS_CHUNK = 8
+  ACTION_DIM = 7
+  PROPRIO_DIM = 8
+  ACTION_PROPRIO_NORMALIZATION_TYPE = bounds_q99
+If needed, manually set the correct constants in `prismatic/vla/constants.py`!
+Instantiating pretrained VLA policy...
+Loaded model: <class 'prismatic.extern.hf.modeling_prismatic.OpenVLAForActionPrediction'>
+Auto-detected action head type: ActionHeadRecurrentPro
+05/11 [02:04:01] INFO     | >> Logging to local log file: ./experiments/logs/EVAL-libero_spatial-openvla-2026_05_11-02_03_50.txt                               run_libero_eval.py:257
+[info] using task orders [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+                 INFO     | >> Task suite: libero_spatial                                                                                                      run_libero_eval.py:272
+                 INFO     | >> Running only task 0                                                                                                             run_libero_eval.py:272
+  0%|          | 0/1 [00:00<?, ?it/s]                 INFO     | >> Using default initial states                                                                                                    run_libero_eval.py:272
+
+  0%|          | 0/1 [00:00<?, ?it/s][A05/11 [02:04:03] INFO     | >>                                                                                                                                 run_libero_eval.py:272
+                          Task: pick up the black bowl between the plate and the ramekin and place it on the plate                                                                   
+                 INFO     | >> Starting episode 1...                                                                                                           run_libero_eval.py:272
+05/11 [02:04:06] INFO     | >>   Action inference latency: 636.34 ms, iters=None                                                                               run_libero_eval.py:272
+05/11 [02:04:07] INFO     | >>   Action inference latency: 149.44 ms, iters=None                                                                               run_libero_eval.py:272
+05/11 [02:04:08] INFO     | >>   Action inference latency: 95.33 ms, iters=None                                                                                run_libero_eval.py:272
+                 INFO     | >>   Action inference latency: 88.34 ms, iters=None                                                                                run_libero_eval.py:272
+05/11 [02:04:09] INFO     | >>   Action inference latency: 87.92 ms, iters=None                                                                                run_libero_eval.py:272
+05/11 [02:04:10] INFO     | >>   Action inference latency: 88.47 ms, iters=None                                                                                run_libero_eval.py:272
+                 INFO     | >>   Action inference latency: 124.90 ms, iters=None                                                                               run_libero_eval.py:272
+05/11 [02:04:11] INFO     | >>   Action inference latency: 114.33 ms, iters=None                                                                               run_libero_eval.py:272
+05/11 [02:04:12] INFO     | >>   Action inference latency: 102.22 ms, iters=None                                                                               run_libero_eval.py:272
+05/11 [02:04:13] INFO     | >>   Action inference latency: 85.54 ms, iters=None                                                                                run_libero_eval.py:272
+                 INFO     | >>   Action inference latency: 82.60 ms, iters=None                                                                                run_libero_eval.py:272
+05/11 [02:04:14] INFO     | >>   Action inference latency: 92.85 ms, iters=None                                                                                run_libero_eval.py:272
+05/11 [02:04:15] INFO     | >>   Action inference latency: 88.63 ms, iters=None                                                                                run_libero_eval.py:272
+                 INFO     | >>   Action inference latency: 87.68 ms, iters=None                                                                                run_libero_eval.py:272
+05/11 [02:04:16] INFO     | >>   Action inference latency: 100.20 ms, iters=None                                                                               run_libero_eval.py:272
+05/11 [02:04:17] INFO     | >>   Action inference latency: 90.79 ms, iters=None                                                                                run_libero_eval.py:272
+                 INFO     | >>   Action inference latency: 91.09 ms, iters=None                                                                                run_libero_eval.py:272
+05/11 [02:04:18] INFO     | >>   Action inference latency: 108.46 ms, iters=None                                                                               run_libero_eval.py:272
+05/11 [02:04:19] INFO     | >>   Action inference latency: 91.87 ms, iters=None                                                                                run_libero_eval.py:272
+                 INFO     | >>   Action inference latency: 86.73 ms, iters=None                                                                                run_libero_eval.py:272
+05/11 [02:04:20] INFO     | >>   Action inference latency: 92.21 ms, iters=None                                                                                run_libero_eval.py:272
+05/11 [02:04:21] INFO     | >>   Action inference latency: 138.15 ms, iters=None                                                                               run_libero_eval.py:272
+                 INFO     | >>   Action inference latency: 85.20 ms, iters=None                                                                                run_libero_eval.py:272
+05/11 [02:04:22] INFO     | >>   Action inference latency: 92.78 ms, iters=None                                                                                run_libero_eval.py:272
+05/11 [02:04:23] INFO     | >>   Action inference latency: 82.01 ms, iters=None                                                                                run_libero_eval.py:272
+                 INFO     | >>   Action inference latency: 82.07 ms, iters=None                                                                                run_libero_eval.py:272
+05/11 [02:04:24] INFO     | >>   Action inference latency: 94.33 ms, iters=None                                                                                run_libero_eval.py:272
+05/11 [02:04:25] INFO     | >>   Action inference latency: 117.09 ms, iters=None                                                                               run_libero_eval.py:272
+                 INFO     | >>   Action inference latency: 89.95 ms, iters=None                                                                                run_libero_eval.py:272
+05/11 [02:04:26] INFO     | >>   Action inference latency: 86.69 ms, iters=None                                                                                run_libero_eval.py:272
+05/11 [02:04:27] INFO     | >>   Action inference latency: 88.84 ms, iters=None                                                                                run_libero_eval.py:272
+                 INFO     | >>   Action inference latency: 124.05 ms, iters=None                                                                               run_libero_eval.py:272
+05/11 [02:04:28] INFO     | >>   Action inference latency: 93.51 ms, iters=None                                                                                run_libero_eval.py:272
+05/11 [02:04:29] INFO     | >>   Action inference latency: 94.41 ms, iters=None                                                                                run_libero_eval.py:272
+                 INFO     | >>   Action inference latency: 100.05 ms, iters=None                                                                               run_libero_eval.py:272
+05/11 [02:04:30] INFO     | >>   Action inference latency: 103.96 ms, iters=None                                                                               run_libero_eval.py:272
+05/11 [02:04:31] INFO     | >>   Action inference latency: 62.78 ms, iters=None                                                                                run_libero_eval.py:272
+                 INFO     | >>   Action inference latency: 60.52 ms, iters=None                                                                                run_libero_eval.py:272
+05/11 [02:04:32] INFO     | >>   Action inference latency: 106.97 ms, iters=None                                                                               run_libero_eval.py:272
+05/11 [02:04:33] INFO     | >>   Action inference latency: 81.29 ms, iters=None                                                                                run_libero_eval.py:272
+                 INFO     | >>   Action inference latency: 89.16 ms, iters=None                                                                                run_libero_eval.py:272
+05/11 [02:04:34] INFO     | >>   Action inference latency: 82.64 ms, iters=None                                                                                run_libero_eval.py:272
+05/11 [02:04:35] INFO     | >>   Action inference latency: 68.38 ms, iters=None                                                                                run_libero_eval.py:272
+                 INFO     | >>   Action inference latency: 65.75 ms, iters=None                                                                                run_libero_eval.py:272
+05/11 [02:04:36] INFO     | >>   Action latency summary: 44 preds, raw_avg=106.28 ms, raw_p95=136.16 ms, first=636.34 ms, second=149.44 ms, steady_skip=2,     run_libero_eval.py:272
+                          steady_avg=92.64 ms, steady_median=90.37 ms, steady_p90=113.74 ms, steady_p95=123.70 ms                                                                    
+Saved rollout MP4 (with stats) at path ./rollouts/rd-vla/2026_05_11/2026_05_11-02_03_50--episode=1--success=False--task=pick_up_the_black_bowl_between_the_plate_and_the_r.mp4
+                 INFO     | >> Success: False                                                                                                                  run_libero_eval.py:272
+                 INFO     | >> # episodes completed so far: 1                                                                                                  run_libero_eval.py:272
+                 INFO     | >> # successes: 0 (0.0%)                                                                                                           run_libero_eval.py:272
+
+100%|██████████| 1/1 [00:33<00:00, 33.09s/it][A100%|██████████| 1/1 [00:33<00:00, 33.09s/it]
+                 INFO     | >> Current task success rate: 0.0                                                                                                  run_libero_eval.py:272
+                 INFO     | >> Current total success rate: 0.0                                                                                                 run_libero_eval.py:272
+100%|██████████| 1/1 [00:35<00:00, 35.23s/it]100%|██████████| 1/1 [00:35<00:00, 35.23s/it]
+                 INFO     | >> Saved JSON results to profiling/results/steady/fixed_rec1_steady.json                                                           run_libero_eval.py:272
+                 INFO     | >> Final results:                                                                                                                  run_libero_eval.py:272
+                 INFO     | >> Total episodes: 1                                                                                                               run_libero_eval.py:272
+                 INFO     | >> Total successes: 0                                                                                                              run_libero_eval.py:272
+                 INFO     | >> Overall success rate: 0.0000 (0.0%)                                                                                             run_libero_eval.py:272

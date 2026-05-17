@@ -1,0 +1,15 @@
+model:
+  use_minivlm: true
+  num_images_in_input: 2
+  use_proprio: true
+
+action_head:
+  type: recurrent
+
+checkpoint_path: ""
+
+tasks:
+  suite: libero_10
+  num_rollouts: 50
+
+seed: 7

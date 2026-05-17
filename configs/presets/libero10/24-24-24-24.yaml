@@ -1,0 +1,25 @@
+action_head:
+  type: recurrent
+  recurrent:
+    prelude_vlm_layers: []
+    recurrent_vlm_layers: [23, 23, 23, 23]
+    coda_vlm_layers: []
+    mean_recurrence: 32
+    backprop_depth: 8
+
+optimizer:
+  learning_rate: 0.00002
+  lr_warmup_steps: 500
+  num_steps_before_decay: 200000
+
+data:
+  dataset_name: libero_10_no_noops
+# Training
+batch_size: 16
+grad_accumulation_steps: 1
+max_steps: 120000
+save_freq: 5000
+
+wandb_log_freq: 10
+
+seed: 42

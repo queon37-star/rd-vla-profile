@@ -1,0 +1,5 @@
+benchmark_root: /home/siwon/RD-VLA_test/rd-vla/LIBERO/libero/libero
+bddl_files: /home/siwon/RD-VLA_test/rd-vla/LIBERO/libero/libero/bddl_files
+init_states: /home/siwon/RD-VLA_test/rd-vla/LIBERO/libero/libero/init_files
+assets: /home/siwon/RD-VLA_test/rd-vla/LIBERO/libero/libero/assets
+datasets: /home/siwon/RD-VLA_test/rd-vla/LIBERO/libero/datasets

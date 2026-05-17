@@ -1,0 +1,208 @@
+{
+  "config": "GenerateConfig(model_family='openvla', pretrained_checkpoint='outputs/12_24-24_24_Spatial_40k', use_minivlm=True, use_film=False, num_images_in_input=2, use_proprio=True, center_crop=True, num_open_loop_steps=8, unnorm_key='libero_spatial_no_noops', load_in_8bit=False, load_in_4bit=False, task_suite_name='libero_spatial', num_steps_wait=10, num_trials_per_task=3, task_id=None, initial_states_path='DEFAULT', env_img_res=256, run_id_note=None, local_log_dir='./experiments/logs', use_wandb=False, wandb_entity='your-wandb-entity', wandb_project='your-wandb-project', seed=7, save_version='rd-vla', phase='Inference', use_recurrent=True, recurrence_strategy='kl_divergence', recurrent_num_iter=12, recurrence_kl_thresh=0.0005, recurrence_cos_thresh=0.999, recurrence_max_iter=32, num_exec_actions=5, adaptive_exec=False, adaptive_exec_threshold=4, adaptive_exec_low=4, adaptive_exec_high=8, use_linear_decay_horizon=False, dynamic_exec=False, dynamic_exec_warmup=5, json_log_file='benchmark_results/step_bench/spatial_adaptive_5e-4_trial3.json', step_log_file='')",
+  "tasks": {
+    "pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate": [
+      {
+        "episode": 0,
+        "success": true,
+        "num_predictions": 16,
+        "avg_iters": 8.625
+      },
+      {
+        "episode": 1,
+        "success": true,
+        "num_predictions": 16,
+        "avg_iters": 9.3125
+      },
+      {
+        "episode": 2,
+        "success": true,
+        "num_predictions": 18,
+        "avg_iters": 8.5
+      }
+    ],
+    "pick_up_the_black_bowl_next_to_the_ramekin_and_place_it_on_the_plate": [
+      {
+        "episode": 0,
+        "success": true,
+        "num_predictions": 21,
+        "avg_iters": 7.9523809523809526
+      },
+      {
+        "episode": 1,
+        "success": true,
+        "num_predictions": 17,
+        "avg_iters": 7.823529411764706
+      },
+      {
+        "episode": 2,
+        "success": true,
+        "num_predictions": 22,
+        "avg_iters": 7.7272727272727275
+      }
+    ],
+    "pick_up_the_black_bowl_from_table_center_and_place_it_on_the_plate": [
+      {
+        "episode": 0,
+        "success": true,
+        "num_predictions": 20,
+        "avg_iters": 7.7
+      },
+      {
+        "episode": 1,
+        "success": true,
+        "num_predictions": 19,
+        "avg_iters": 7.526315789473684
+      },
+      {
+        "episode": 2,
+        "success": true,
+        "num_predictions": 18,
+        "avg_iters": 7.5
+      }
+    ],
+    "pick_up_the_black_bowl_on_the_cookie_box_and_place_it_on_the_plate": [
+      {
+        "episode": 0,
+        "success": true,
+        "num_predictions": 16,
+        "avg_iters": 7.6875
+      },
+      {
+        "episode": 1,
+        "success": true,
+        "num_predictions": 17,
+        "avg_iters": 8.176470588235293
+      },
+      {
+        "episode": 2,
+        "success": true,
+        "num_predictions": 17,
+        "avg_iters": 8.117647058823529
+      }
+    ],
+    "pick_up_the_black_bowl_in_the_top_drawer_of_the_wooden_cabinet_and_place_it_on_the_plate": [
+      {
+        "episode": 0,
+        "success": true,
+        "num_predictions": 26,
+        "avg_iters": 7.384615384615385
+      },
+      {
+        "episode": 1,
+        "success": true,
+        "num_predictions": 26,
+        "avg_iters": 8.0
+      },
+      {
+        "episode": 2,
+        "success": true,
+        "num_predictions": 26,
+        "avg_iters": 8.038461538461538
+      }
+    ],
+    "pick_up_the_black_bowl_on_the_ramekin_and_place_it_on_the_plate": [
+      {
+        "episode": 0,
+        "success": true,
+        "num_predictions": 17,
+        "avg_iters": 9.352941176470589
+      },
+      {
+        "episode": 1,
+        "success": true,
+        "num_predictions": 18,
+        "avg_iters": 9.333333333333334
+      },
+      {
+        "episode": 2,
+        "success": true,
+        "num_predictions": 15,
+        "avg_iters": 9.0
+      }
+    ],
+    "pick_up_the_black_bowl_next_to_the_cookie_box_and_place_it_on_the_plate": [
+      {
+        "episode": 0,
+        "success": true,
+        "num_predictions": 23,
+        "avg_iters": 7.913043478260869
+      },
+      {
+        "episode": 1,
+        "success": true,
+        "num_predictions": 23,
+        "avg_iters": 8.0
+      },
+      {
+        "episode": 2,
+        "success": true,
+        "num_predictions": 20,
+        "avg_iters": 7.75
+      }
+    ],
+    "pick_up_the_black_bowl_on_the_stove_and_place_it_on_the_plate": [
+      {
+        "episode": 0,
+        "success": true,
+        "num_predictions": 23,
+        "avg_iters": 8.043478260869565
+      },
+      {
+        "episode": 1,
+        "success": true,
+        "num_predictions": 22,
+        "avg_iters": 8.272727272727273
+      },
+      {
+        "episode": 2,
+        "success": false,
+        "num_predictions": 44,
+        "avg_iters": 9.113636363636363
+      }
+    ],
+    "pick_up_the_black_bowl_next_to_the_plate_and_place_it_on_the_plate": [
+      {
+        "episode": 0,
+        "success": true,
+        "num_predictions": 19,
+        "avg_iters": 8.105263157894736
+      },
+      {
+        "episode": 1,
+        "success": true,
+        "num_predictions": 18,
+        "avg_iters": 8.61111111111111
+      },
+      {
+        "episode": 2,
+        "success": true,
+        "num_predictions": 20,
+        "avg_iters": 8.35
+      }
+    ],
+    "pick_up_the_black_bowl_on_the_wooden_cabinet_and_place_it_on_the_plate": [
+      {
+        "episode": 0,
+        "success": true,
+        "num_predictions": 23,
+        "avg_iters": 8.304347826086957
+      },
+      {
+        "episode": 1,
+        "success": true,
+        "num_predictions": 24,
+        "avg_iters": 8.583333333333334
+      },
+      {
+        "episode": 2,
+        "success": true,
+        "num_predictions": 32,
+        "avg_iters": 8.75
+      }
+    ]
+  },
+  "overall_success_rate": 0.9666666666666667,
+  "total_episodes": 30,
+  "total_successes": 29
+}

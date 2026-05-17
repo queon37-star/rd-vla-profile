@@ -1,0 +1,134 @@
+{
+  "os":  "Linux-5.15.0-116-generic-x86_64-with-glibc2.35",
+  "python":  "3.10.15",
+  "startedAt":  "2024-11-06T03:26:59.309206Z",
+  "args":  [
+    "--model.type",
+    "prism-qwen25-extra-dinosiglip-224px+0_5b",
+    "--model.finetune_global_batch_size",
+    "64",
+    "--model.finetune_per_device_batch_size",
+    "8"
+  ],
+  "program":  "/hai/scratch/belkhale/openvla-mini/scripts/pretrain.py",
+  "codePath":  "scripts/pretrain.py",
+  "git":  {
+    "remote":  "git@github.com:Stanford-ILIAD/openvla-mini.git",
+    "commit":  "05073927b096dab7d326a3e39db9262f08d3a8ae"
+  },
+  "email":  "belkhale@stanford.edu",
+  "root":  "runs/prism-qwen25-extra-dinosiglip-224px+0_5b+stage-finetune+x7",
+  "host":  "haic-hgx-2.stanford.edu",
+  "username":  "belkhale",
+  "executable":  "/hai/scratch/belkhale/miniforge3/envs/vla/bin/python3.10",
+  "codePathLocal":  "scripts/pretrain.py",
+  "cpu_count":  112,
+  "cpu_count_logical":  224,
+  "gpu":  "NVIDIA H100 80GB HBM3",
+  "gpu_count":  8,
+  "disk":  {
+    "/":  {
+      "total":  "942725181440",
+      "used":  "50880540672"
+    }
+  },
+  "memory":  {
+    "total":  "2164104577024"
+  },
+  "cpu":  {
+    "count":  112,
+    "countLogical":  224
+  },
+  "gpu_nvidia":  [
+    {
+      "name":  "NVIDIA H100 80GB HBM3",
+      "memoryTotal":  "85520809984",
+      "cudaCores":  16896,
+      "architecture":  "Hopper"
+    },
+    {
+      "name":  "NVIDIA H100 80GB HBM3",
+      "memoryTotal":  "85520809984",
+      "cudaCores":  16896,
+      "architecture":  "Hopper"
+    },
+    {
+      "name":  "NVIDIA H100 80GB HBM3",
+      "memoryTotal":  "85520809984",
+      "cudaCores":  16896,
+      "architecture":  "Hopper"
+    },
+    {
+      "name":  "NVIDIA H100 80GB HBM3",
+      "memoryTotal":  "85520809984",
+      "cudaCores":  16896,
+      "architecture":  "Hopper"
+    },
+    {
+      "name":  "NVIDIA H100 80GB HBM3",
+      "memoryTotal":  "85520809984",
+      "cudaCores":  16896,
+      "architecture":  "Hopper"
+    },
+    {
+      "name":  "NVIDIA H100 80GB HBM3",
+      "memoryTotal":  "85520809984",
+      "cudaCores":  16896,
+      "architecture":  "Hopper"
+    },
+    {
+      "name":  "NVIDIA H100 80GB HBM3",
+      "memoryTotal":  "85520809984",
+      "cudaCores":  16896,
+      "architecture":  "Hopper"
+    },
+    {
+      "name":  "NVIDIA H100 80GB HBM3",
+      "memoryTotal":  "85520809984",
+      "cudaCores":  16896,
+      "architecture":  "Hopper"
+    }
+  ],
+  "slurm":  {
+    "cluster_name":  "haic",
+    "conf":  "/usr/local/etc/slurm.conf",
+    "cpus_on_node":  "64",
+    "cpus_per_task":  "64",
+    "gpus_on_node":  "8",
+    "gtids":  "0",
+    "job_account":  "models",
+    "job_cpus_per_node":  "64",
+    "job_end_time":  "1731122748",
+    "job_gid":  "37",
+    "job_gpus":  "0,1,2,3,4,5,6,7",
+    "job_id":  "11024",
+    "job_name":  "pretrain",
+    "job_nodelist":  "haic-hgx-2",
+    "job_num_nodes":  "1",
+    "job_partition":  "hai",
+    "job_qos":  "models",
+    "job_start_time":  "1730863548",
+    "job_uid":  "377095",
+    "job_user":  "belkhale",
+    "jobid":  "11024",
+    "localid":  "0",
+    "mem_per_node":  "102400",
+    "nnodes":  "1",
+    "nodeid":  "0",
+    "nodelist":  "haic-hgx-2",
+    "nprocs":  "1",
+    "ntasks":  "1",
+    "ntasks_per_node":  "1",
+    "prio_process":  "0",
+    "procid":  "0",
+    "script_context":  "prolog_task",
+    "submit_dir":  "/hai/scratch/belkhale/openvla-mini",
+    "submit_host":  "haic.stanford.edu",
+    "task_pid":  "2184784",
+    "tasks_per_node":  "1",
+    "topology_addr":  "haic-hgx-2",
+    "topology_addr_pattern":  "node",
+    "tres_per_task":  "cpu=64"
+  },
+  "cudaVersion":  "12.4"
+}
