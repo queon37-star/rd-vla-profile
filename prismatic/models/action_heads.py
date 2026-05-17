@@ -289,6 +289,7 @@ class VLARecurrent(nn.Module):
             action_delta_list = []
             first_converged_k_1e_4 = None
             first_converged_k_5e_4 = None
+            adaptive_stop = False
 
             with torch.no_grad():
                 for it in range(max_iter):
@@ -315,10 +316,12 @@ class VLARecurrent(nn.Module):
                             ).item()
                             final_kl = 1 - cos_sim
                             if cos_sim > cos_thresh:
+                                adaptive_stop = True
                                 break
                         elif convergence_strategy == "kl_divergence":
                             final_kl = mse
                             if mse < kl_thresh:
+                                adaptive_stop = True
                                 break
 
                     prev_output = curr_output.detach()
@@ -328,10 +331,16 @@ class VLARecurrent(nn.Module):
                 "threshold": float(kl_thresh) if convergence_strategy == "kl_divergence" else float(cos_thresh),
                 "fixed_K": None,
                 "K_t": int(actual_iter),
+                "max_iter": int(max_iter),
+                "adaptive_stop": adaptive_stop,
+                "metric_name": "mse_between_action_outputs",
+                "iteration_mse": conv_score_list,
+                "iteration_metric_values": conv_score_list,
                 "conv_score_list": conv_score_list,
                 "action_delta_list": action_delta_list,
                 "first_converged_k_1e_4": first_converged_k_1e_4,
                 "first_converged_k_5e_4": first_converged_k_5e_4,
+                "final_mse": conv_score_list[-1] if conv_score_list else None,
                 "final_conv_score": final_kl,
             }
 
@@ -408,10 +417,16 @@ class VLARecurrent(nn.Module):
                 "threshold": None,
                 "fixed_K": int(total),
                 "K_t": int(total),
+                "max_iter": int(total),
+                "adaptive_stop": False,
+                "metric_name": "mse_between_action_outputs",
+                "iteration_mse": conv_score_list,
+                "iteration_metric_values": conv_score_list,
                 "conv_score_list": conv_score_list,
                 "action_delta_list": action_delta_list,
                 "first_converged_k_1e_4": first_converged_k_1e_4,
                 "first_converged_k_5e_4": first_converged_k_5e_4,
+                "final_mse": final_conv_score,
                 "final_conv_score": final_conv_score,
             }
 

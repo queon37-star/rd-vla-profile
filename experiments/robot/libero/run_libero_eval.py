@@ -7,7 +7,7 @@ from collections import deque
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 import cv2
 import torch
@@ -149,6 +149,11 @@ class GenerateConfig:
     # Step-level recurrence metric log.
     # If empty, the path will be derived from json_log_file.
     step_log_file: str = ""
+
+    # Recurrent convergence metric outputs.
+    recurrent_convergence_dir: str = "./benchmark_results/recurrent_convergence"
+    recurrent_convergence_log_file: str = ""
+    recurrent_convergence_summary_file: str = ""
 
 
 
@@ -301,6 +306,145 @@ def get_step_log_file(cfg):
         return root + "_step_log.jsonl"
 
     return None
+
+
+def configure_recurrent_convergence_paths(cfg, run_id: str):
+    """Derive stable JSONL/JSON paths for recurrence convergence metrics."""
+    output_dir = getattr(cfg, "recurrent_convergence_dir", "") or "./benchmark_results/recurrent_convergence"
+    os.makedirs(output_dir, exist_ok=True)
+
+    if not getattr(cfg, "recurrent_convergence_log_file", None):
+        cfg.recurrent_convergence_log_file = os.path.join(output_dir, f"{run_id}_predictions.jsonl")
+    if not getattr(cfg, "recurrent_convergence_summary_file", None):
+        cfg.recurrent_convergence_summary_file = os.path.join(output_dir, f"{run_id}_summary.json")
+    if not getattr(cfg, "step_log_file", None):
+        cfg.step_log_file = cfg.recurrent_convergence_log_file
+
+    return cfg.recurrent_convergence_log_file, cfg.recurrent_convergence_summary_file
+
+
+def _as_float(value):
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _as_int(value):
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _numeric_stats(values):
+    values = [_as_float(v) for v in values]
+    values = [v for v in values if v is not None]
+    if not values:
+        return {"count": 0, "mean": None, "min": None, "max": None, "std": None}
+
+    arr = np.asarray(values, dtype=np.float64)
+    return {
+        "count": int(arr.size),
+        "mean": float(np.mean(arr)),
+        "min": float(np.min(arr)),
+        "max": float(np.max(arr)),
+        "std": float(np.std(arr)),
+    }
+
+
+def summarize_episode_convergence(records: List[Dict[str, Any]], success: bool) -> Dict[str, Any]:
+    iterations = [r.get("recurrent_iteration_count") for r in records]
+    final_mse = [r.get("final_mse") for r in records]
+    adaptive_stops = sum(1 for r in records if r.get("adaptive_stop"))
+
+    return {
+        "success": bool(success),
+        "num_action_predictions": len(records),
+        "avg_iteration": _numeric_stats(iterations)["mean"],
+        "max_iteration": _numeric_stats(iterations)["max"],
+        "min_iteration": _numeric_stats(iterations)["min"],
+        "iteration_stats": _numeric_stats(iterations),
+        "final_mse_stats": _numeric_stats(final_mse),
+        "adaptive_stop_count": int(adaptive_stops),
+    }
+
+
+def save_recurrent_convergence_summary(cfg, full_results, log_file=None):
+    """Write run-level success/failure comparison for recurrent convergence metrics."""
+    step_log_path = get_step_log_file(cfg)
+    summary_path = getattr(cfg, "recurrent_convergence_summary_file", None)
+    if not step_log_path or not summary_path or not os.path.exists(step_log_path):
+        return None
+
+    prediction_records = []
+    with open(step_log_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                prediction_records.append(json.loads(line))
+
+    success_records = [r for r in prediction_records if r.get("success") is True]
+    failure_records = [r for r in prediction_records if r.get("success") is False]
+
+    episode_records = []
+    for task_stats in full_results.get("tasks", {}).values():
+        episode_records.extend(task_stats)
+
+    success_episodes = [r for r in episode_records if r.get("success") is True]
+    failure_episodes = [r for r in episode_records if r.get("success") is False]
+
+    summary = {
+        "schema_version": 1,
+        "prediction_log_file": step_log_path,
+        "total_prediction_records": len(prediction_records),
+        "total_episode_records": len(episode_records),
+        "prediction_level": {
+            "all": {
+                "iteration_stats": _numeric_stats([r.get("recurrent_iteration_count") for r in prediction_records]),
+                "final_mse_stats": _numeric_stats([r.get("final_mse") for r in prediction_records]),
+                "adaptive_stop_count": sum(1 for r in prediction_records if r.get("adaptive_stop")),
+            },
+            "success": {
+                "iteration_stats": _numeric_stats([r.get("recurrent_iteration_count") for r in success_records]),
+                "final_mse_stats": _numeric_stats([r.get("final_mse") for r in success_records]),
+                "adaptive_stop_count": sum(1 for r in success_records if r.get("adaptive_stop")),
+            },
+            "failure": {
+                "iteration_stats": _numeric_stats([r.get("recurrent_iteration_count") for r in failure_records]),
+                "final_mse_stats": _numeric_stats([r.get("final_mse") for r in failure_records]),
+                "adaptive_stop_count": sum(1 for r in failure_records if r.get("adaptive_stop")),
+            },
+        },
+        "rollout_level": {
+            "all": {
+                "avg_iteration_stats": _numeric_stats([r.get("avg_iters") for r in episode_records]),
+                "max_iteration_stats": _numeric_stats([r.get("max_iters") for r in episode_records]),
+                "min_iteration_stats": _numeric_stats([r.get("min_iters") for r in episode_records]),
+            },
+            "success": {
+                "avg_iteration_stats": _numeric_stats([r.get("avg_iters") for r in success_episodes]),
+                "max_iteration_stats": _numeric_stats([r.get("max_iters") for r in success_episodes]),
+                "min_iteration_stats": _numeric_stats([r.get("min_iters") for r in success_episodes]),
+            },
+            "failure": {
+                "avg_iteration_stats": _numeric_stats([r.get("avg_iters") for r in failure_episodes]),
+                "max_iteration_stats": _numeric_stats([r.get("max_iters") for r in failure_episodes]),
+                "min_iteration_stats": _numeric_stats([r.get("min_iters") for r in failure_episodes]),
+            },
+        },
+    }
+
+    os.makedirs(os.path.dirname(summary_path) or ".", exist_ok=True)
+    with open(summary_path, "w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2, ensure_ascii=False)
+
+    log_message(f"Saved recurrent convergence summary to {summary_path}", log_file)
+    return summary
 
 
 
@@ -478,21 +622,41 @@ def run_episode(
                 recurrence_strategy = getattr(cfg, "recurrence_strategy", None)
                 recurrent_num_iter = getattr(cfg, "recurrent_num_iter", None)
                 fixed_k = int(recurrent_num_iter) if recurrence_strategy == "fixed" and recurrent_num_iter is not None else None
-                threshold = (
-                    float(getattr(cfg, "recurrence_kl_thresh", 0.001))
-                    if recurrence_strategy == "kl_divergence"
-                    else None
-                )
+                max_recurrent_iteration = debug.get("max_iter")
+                if max_recurrent_iteration is None:
+                    max_recurrent_iteration = fixed_k if fixed_k is not None else getattr(cfg, "recurrence_max_iter", None)
+                threshold = debug.get("threshold")
+                if threshold is None and recurrence_strategy == "kl_divergence":
+                    threshold = float(getattr(cfg, "recurrence_kl_thresh", 0.001))
+                elif threshold is None and recurrence_strategy == "cosine_similarity":
+                    threshold = float(getattr(cfg, "recurrence_cos_thresh", 0.999))
 
-                episode_step_logs.append({
+                iteration_mse = debug.get("iteration_mse", debug.get("conv_score_list", []))
+                recurrent_iteration_count = _as_int(debug.get("K_t", actual_iters))
+                final_mse = debug.get("final_mse")
+                if final_mse is None and iteration_mse:
+                    final_mse = iteration_mse[-1]
+
+                step_record = {
+                    "schema_version": 1,
                     "task_id": task_id,
                     "task_name": task_description,
                     "episode_id": episode_idx,
+                    "timestep": int(t),
+                    "action_prediction_index": prediction_step,
                     "prediction_step": prediction_step,
-                    "method": recurrence_strategy,
+                    "method": debug.get("strategy", recurrence_strategy),
+                    "recurrence_strategy": debug.get("strategy", recurrence_strategy),
                     "threshold": threshold,
                     "fixed_K": fixed_k,
-                    "K_t": debug.get("K_t", actual_iters),
+                    "K_t": recurrent_iteration_count,
+                    "recurrent_iteration_count": recurrent_iteration_count,
+                    "max_recurrent_iteration": _as_int(max_recurrent_iteration),
+                    "adaptive_stop": bool(debug.get("adaptive_stop", False)),
+                    "metric_name": debug.get("metric_name", "mse_between_action_outputs"),
+                    "iteration_mse": iteration_mse,
+                    "iteration_metric_values": debug.get("iteration_metric_values", iteration_mse),
+                    "final_mse": _as_float(final_mse),
                     "final_conv_score": debug.get("final_conv_score", final_kl),
                     "conv_score_list": debug.get("conv_score_list", []),
                     "action_delta_list": debug.get("action_delta_list", []),
@@ -501,8 +665,11 @@ def run_episode(
                     "prev_action_delta": prev_action_delta,
                     "proprio_delta": proprio_delta,
                     "latency_ms": action_latency_ms,
+                    "rollout_avg_iteration": None,
+                    "rollout_max_iteration": None,
+                    "rollout_min_iteration": None,
                     "success": None,
-                })
+                }
 
                 prediction_step += 1
                 prev_action_vec = curr_action_vec
@@ -542,6 +709,8 @@ def run_episode(
 
                 # num_actions가 반환된 action chunk 길이를 넘지 않도록 수정한 코드
                 num_actions = min(num_actions, len(actions))
+                step_record["executed_actions_from_prediction"] = int(num_actions)
+                episode_step_logs.append(step_record)
                 replay_stats.append((actual_iters or 0, num_actions))
                 for i in range(num_actions):
                     action_queue.append(actions[i])
@@ -576,12 +745,16 @@ def run_episode(
             log_file,
         )
 
+    rollout_summary = summarize_episode_convergence(episode_step_logs, success)
     for record in episode_step_logs:
         record["success"] = bool(success)
+        record["rollout_avg_iteration"] = rollout_summary["avg_iteration"]
+        record["rollout_max_iteration"] = rollout_summary["max_iteration"]
+        record["rollout_min_iteration"] = rollout_summary["min_iteration"]
 
     append_jsonl(get_step_log_file(cfg), episode_step_logs)
 
-    return success, replay_images, episode_iters, replay_stats
+    return success, replay_images, episode_iters, replay_stats, rollout_summary
 
 
 
@@ -633,7 +806,7 @@ def run_task(
         # )
 
         # step-level recurrence log를 위해 task/episode id를 전달하는 호출 코드
-        success, replay_images, episode_iters, replay_stats = run_episode(
+        success, replay_images, episode_iters, replay_stats, rollout_summary = run_episode(
             cfg, env, task_description, model, resize_size, processor,
             action_head, proprio_projector, initial_state, log_file,
             global_iters=all_iters,
@@ -661,6 +834,9 @@ def run_task(
             "success": success,
             "num_predictions": len(episode_iters),
             "avg_iters": float(np.mean(episode_iters)) if episode_iters else None,
+            "max_iters": float(np.max(episode_iters)) if episode_iters else None,
+            "min_iters": float(np.min(episode_iters)) if episode_iters else None,
+            "recurrent_convergence": rollout_summary,
         })
 
         if replay_stats:
@@ -718,6 +894,10 @@ def eval_libero(cfg: GenerateConfig) -> float:
     resize_size = get_image_resize_size(cfg)
     log_file, local_log_filepath, run_id = setup_logging(cfg)
 
+    convergence_log_path, convergence_summary_path = configure_recurrent_convergence_paths(cfg, run_id)
+    log_message(f"Recurrent convergence prediction log: {convergence_log_path}", log_file)
+    log_message(f"Recurrent convergence summary file: {convergence_summary_path}", log_file)
+
     step_log_path = get_step_log_file(cfg)
     if step_log_path and os.path.exists(step_log_path):
         os.remove(step_log_path)
@@ -770,9 +950,15 @@ def eval_libero(cfg: GenerateConfig) -> float:
         full_results["overall_success_rate"] = final_success_rate
         full_results["total_episodes"] = total_episodes
         full_results["total_successes"] = total_successes
+        full_results["recurrent_convergence_log_file"] = get_step_log_file(cfg)
+        full_results["recurrent_convergence_summary_file"] = getattr(cfg, "recurrent_convergence_summary_file", None)
         with open(cfg.json_log_file, "w") as jf:
             json.dump(full_results, jf, indent=2)
         log_message(f"Saved JSON results to {cfg.json_log_file}", log_file)
+
+    convergence_summary = save_recurrent_convergence_summary(cfg, full_results, log_file)
+    if convergence_summary is not None:
+        full_results["recurrent_convergence_summary"] = convergence_summary
 
     log_message("Final results:", log_file)
     log_message(f"Total episodes: {total_episodes}", log_file)
