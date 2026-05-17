@@ -1,0 +1,68 @@
+Task suite: libero_spatial
+Running only task 0
+Using default initial states
+
+Task: pick up the black bowl between the plate and the ramekin and place it on the plate
+Starting episode 1...
+  Action inference latency: 705.71 ms, iters=8
+  Action inference latency: 128.73 ms, iters=8
+  Action inference latency: 128.24 ms, iters=8
+  Action inference latency: 106.91 ms, iters=8
+  Action inference latency: 97.85 ms, iters=8
+  Action inference latency: 99.21 ms, iters=8
+  Action inference latency: 94.90 ms, iters=8
+  Action inference latency: 94.37 ms, iters=8
+  Action inference latency: 106.65 ms, iters=8
+  Action inference latency: 102.95 ms, iters=8
+  Action inference latency: 94.09 ms, iters=8
+  Action inference latency: 98.22 ms, iters=8
+  Action inference latency: 112.80 ms, iters=8
+  Action inference latency: 99.70 ms, iters=8
+  Action inference latency: 104.78 ms, iters=8
+  Action inference latency: 95.79 ms, iters=8
+  Action inference latency: 94.59 ms, iters=8
+  Action inference latency: 92.52 ms, iters=8
+  Action inference latency: 105.18 ms, iters=8
+  Action inference latency: 120.54 ms, iters=8
+  Action inference latency: 115.51 ms, iters=8
+  Action inference latency: 93.23 ms, iters=8
+  Action inference latency: 131.37 ms, iters=8
+  Action inference latency: 97.91 ms, iters=8
+  Action inference latency: 97.65 ms, iters=8
+  Action inference latency: 104.24 ms, iters=8
+  Action inference latency: 102.29 ms, iters=8
+  Action inference latency: 105.37 ms, iters=8
+  Action inference latency: 123.03 ms, iters=8
+  Action inference latency: 102.47 ms, iters=8
+  Action inference latency: 107.96 ms, iters=8
+  Action inference latency: 106.04 ms, iters=8
+  Action inference latency: 102.47 ms, iters=8
+  Action inference latency: 104.98 ms, iters=8
+  Action inference latency: 106.65 ms, iters=8
+  Action inference latency: 99.45 ms, iters=8
+  Action inference latency: 108.63 ms, iters=8
+  Action inference latency: 110.73 ms, iters=8
+  Action inference latency: 107.36 ms, iters=8
+  Action inference latency: 97.18 ms, iters=8
+  Action inference latency: 102.93 ms, iters=8
+  Action inference latency: 99.62 ms, iters=8
+  Action inference latency: 99.87 ms, iters=8
+  Action inference latency: 104.50 ms, iters=8
+  Action latency summary: 44 preds, raw_avg=118.53 ms, raw_p95=128.66 ms, first=705.71 ms, second=128.73 ms, steady_skip=2, steady_avg=104.30 ms, steady_median=102.94 ms, steady_p90=115.24 ms, steady_p95=122.90 ms
+  Episode iters: 44 preds, avg=8.0
+Saved rollout MP4 (with stats) at path ./rollouts/rd-vla/2026_05_15/2026_05_15-20_39_20--episode=1--success=False--task=pick_up_the_black_bowl_between_the_plate_and_the_r.mp4
+Success: False
+# episodes completed so far: 1
+# successes: 0 (0.0%)
+Current task success rate: 0.0
+Current total success rate: 0.0
+
+=== Task 0 Iteration Stats ===
+  Total predictions: 44
+  Avg iters (all): 8.00 +/- 0.00
+  Avg iters (failure): 8.00 +/- 0.00
+Saved JSON results to benchmark_results/step_test_fixed_k8_t0e1.json
+Final results:
+Total episodes: 1
+Total successes: 0
+Overall success rate: 0.0000 (0.0%)

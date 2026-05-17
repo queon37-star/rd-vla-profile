@@ -247,12 +247,49 @@ class VLARecurrent(nn.Module):
         prelude_out = x
 
         state = self.init_state(B, device, dtype)
+        self.last_recurrence_debug = None
 
         # Convergence-based stopping
+        # 이게 원본 adaptive branch
+
+        # if convergence_strategy in ("kl_divergence", "cosine_similarity") and not self.training:
+        #     prev_output = None
+        #     actual_iter = 0
+        #     final_kl = None
+        #     with torch.no_grad():
+        #         for it in range(max_iter):
+        #             state = self._run_one_iteration(state, prelude_out, h_a, h_t, p)
+        #             actual_iter = it + 1
+        #             curr_output = self._get_output(state, h_a, h_t, p)
+
+        #             if prev_output is not None:
+        #                 if convergence_strategy == "cosine_similarity":
+        #                     cos_sim = F.cosine_similarity(
+        #                         prev_output.flatten(), curr_output.flatten(), dim=0
+        #                     ).item()
+        #                     final_kl = 1 - cos_sim
+        #                     if cos_sim > cos_thresh:
+        #                         break
+        #                 elif convergence_strategy == "kl_divergence":
+        #                     mse = torch.mean((curr_output - prev_output) ** 2).item()
+        #                     final_kl = mse
+        #                     if mse < kl_thresh:
+        #                         break
+        #             prev_output = curr_output
+
+        #     return self._get_output(state, h_a, h_t, p), actual_iter, final_kl
+
+        # 아래는 측정용 metric 추가를 위해 수정한 adaptive branch
+
         if convergence_strategy in ("kl_divergence", "cosine_similarity") and not self.training:
             prev_output = None
             actual_iter = 0
             final_kl = None
+            conv_score_list = []
+            action_delta_list = []
+            first_converged_k_1e_4 = None
+            first_converged_k_5e_4 = None
+
             with torch.no_grad():
                 for it in range(max_iter):
                     state = self._run_one_iteration(state, prelude_out, h_a, h_t, p)
@@ -260,6 +297,18 @@ class VLARecurrent(nn.Module):
                     curr_output = self._get_output(state, h_a, h_t, p)
 
                     if prev_output is not None:
+                        diff = curr_output - prev_output
+                        mse = torch.mean(diff ** 2).item()
+                        l2 = torch.norm(diff.float()).item()
+
+                        conv_score_list.append(mse)
+                        action_delta_list.append(l2)
+
+                        if first_converged_k_1e_4 is None and mse < 1e-4:
+                            first_converged_k_1e_4 = actual_iter
+                        if first_converged_k_5e_4 is None and mse < 5e-4:
+                            first_converged_k_5e_4 = actual_iter
+
                         if convergence_strategy == "cosine_similarity":
                             cos_sim = F.cosine_similarity(
                                 prev_output.flatten(), curr_output.flatten(), dim=0
@@ -268,15 +317,52 @@ class VLARecurrent(nn.Module):
                             if cos_sim > cos_thresh:
                                 break
                         elif convergence_strategy == "kl_divergence":
-                            mse = torch.mean((curr_output - prev_output) ** 2).item()
                             final_kl = mse
                             if mse < kl_thresh:
                                 break
-                    prev_output = curr_output
+
+                    prev_output = curr_output.detach()
+
+            self.last_recurrence_debug = {
+                "strategy": convergence_strategy,
+                "threshold": float(kl_thresh) if convergence_strategy == "kl_divergence" else float(cos_thresh),
+                "fixed_K": None,
+                "K_t": int(actual_iter),
+                "conv_score_list": conv_score_list,
+                "action_delta_list": action_delta_list,
+                "first_converged_k_1e_4": first_converged_k_1e_4,
+                "first_converged_k_5e_4": first_converged_k_5e_4,
+                "final_conv_score": final_kl,
+            }
 
             return self._get_output(state, h_a, h_t, p), actual_iter, final_kl
 
+        # 여기까지가 metric 추가한 adaptive branch
+
+
+        # 기존 Fixed branch
         # Fixed iterations
+        # if num_iter is not None:
+        #     total = num_iter
+        # elif self.training and self.cfg.random_iterations:
+        #     total = self.sample_iterations()
+        # else:
+        #     total = self.cfg.mean_recurrence
+
+        # k = self.cfg.backprop_depth
+        # n_no_grad = max(0, total - k)
+
+        # if n_no_grad > 0:
+        #     with torch.no_grad():
+        #         for _ in range(n_no_grad):
+        #             state = self._run_one_iteration(state, prelude_out, h_a, h_t, p)
+
+        # for _ in range(min(k, total)):
+        #     state = self._run_one_iteration(state, prelude_out, h_a, h_t, p)
+
+        # return self._get_output(state, h_a, h_t, p)
+
+        # metric 측정용 fixed branch
         if num_iter is not None:
             total = num_iter
         elif self.training and self.cfg.random_iterations:
@@ -284,6 +370,54 @@ class VLARecurrent(nn.Module):
         else:
             total = self.cfg.mean_recurrence
 
+        # Inference-time fixed logging
+        if not self.training:
+            prev_output = None
+            conv_score_list = []
+            action_delta_list = []
+            first_converged_k_1e_4 = None
+            first_converged_k_5e_4 = None
+            final_conv_score = None
+            curr_output = None
+            actual_iter = 0
+
+            with torch.no_grad():
+                for it in range(total):
+                    state = self._run_one_iteration(state, prelude_out, h_a, h_t, p)
+                    curr_output = self._get_output(state, h_a, h_t, p)
+                    actual_iter = it + 1
+
+                    if prev_output is not None:
+                        diff = curr_output - prev_output
+                        mse = torch.mean(diff ** 2).item()
+                        l2 = torch.norm(diff.float()).item()
+
+                        conv_score_list.append(mse)
+                        action_delta_list.append(l2)
+                        final_conv_score = mse
+
+                        if first_converged_k_1e_4 is None and mse < 1e-4:
+                            first_converged_k_1e_4 = actual_iter
+                        if first_converged_k_5e_4 is None and mse < 5e-4:
+                            first_converged_k_5e_4 = actual_iter
+
+                    prev_output = curr_output.detach()
+
+            self.last_recurrence_debug = {
+                "strategy": "fixed",
+                "threshold": None,
+                "fixed_K": int(total),
+                "K_t": int(total),
+                "conv_score_list": conv_score_list,
+                "action_delta_list": action_delta_list,
+                "first_converged_k_1e_4": first_converged_k_1e_4,
+                "first_converged_k_5e_4": first_converged_k_5e_4,
+                "final_conv_score": final_conv_score,
+            }
+
+            return curr_output, actual_iter, final_conv_score
+
+        # Training-time fixed branch: 기존 코드 유지
         k = self.cfg.backprop_depth
         n_no_grad = max(0, total - k)
 
@@ -296,6 +430,8 @@ class VLARecurrent(nn.Module):
             state = self._run_one_iteration(state, prelude_out, h_a, h_t, p)
 
         return self._get_output(state, h_a, h_t, p)
+
+        #여기까지가 수정한 metric 측정용 fixed branch
 
 
 class ActionHeadRecurrent(nn.Module):

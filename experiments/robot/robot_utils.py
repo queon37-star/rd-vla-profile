@@ -109,7 +109,21 @@ def get_action(
     """Query the model to get action predictions."""
     with torch.no_grad():
         if cfg.model_family == "openvla":
-            actions, actual_iters, final_kl = get_vla_action(
+            # 원본 반환값 수신 코드
+            # actions, actual_iters, final_kl = get_vla_action(
+            #     cfg=cfg,
+            #     vla=model,
+            #     processor=processor,
+            #     obs=obs,
+            #     task_label=task_label,
+            #     action_head=action_head,
+            #     proprio_projector=proprio_projector,
+            #     use_film=use_film,
+            #     use_minivlm=use_minivlm
+            # )
+
+            # recurrence debug metric 전달을 위해 수정한 코드
+            actions, actual_iters, final_kl, recurrence_debug = get_vla_action(
                 cfg=cfg,
                 vla=model,
                 processor=processor,
@@ -123,7 +137,11 @@ def get_action(
         else:
             raise ValueError(f"Unsupported model family: {cfg.model_family}")
 
-    return actions, actual_iters, final_kl
+    # 원본 반환 코드
+    # return actions, actual_iters, final_kl
+
+    # recurrence debug metric 전달을 위해 수정한 반환 코드
+    return actions, actual_iters, final_kl, recurrence_debug
 
 
 def normalize_gripper_action(action: np.ndarray, binarize: bool = True) -> np.ndarray:

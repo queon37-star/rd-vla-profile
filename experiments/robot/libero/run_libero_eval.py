@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import sys
+import time
 from collections import deque
 from dataclasses import dataclass
 from enum import Enum
@@ -9,6 +10,7 @@ from pathlib import Path
 from typing import Optional, Union
 
 import cv2
+import torch
 import draccus
 import numpy as np
 import tqdm
@@ -144,6 +146,10 @@ class GenerateConfig:
     # JSON results logging
     json_log_file: str = ""           # Path to save JSON results (empty = disabled)
 
+    # Step-level recurrence metric log.
+    # If empty, the path will be derived from json_log_file.
+    step_log_file: str = ""
+
 
 
 def validate_config(cfg: GenerateConfig) -> None:
@@ -273,6 +279,30 @@ def log_message(message: str, log_file=None):
         log_file.flush()
 
 
+def append_jsonl(path, records):
+    """Append a list of dict records to a JSONL file."""
+    if not path or not records:
+        return
+
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+
+    with open(path, "a", encoding="utf-8") as f:
+        for record in records:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def get_step_log_file(cfg):
+    if getattr(cfg, "step_log_file", None):
+        return cfg.step_log_file
+
+    json_log_file = getattr(cfg, "json_log_file", None)
+    if json_log_file:
+        root, _ = os.path.splitext(json_log_file)
+        return root + "_step_log.jsonl"
+
+    return None
+
+
 
 def load_initial_states(cfg: GenerateConfig, task_suite, task_id: int, log_file=None):
     """Load initial states for the given task."""
@@ -320,6 +350,23 @@ def process_action(action, model_family):
 
 
 
+# 원본 run_episode 함수 시그니처
+# def run_episode(
+#     cfg: GenerateConfig,
+#     env,
+#     task_description: str,
+#     model,
+#     resize_size,
+#     processor=None,
+#     action_head=None,
+#     proprio_projector=None,
+#
+#     initial_state=None,
+#     log_file=None,
+#     global_iters=None,
+# ):
+
+
 def run_episode(
     cfg: GenerateConfig,
     env,
@@ -333,6 +380,8 @@ def run_episode(
     initial_state=None,
     log_file=None,
     global_iters=None,
+    task_id=None,
+    episode_idx=None,
 ):
     """Run a single episode in the environment."""
     env.reset()
@@ -349,6 +398,11 @@ def run_episode(
     action_queue = deque()
     episode_iters = []
     replay_stats = []  # (iters, num_actions) per prediction
+    episode_action_latencies_ms = []
+    episode_step_logs = []
+    prediction_step = 0
+    prev_action_vec = None
+    prev_proprio_vec = None
 
     success = False
     try:
@@ -362,7 +416,29 @@ def run_episode(
             replay_images.append(img)
 
             if len(action_queue) == 0:
-                actions, actual_iters, final_kl = get_action(
+                proprio_before_pred = None
+                if "state" in observation:
+                    proprio_before_pred = np.array(observation["state"], dtype=np.float32).reshape(-1).copy()
+
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+                action_start = time.perf_counter()
+
+                # 원본 action prediction 호출 코드
+                # actions, actual_iters, final_kl = get_action(
+                #     cfg,
+                #     model,
+                #     observation,
+                #     task_description,
+                #     processor=processor,
+                #     action_head=action_head,
+                #     proprio_projector=proprio_projector,
+                #     use_film=cfg.use_film,
+                #     use_minivlm=cfg.use_minivlm
+                # )
+
+                # recurrence debug metric 전달을 위해 수정한 호출 코드
+                actions, actual_iters, final_kl, recurrence_debug = get_action(
                     cfg,
                     model,
                     observation,
@@ -374,8 +450,63 @@ def run_episode(
                     use_minivlm=cfg.use_minivlm
                 )
 
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+                action_latency_ms = (time.perf_counter() - action_start) * 1000.0
+                episode_action_latencies_ms.append(action_latency_ms)
+                log_message(
+                    f"  Action inference latency: {action_latency_ms:.2f} ms, iters={actual_iters}",
+                    log_file,
+                )
+
                 if actual_iters is not None:
                     episode_iters.append(actual_iters)
+
+                curr_action_vec = None
+                if actions is not None and len(actions) > 0:
+                    curr_action_vec = np.asarray(actions, dtype=np.float32).reshape(-1)
+
+                prev_action_delta = None
+                if prev_action_vec is not None and curr_action_vec is not None:
+                    prev_action_delta = float(np.linalg.norm(curr_action_vec - prev_action_vec))
+
+                proprio_delta = None
+                if prev_proprio_vec is not None and proprio_before_pred is not None:
+                    proprio_delta = float(np.linalg.norm(proprio_before_pred - prev_proprio_vec))
+
+                debug = recurrence_debug or {}
+                recurrence_strategy = getattr(cfg, "recurrence_strategy", None)
+                recurrent_num_iter = getattr(cfg, "recurrent_num_iter", None)
+                fixed_k = int(recurrent_num_iter) if recurrence_strategy == "fixed" and recurrent_num_iter is not None else None
+                threshold = (
+                    float(getattr(cfg, "recurrence_kl_thresh", 0.001))
+                    if recurrence_strategy == "kl_divergence"
+                    else None
+                )
+
+                episode_step_logs.append({
+                    "task_id": task_id,
+                    "task_name": task_description,
+                    "episode_id": episode_idx,
+                    "prediction_step": prediction_step,
+                    "method": recurrence_strategy,
+                    "threshold": threshold,
+                    "fixed_K": fixed_k,
+                    "K_t": debug.get("K_t", actual_iters),
+                    "final_conv_score": debug.get("final_conv_score", final_kl),
+                    "conv_score_list": debug.get("conv_score_list", []),
+                    "action_delta_list": debug.get("action_delta_list", []),
+                    "first_converged_k_1e_4": debug.get("first_converged_k_1e_4", None),
+                    "first_converged_k_5e_4": debug.get("first_converged_k_5e_4", None),
+                    "prev_action_delta": prev_action_delta,
+                    "proprio_delta": proprio_delta,
+                    "latency_ms": action_latency_ms,
+                    "success": None,
+                })
+
+                prediction_step += 1
+                prev_action_vec = curr_action_vec
+                prev_proprio_vec = proprio_before_pred
 
                 if cfg.use_linear_decay_horizon and actual_iters is not None:
                     num_actions = calculate_linear_decay_horizon(actual_iters)
@@ -404,8 +535,14 @@ def run_episode(
                 else:
                     num_actions = cfg.num_exec_actions
 
-                replay_stats.append((actual_iters or 0, num_actions))
+                # 원본 action queue 삽입 코드
+                # replay_stats.append((actual_iters or 0, num_actions))
+                # for i in range(num_actions):
+                #     action_queue.append(actions[i])
 
+                # num_actions가 반환된 action chunk 길이를 넘지 않도록 수정한 코드
+                num_actions = min(num_actions, len(actions))
+                replay_stats.append((actual_iters or 0, num_actions))
                 for i in range(num_actions):
                     action_queue.append(actions[i])
 
@@ -419,6 +556,30 @@ def run_episode(
 
     except Exception as e:
         log_message(f"Episode error: {e}", log_file)
+
+    if episode_action_latencies_ms:
+        lat = np.array(episode_action_latencies_ms, dtype=np.float64)
+        warmup_skip = min(2, len(lat))
+        steady_lat = lat[warmup_skip:] if len(lat) > warmup_skip else lat
+
+        log_message(
+            f"  Action latency summary: {len(lat)} preds, "
+            f"raw_avg={np.mean(lat):.2f} ms, "
+            f"raw_p95={np.percentile(lat, 95):.2f} ms, "
+            f"first={lat[0]:.2f} ms, "
+            f"second={(lat[1] if len(lat) > 1 else float('nan')):.2f} ms, "
+            f"steady_skip={warmup_skip}, "
+            f"steady_avg={np.mean(steady_lat):.2f} ms, "
+            f"steady_median={np.median(steady_lat):.2f} ms, "
+            f"steady_p90={np.percentile(steady_lat, 90):.2f} ms, "
+            f"steady_p95={np.percentile(steady_lat, 95):.2f} ms",
+            log_file,
+        )
+
+    for record in episode_step_logs:
+        record["success"] = bool(success)
+
+    append_jsonl(get_step_log_file(cfg), episode_step_logs)
 
     return success, replay_images, episode_iters, replay_stats
 
@@ -464,10 +625,20 @@ def run_task(
 
         log_message(f"Starting episode {task_episodes + 1}...", log_file)
 
+        # 원본 run_episode 호출 코드
+        # success, replay_images, episode_iters, replay_stats = run_episode(
+        #     cfg, env, task_description, model, resize_size, processor,
+        #     action_head, proprio_projector, initial_state, log_file,
+        #     global_iters=all_iters,
+        # )
+
+        # step-level recurrence log를 위해 task/episode id를 전달하는 호출 코드
         success, replay_images, episode_iters, replay_stats = run_episode(
             cfg, env, task_description, model, resize_size, processor,
             action_head, proprio_projector, initial_state, log_file,
             global_iters=all_iters,
+            task_id=task_id,
+            episode_idx=episode_idx,
         )
 
         if episode_iters:
@@ -546,6 +717,11 @@ def eval_libero(cfg: GenerateConfig) -> float:
     model, action_head, proprio_projector, processor = initialize_model(cfg)
     resize_size = get_image_resize_size(cfg)
     log_file, local_log_filepath, run_id = setup_logging(cfg)
+
+    step_log_path = get_step_log_file(cfg)
+    if step_log_path and os.path.exists(step_log_path):
+        os.remove(step_log_path)
+        log_message(f"Removed existing step log file: {step_log_path}", log_file)
 
     benchmark_dict = benchmark.get_benchmark_dict()
     task_suite = benchmark_dict[cfg.task_suite_name]()

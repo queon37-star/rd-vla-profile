@@ -372,27 +372,56 @@ def get_vla_action(
             obs["state"] = normalize_proprio(proprio, proprio_norm_stats)
             proprio = obs["state"]
 
+        # 원본 recurrence 호출/반환 코드
+        # actual_iters = None
+        # final_kl = None
+        # if action_head is None:
+        #     action, _, actual_iters, final_kl = vla.predict_action(**inputs, unnorm_key=cfg.unnorm_key, do_sample=False)
+        # else:
+        #     convergence_strategy = getattr(cfg, 'recurrence_strategy', 'fixed')
+        #     if convergence_strategy == 'fixed':
+        #         convergence_strategy = None
+        #     action, _, actual_iters, final_kl = vla.predict_action(
+        #         **inputs, unnorm_key=cfg.unnorm_key, do_sample=False,
+        #         proprio=proprio, proprio_projector=proprio_projector,
+        #         action_head=action_head, use_film=use_film,
+        #         num_iter=getattr(cfg, 'recurrent_num_iter', None),
+        #         convergence_strategy=convergence_strategy,
+        #         kl_thresh=getattr(cfg, 'recurrence_kl_thresh', 0.001),
+        #         cos_thresh=getattr(cfg, 'recurrence_cos_thresh', 0.999),
+        #         max_iter=getattr(cfg, 'recurrence_max_iter', 32),
+        #     )
+
+        # recurrence debug metric 전달을 위해 수정한 코드
         actual_iters = None
         final_kl = None
+        recurrence_debug = None
         if action_head is None:
-            action, _, actual_iters, final_kl = vla.predict_action(**inputs, unnorm_key=cfg.unnorm_key, do_sample=False)
+            action, _, actual_iters, final_kl = vla.predict_action(
+                **inputs, unnorm_key=cfg.unnorm_key, do_sample=False
+            )
         else:
-            convergence_strategy = getattr(cfg, 'recurrence_strategy', 'fixed')
-            if convergence_strategy == 'fixed':
+            convergence_strategy = getattr(cfg, "recurrence_strategy", "fixed")
+            if convergence_strategy == "fixed":
                 convergence_strategy = None
             action, _, actual_iters, final_kl = vla.predict_action(
                 **inputs, unnorm_key=cfg.unnorm_key, do_sample=False,
                 proprio=proprio, proprio_projector=proprio_projector,
                 action_head=action_head, use_film=use_film,
-                num_iter=getattr(cfg, 'recurrent_num_iter', None),
+                num_iter=getattr(cfg, "recurrent_num_iter", None),
                 convergence_strategy=convergence_strategy,
-                kl_thresh=getattr(cfg, 'recurrence_kl_thresh', 0.001),
-                cos_thresh=getattr(cfg, 'recurrence_cos_thresh', 0.999),
-                max_iter=getattr(cfg, 'recurrence_max_iter', 32),
+                kl_thresh=getattr(cfg, "recurrence_kl_thresh", 0.001),
+                cos_thresh=getattr(cfg, "recurrence_cos_thresh", 0.999),
+                max_iter=getattr(cfg, "recurrence_max_iter", 32),
             )
+            recurrence_debug = getattr(getattr(action_head, "model", None), "last_recurrence_debug", None)
 
     actions = [action[i] for i in range(min(len(action), cfg.num_open_loop_steps))]
-    return actions, actual_iters, final_kl
+    # 원본 반환 코드
+    # return actions, actual_iters, final_kl
+
+    # recurrence debug metric 전달을 위해 수정한 반환 코드
+    return actions, actual_iters, final_kl, recurrence_debug
 
 
 def get_action_from_server(

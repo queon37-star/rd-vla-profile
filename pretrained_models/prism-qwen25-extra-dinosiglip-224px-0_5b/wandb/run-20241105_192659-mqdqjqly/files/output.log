@@ -1,0 +1,43 @@
+11/05 [19:26:59] INFO     | >> [*] Starting Training Loop        pretrain.py:227
+Traceback (most recent call last):                                                    
+  File "/hai/scratch/belkhale/openvla-mini/scripts/pretrain.py", line 241, in <module>
+    pretrain()
+  File "/hai/scratch/belkhale/miniforge3/envs/vla/lib/python3.10/site-packages/draccus/argparsing.py", line 203, in wrapper_inner
+    response = fn(cfg, *args, **kwargs)
+  File "/hai/scratch/belkhale/openvla-mini/scripts/pretrain.py", line 228, in pretrain
+    train_strategy.run_training(train_dataset, collator, metrics, stage=cfg.stage, seed=cfg.seed)
+  File "/hai/scratch/belkhale/openvla-mini/prismatic/training/strategies/base_strategy.py", line 190, in run_training
+    output: CausalLMOutputWithPast = self.vlm(
+  File "/hai/scratch/belkhale/miniforge3/envs/vla/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1511, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/hai/scratch/belkhale/miniforge3/envs/vla/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1520, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/hai/scratch/belkhale/miniforge3/envs/vla/lib/python3.10/site-packages/torch/distributed/fsdp/fully_sharded_data_parallel.py", line 849, in forward
+    output = self._fsdp_wrapped_module(*args, **kwargs)
+  File "/hai/scratch/belkhale/miniforge3/envs/vla/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1511, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/hai/scratch/belkhale/miniforge3/envs/vla/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1520, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/hai/scratch/belkhale/openvla-mini/prismatic/models/vlms/prismatic.py", line 470, in forward
+    return self.llm_backbone(
+  File "/hai/scratch/belkhale/miniforge3/envs/vla/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1511, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/hai/scratch/belkhale/miniforge3/envs/vla/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1520, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/hai/scratch/belkhale/openvla-mini/prismatic/models/backbones/llm/base_llm.py", line 221, in forward
+    output: CausalLMOutputWithPast = self.llm(
+  File "/hai/scratch/belkhale/miniforge3/envs/vla/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1511, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/hai/scratch/belkhale/miniforge3/envs/vla/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1520, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/hai/scratch/belkhale/miniforge3/envs/vla/lib/python3.10/site-packages/transformers/models/qwen2/modeling_qwen2.py", line 1196, in forward
+    loss = loss_fct(shift_logits, shift_labels)
+  File "/hai/scratch/belkhale/miniforge3/envs/vla/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1511, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/hai/scratch/belkhale/miniforge3/envs/vla/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1520, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/hai/scratch/belkhale/miniforge3/envs/vla/lib/python3.10/site-packages/torch/nn/modules/loss.py", line 1179, in forward
+    return F.cross_entropy(input, target, weight=self.weight,
+  File "/hai/scratch/belkhale/miniforge3/envs/vla/lib/python3.10/site-packages/torch/nn/functional.py", line 3059, in cross_entropy
+    return torch._C._nn.cross_entropy_loss(input, target, weight, _Reduction.get_enum(reduction), ignore_index, label_smoothing)
+torch.cuda.OutOfMemoryError: CUDA out of memory. Tried to allocate 24.57 GiB. GPU 0 has a total capacity of 79.10 GiB of which 20.18 GiB is free. Including non-PyTorch memory, this process has 58.91 GiB memory in use. Of the allocated memory 52.22 GiB is allocated by PyTorch, and 798.66 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)

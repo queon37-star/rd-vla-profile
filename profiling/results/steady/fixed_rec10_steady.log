@@ -1,0 +1,70 @@
+2026-05-11 02:07:06.861603: I tensorflow/core/util/port.cc:113] oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders. To turn them off, set the environment variable `TF_ENABLE_ONEDNN_OPTS=0`.
+2026-05-11 02:07:06.890111: E external/local_xla/xla/stream_executor/cuda/cuda_dnn.cc:9261] Unable to register cuDNN factory: Attempting to register factory for plugin cuDNN when one has already been registered
+2026-05-11 02:07:06.890177: E external/local_xla/xla/stream_executor/cuda/cuda_fft.cc:607] Unable to register cuFFT factory: Attempting to register factory for plugin cuFFT when one has already been registered
+2026-05-11 02:07:06.891436: E external/local_xla/xla/stream_executor/cuda/cuda_blas.cc:1515] Unable to register cuBLAS factory: Attempting to register factory for plugin cuBLAS when one has already been registered
+2026-05-11 02:07:06.896890: I tensorflow/core/platform/cpu_feature_guard.cc:182] This TensorFlow binary is optimized to use available CPU instructions in performance-critical operations.
+To enable the following instructions: AVX2 AVX512F AVX512_VNNI AVX512_BF16 FMA, in other operations, rebuild TensorFlow with the appropriate compiler flags.
+2026-05-11 02:07:07.384655: W tensorflow/compiler/tf2tensorrt/utils/py_utils.cc:38] TF-TRT Warning: Could not find TensorRT
+[robosuite WARNING] No private macro file found! (macros.py:53)
+[robosuite WARNING] It is recommended to use a private macro file (macros.py:54)
+[robosuite WARNING] To setup, run: python /home/siwon/miniconda3/envs/rdvla_env/lib/python3.10/site-packages/robosuite/scripts/setup_macros.py (macros.py:55)
+Gym has been unmaintained since 2022 and does not support NumPy 2.0 amongst other critical functionality.
+Please upgrade to Gymnasium, the maintained drop-in replacement of Gym, or contact the authors of your software and request that they upgrade.
+Users of this version of Gym should be able to simply replace 'import gym' with 'import gymnasium as gym' in the vast majority of cases.
+See the migration guide at https://gymnasium.farama.org/introduction/migration_guide/ for additional information.
+2026-05-11 02:07:09.440627: I external/local_xla/xla/stream_executor/cuda/cuda_executor.cc:887] could not open file to read NUMA node: /sys/bus/pci/devices/0000:01:00.0/numa_node
+Your kernel may have been built without NUMA support.
+2026-05-11 02:07:09.441535: I external/local_xla/xla/stream_executor/cuda/cuda_executor.cc:887] could not open file to read NUMA node: /sys/bus/pci/devices/0000:01:00.0/numa_node
+Your kernel may have been built without NUMA support.
+2026-05-11 02:07:09.441583: I external/local_xla/xla/stream_executor/cuda/cuda_executor.cc:887] could not open file to read NUMA node: /sys/bus/pci/devices/0000:01:00.0/numa_node
+Your kernel may have been built without NUMA support.
+Using LIBERO constants:
+  NUM_ACTIONS_CHUNK = 8
+  ACTION_DIM = 7
+  PROPRIO_DIM = 8
+  ACTION_PROPRIO_NORMALIZATION_TYPE = bounds_q99
+If needed, manually set the correct constants in `prismatic/vla/constants.py`!
+Instantiating pretrained VLA policy...
+Loaded model: <class 'prismatic.extern.hf.modeling_prismatic.OpenVLAForActionPrediction'>
+Auto-detected action head type: ActionHeadRecurrentPro
+05/11 [02:07:24] INFO     | >> Logging to local log file: ./experiments/logs/EVAL-libero_spatial-openvla-2026_05_11-02_07_15.txt                               run_libero_eval.py:257
+[info] using task orders [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+                 INFO     | >> Task suite: libero_spatial                                                                                                      run_libero_eval.py:272
+                 INFO     | >> Running only task 0                                                                                                             run_libero_eval.py:272
+  0%|          | 0/1 [00:00<?, ?it/s]                 INFO     | >> Using default initial states                                                                                                    run_libero_eval.py:272
+
+  0%|          | 0/1 [00:00<?, ?it/s][A05/11 [02:07:26] INFO     | >>                                                                                                                                 run_libero_eval.py:272
+                          Task: pick up the black bowl between the plate and the ramekin and place it on the plate                                                                   
+                 INFO     | >> Starting episode 1...                                                                                                           run_libero_eval.py:272
+05/11 [02:07:29] INFO     | >>   Action inference latency: 524.19 ms, iters=None                                                                               run_libero_eval.py:272
+05/11 [02:07:30] INFO     | >>   Action inference latency: 75.55 ms, iters=None                                                                                run_libero_eval.py:272
+                 INFO     | >>   Action inference latency: 75.11 ms, iters=None                                                                                run_libero_eval.py:272
+05/11 [02:07:31] INFO     | >>   Action inference latency: 98.00 ms, iters=None                                                                                run_libero_eval.py:272
+05/11 [02:07:32] INFO     | >>   Action inference latency: 114.54 ms, iters=None                                                                               run_libero_eval.py:272
+05/11 [02:07:33] INFO     | >>   Action inference latency: 107.54 ms, iters=None                                                                               run_libero_eval.py:272
+                 INFO     | >>   Action inference latency: 101.35 ms, iters=None                                                                               run_libero_eval.py:272
+05/11 [02:07:34] INFO     | >>   Action inference latency: 102.17 ms, iters=None                                                                               run_libero_eval.py:272
+05/11 [02:07:35] INFO     | >>   Action inference latency: 99.27 ms, iters=None                                                                                run_libero_eval.py:272
+                 INFO     | >>   Action inference latency: 98.94 ms, iters=None                                                                                run_libero_eval.py:272
+05/11 [02:07:36] INFO     | >>   Action inference latency: 112.42 ms, iters=None                                                                               run_libero_eval.py:272
+05/11 [02:07:37] INFO     | >>   Action inference latency: 313.50 ms, iters=None                                                                               run_libero_eval.py:272
+05/11 [02:07:38] INFO     | >>   Action inference latency: 74.81 ms, iters=None                                                                                run_libero_eval.py:272
+                 INFO     | >>   Action inference latency: 76.05 ms, iters=None                                                                                run_libero_eval.py:272
+05/11 [02:07:39] INFO     | >>   Action inference latency: 95.03 ms, iters=None                                                                                run_libero_eval.py:272
+05/11 [02:07:40] INFO     | >>   Action inference latency: 107.71 ms, iters=None                                                                               run_libero_eval.py:272
+                 INFO     | >>   Action latency summary: 16 preds, raw_avg=136.01 ms, raw_p95=366.18 ms, first=524.19 ms, second=75.55 ms, steady_skip=2,      run_libero_eval.py:272
+                          steady_avg=112.60 ms, steady_median=100.31 ms, steady_p90=113.90 ms, steady_p95=184.18 ms                                                                  
+Saved rollout MP4 (with stats) at path ./rollouts/rd-vla/2026_05_11/2026_05_11-02_07_15--episode=1--success=True--task=pick_up_the_black_bowl_between_the_plate_and_the_r.mp4
+                 INFO     | >> Success: True                                                                                                                   run_libero_eval.py:272
+                 INFO     | >> # episodes completed so far: 1                                                                                                  run_libero_eval.py:272
+                 INFO     | >> # successes: 1 (100.0%)                                                                                                         run_libero_eval.py:272
+
+100%|██████████| 1/1 [00:14<00:00, 14.21s/it][A100%|██████████| 1/1 [00:14<00:00, 14.21s/it]
+                 INFO     | >> Current task success rate: 1.0                                                                                                  run_libero_eval.py:272
+                 INFO     | >> Current total success rate: 1.0                                                                                                 run_libero_eval.py:272
+100%|██████████| 1/1 [00:16<00:00, 16.18s/it]100%|██████████| 1/1 [00:16<00:00, 16.18s/it]
+                 INFO     | >> Saved JSON results to profiling/results/steady/fixed_rec10_steady.json                                                          run_libero_eval.py:272
+                 INFO     | >> Final results:                                                                                                                  run_libero_eval.py:272
+                 INFO     | >> Total episodes: 1                                                                                                               run_libero_eval.py:272
+                 INFO     | >> Total successes: 1                                                                                                              run_libero_eval.py:272
+                 INFO     | >> Overall success rate: 1.0000 (100.0%)                                                                                           run_libero_eval.py:272

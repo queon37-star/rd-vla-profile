@@ -1,0 +1,26 @@
+2024-11-05 19:25:02,890 INFO    MainThread:2182724 [wandb_setup.py:_flush():79] Current SDK version is 0.18.5
+2024-11-05 19:25:02,890 INFO    MainThread:2182724 [wandb_setup.py:_flush():79] Configure stats pid to 2182724
+2024-11-05 19:25:02,890 INFO    MainThread:2182724 [wandb_setup.py:_flush():79] Loading settings from /hai/scratch/belkhale/.config/wandb/settings
+2024-11-05 19:25:02,890 INFO    MainThread:2182724 [wandb_setup.py:_flush():79] Loading settings from /hai/scratch/belkhale/openvla-mini/wandb/settings
+2024-11-05 19:25:02,890 INFO    MainThread:2182724 [wandb_setup.py:_flush():79] Loading settings from environment variables: {'_service_wait': '300'}
+2024-11-05 19:25:02,890 INFO    MainThread:2182724 [wandb_setup.py:_flush():79] Applying setup settings: {'mode': None, '_disable_service': None}
+2024-11-05 19:25:02,890 INFO    MainThread:2182724 [wandb_setup.py:_flush():79] Inferring run settings from compute environment: {'program_relpath': 'scripts/pretrain.py', 'program_abspath': '/hai/scratch/belkhale/openvla-mini/scripts/pretrain.py', 'program': '/hai/scratch/belkhale/openvla-mini/scripts/pretrain.py'}
+2024-11-05 19:25:02,890 INFO    MainThread:2182724 [wandb_setup.py:_flush():79] Applying login settings: {}
+2024-11-05 19:25:02,890 INFO    MainThread:2182724 [wandb_init.py:_log_setup():534] Logging user logs to runs/prism-qwen25-extra-dinosiglip-224px+0_5b+stage-finetune+x7/wandb/run-20241105_192502-8vxhoj6d/logs/debug.log
+2024-11-05 19:25:02,890 INFO    MainThread:2182724 [wandb_init.py:_log_setup():535] Logging internal logs to runs/prism-qwen25-extra-dinosiglip-224px+0_5b+stage-finetune+x7/wandb/run-20241105_192502-8vxhoj6d/logs/debug-internal.log
+2024-11-05 19:25:02,890 INFO    MainThread:2182724 [wandb_init.py:init():621] calling init triggers
+2024-11-05 19:25:02,890 INFO    MainThread:2182724 [wandb_init.py:init():628] wandb.init called with sweep_config: {}
+config: {'model': {'type': 'prism-qwen25-extra-dinosiglip-224px+0_5b', 'model_id': 'prism-qwen25-extra-dinosiglip-224px+0_5b', 'arch_specifier': 'no-align+fused-gelu-mlp', 'vision_backbone_id': 'dinosiglip-vit-so-224px', 'llm_backbone_id': 'qwen25-0_5b-extra', 'image_resize_strategy': 'resize-naive', 'llm_max_length': 32768, 'align_epochs': 1, 'align_max_steps': None, 'align_save_every_n_steps': 10000, 'align_global_batch_size': 96, 'align_per_device_batch_size': 16, 'align_learning_rate': 0.001, 'align_weight_decay': 0.0, 'align_max_grad_norm': 1.0, 'align_lr_scheduler_type': 'linear-warmup+cosine-decay', 'align_warmup_ratio': 0.03, 'align_train_strategy': 'fsdp-shard-grad-op', 'finetune_epochs': 2, 'finetune_max_steps': None, 'finetune_save_every_n_steps': 10000, 'finetune_global_batch_size': 128, 'finetune_per_device_batch_size': 16, 'finetune_learning_rate': 2e-05, 'finetune_weight_decay': 0.1, 'finetune_max_grad_norm': 1.0, 'finetune_lr_scheduler_type': 'linear-warmup+cosine-decay', 'finetune_warmup_ratio': 0.03, 'finetune_train_strategy': 'fsdp-full-shard', 'enable_gradient_checkpointing': True, 'enable_mixed_precision_training': True, 'reduce_in_full_precision': False}, 'dataset': {'type': 'llava-v15', 'dataset_id': 'llava-v15', 'align_stage_components': ['download/llava-laion-cc-sbu-558k/chat.json', 'download/llava-laion-cc-sbu-558k'], 'finetune_stage_components': ['download/llava-v1.5-instruct/llava_v1_5_mix665k.json', 'download/llava-v1.5-instruct'], 'dataset_root_dir': '/hai/scratch/belkhale/datasets/prismatic-vlms'}, 'stage': 'finetune', 'pretrained_checkpoint': None, 'run_id': 'prism-qwen25-extra-dinosiglip-224px+0_5b+stage-finetune+x7', 'run_root_dir': 'runs', 'seed': 7, 'hf_token': '.hf_token', 'trackers': ['jsonl', 'wandb'], 'wandb_project': 'prismatic', 'wandb_entity': None}
+2024-11-05 19:25:02,890 INFO    MainThread:2182724 [wandb_init.py:init():671] starting backend
+2024-11-05 19:25:02,890 INFO    MainThread:2182724 [wandb_init.py:init():675] sending inform_init request
+2024-11-05 19:25:02,891 INFO    MainThread:2182724 [backend.py:_multiprocessing_setup():104] multiprocessing start_methods=fork,spawn,forkserver, using: spawn
+2024-11-05 19:25:02,892 INFO    MainThread:2182724 [wandb_init.py:init():688] backend started and connected
+2024-11-05 19:25:02,893 INFO    MainThread:2182724 [wandb_init.py:init():783] updated telemetry
+2024-11-05 19:25:03,020 INFO    MainThread:2182724 [wandb_init.py:init():816] communicating run to backend with 90.0 second timeout
+2024-11-05 19:25:03,377 INFO    MainThread:2182724 [wandb_init.py:init():867] starting run threads in backend
+2024-11-05 19:25:05,102 INFO    MainThread:2182724 [wandb_run.py:_console_start():2463] atexit reg
+2024-11-05 19:25:05,102 INFO    MainThread:2182724 [wandb_run.py:_redirect():2311] redirect: wrap_raw
+2024-11-05 19:25:05,103 INFO    MainThread:2182724 [wandb_run.py:_redirect():2376] Wrapping output streams.
+2024-11-05 19:25:05,103 INFO    MainThread:2182724 [wandb_run.py:_redirect():2401] Redirects installed.
+2024-11-05 19:25:05,128 INFO    MainThread:2182724 [wandb_init.py:init():911] run started, returning control to user process
+2024-11-05 19:25:25,783 WARNING MsgRouterThr:2182724 [router.py:message_loop():77] message_loop has been closed

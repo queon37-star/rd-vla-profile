@@ -1,0 +1,993 @@
+Task suite: libero_spatial
+Using default initial states
+
+Task: pick up the black bowl between the plate and the ramekin and place it on the plate
+Starting episode 1...
+  Action inference latency: 403.27 ms, iters=6
+  Action inference latency: 137.33 ms, iters=6
+  Action inference latency: 142.15 ms, iters=6
+  Action inference latency: 166.97 ms, iters=9
+  Action inference latency: 164.89 ms, iters=8
+  Action inference latency: 150.53 ms, iters=8
+  Action inference latency: 169.22 ms, iters=10
+  Action inference latency: 164.76 ms, iters=10
+  Action inference latency: 152.06 ms, iters=8
+  Action inference latency: 159.53 ms, iters=9
+  Action inference latency: 156.57 ms, iters=9
+  Action inference latency: 171.67 ms, iters=11
+  Action inference latency: 174.11 ms, iters=12
+  Action inference latency: 152.02 ms, iters=8
+  Action inference latency: 148.45 ms, iters=8
+  Action inference latency: 156.00 ms, iters=10
+  Action latency summary: 16 preds, raw_avg=173.10 ms, raw_p95=231.40 ms, first=403.27 ms, second=137.33 ms, steady_skip=2, steady_avg=159.21 ms, steady_median=158.05 ms, steady_p90=170.93 ms, steady_p95=172.52 ms
+  Episode iters: 16 preds, avg=8.6
+Saved rollout MP4 (with stats) at path ./rollouts/rd-vla/2026_05_16/2026_05_16-00_55_32--episode=1--success=True--task=pick_up_the_black_bowl_between_the_plate_and_the_r.mp4
+Success: True
+# episodes completed so far: 1
+# successes: 1 (100.0%)
+
+Task: pick up the black bowl between the plate and the ramekin and place it on the plate
+Starting episode 2...
+  Action inference latency: 169.82 ms, iters=8
+  Action inference latency: 165.27 ms, iters=6
+  Action inference latency: 165.41 ms, iters=7
+  Action inference latency: 162.10 ms, iters=9
+  Action inference latency: 130.97 ms, iters=7
+  Action inference latency: 122.16 ms, iters=8
+  Action inference latency: 148.95 ms, iters=12
+  Action inference latency: 128.05 ms, iters=9
+  Action inference latency: 147.27 ms, iters=9
+  Action inference latency: 130.06 ms, iters=9
+  Action inference latency: 143.99 ms, iters=10
+  Action inference latency: 151.69 ms, iters=14
+  Action inference latency: 154.27 ms, iters=13
+  Action inference latency: 127.57 ms, iters=8
+  Action inference latency: 128.94 ms, iters=8
+  Action inference latency: 144.47 ms, iters=12
+  Action latency summary: 16 preds, raw_avg=145.06 ms, raw_p95=166.52 ms, first=169.82 ms, second=165.27 ms, steady_skip=2, steady_avg=141.85 ms, steady_median=144.23 ms, steady_p90=159.75 ms, steady_p95=163.26 ms
+  Episode iters: 16 preds, avg=9.3
+Saved rollout MP4 (with stats) at path ./rollouts/rd-vla/2026_05_16/2026_05_16-00_55_32--episode=2--success=True--task=pick_up_the_black_bowl_between_the_plate_and_the_r.mp4
+Success: True
+# episodes completed so far: 2
+# successes: 2 (100.0%)
+
+Task: pick up the black bowl between the plate and the ramekin and place it on the plate
+Starting episode 3...
+  Action inference latency: 124.29 ms, iters=6
+  Action inference latency: 110.85 ms, iters=6
+  Action inference latency: 133.14 ms, iters=8
+  Action inference latency: 144.13 ms, iters=8
+  Action inference latency: 131.74 ms, iters=8
+  Action inference latency: 129.40 ms, iters=8
+  Action inference latency: 142.79 ms, iters=9
+  Action inference latency: 135.99 ms, iters=9
+  Action inference latency: 119.37 ms, iters=7
+  Action inference latency: 131.99 ms, iters=8
+  Action inference latency: 148.83 ms, iters=9
+  Action inference latency: 140.40 ms, iters=9
+  Action inference latency: 134.08 ms, iters=8
+  Action inference latency: 144.43 ms, iters=10
+  Action inference latency: 156.52 ms, iters=11
+  Action inference latency: 148.04 ms, iters=8
+  Action inference latency: 143.79 ms, iters=9
+  Action inference latency: 170.60 ms, iters=12
+  Action latency summary: 18 preds, raw_avg=138.35 ms, raw_p95=158.63 ms, first=124.29 ms, second=110.85 ms, steady_skip=2, steady_avg=140.95 ms, steady_median=141.59 ms, steady_p90=152.67 ms, steady_p95=160.04 ms
+  Episode iters: 18 preds, avg=8.5
+Saved rollout MP4 (with stats) at path ./rollouts/rd-vla/2026_05_16/2026_05_16-00_55_32--episode=3--success=True--task=pick_up_the_black_bowl_between_the_plate_and_the_r.mp4
+Success: True
+# episodes completed so far: 3
+# successes: 3 (100.0%)
+Current task success rate: 1.0
+Current total success rate: 1.0
+
+=== Task 0 Iteration Stats ===
+  Total predictions: 50
+  Avg iters (all): 8.80 +/- 1.84
+  Avg iters (success): 8.80 +/- 1.84
+Using default initial states
+
+Task: pick up the black bowl next to the ramekin and place it on the plate
+Starting episode 1...
+  Action inference latency: 122.37 ms, iters=6
+  Action inference latency: 109.69 ms, iters=5
+  Action inference latency: 123.16 ms, iters=6
+  Action inference latency: 128.73 ms, iters=6
+  Action inference latency: 125.96 ms, iters=6
+  Action inference latency: 123.57 ms, iters=7
+  Action inference latency: 123.22 ms, iters=8
+  Action inference latency: 138.33 ms, iters=8
+  Action inference latency: 139.91 ms, iters=8
+  Action inference latency: 139.72 ms, iters=9
+  Action inference latency: 136.25 ms, iters=8
+  Action inference latency: 154.40 ms, iters=9
+  Action inference latency: 140.91 ms, iters=10
+  Action inference latency: 130.46 ms, iters=9
+  Action inference latency: 140.58 ms, iters=9
+  Action inference latency: 140.82 ms, iters=7
+  Action inference latency: 122.17 ms, iters=7
+  Action inference latency: 119.67 ms, iters=7
+  Action inference latency: 140.57 ms, iters=11
+  Action inference latency: 141.59 ms, iters=8
+  Action inference latency: 154.53 ms, iters=13
+  Action latency summary: 21 preds, raw_avg=133.17 ms, raw_p95=154.40 ms, first=122.37 ms, second=109.69 ms, steady_skip=2, steady_avg=134.98 ms, steady_median=138.33 ms, steady_p90=144.15 ms, steady_p95=154.41 ms
+  Episode iters: 21 preds, avg=8.0
+Saved rollout MP4 (with stats) at path ./rollouts/rd-vla/2026_05_16/2026_05_16-00_55_32--episode=4--success=True--task=pick_up_the_black_bowl_next_to_the_ramekin_and_pla.mp4
+Success: True
+# episodes completed so far: 4
+# successes: 4 (100.0%)
+
+Task: pick up the black bowl next to the ramekin and place it on the plate
+Starting episode 2...
+  Action inference latency: 123.20 ms, iters=5
+  Action inference latency: 123.13 ms, iters=6
+  Action inference latency: 112.12 ms, iters=5
+  Action inference latency: 116.84 ms, iters=6
+  Action inference latency: 127.08 ms, iters=7
+  Action inference latency: 129.17 ms, iters=8
+  Action inference latency: 148.69 ms, iters=9
+  Action inference latency: 145.29 ms, iters=8
+  Action inference latency: 131.73 ms, iters=7
+  Action inference latency: 140.02 ms, iters=7
+  Action inference latency: 125.87 ms, iters=8
+  Action inference latency: 175.92 ms, iters=13
+  Action inference latency: 140.10 ms, iters=9
+  Action inference latency: 131.89 ms, iters=7
+  Action inference latency: 151.56 ms, iters=10
+  Action inference latency: 136.43 ms, iters=9
+  Action inference latency: 154.09 ms, iters=9
+  Action latency summary: 17 preds, raw_avg=136.07 ms, raw_p95=158.46 ms, first=123.20 ms, second=123.13 ms, steady_skip=2, steady_avg=137.79 ms, steady_median=136.43 ms, steady_p90=153.08 ms, steady_p95=160.64 ms
+  Episode iters: 17 preds, avg=7.8
+Saved rollout MP4 (with stats) at path ./rollouts/rd-vla/2026_05_16/2026_05_16-00_55_32--episode=5--success=True--task=pick_up_the_black_bowl_next_to_the_ramekin_and_pla.mp4
+Success: True
+# episodes completed so far: 5
+# successes: 5 (100.0%)
+
+Task: pick up the black bowl next to the ramekin and place it on the plate
+Starting episode 3...
+  Action inference latency: 133.66 ms, iters=6
+  Action inference latency: 114.43 ms, iters=5
+  Action inference latency: 114.15 ms, iters=5
+  Action inference latency: 125.90 ms, iters=6
+  Action inference latency: 129.29 ms, iters=6
+  Action inference latency: 122.79 ms, iters=7
+  Action inference latency: 131.07 ms, iters=8
+  Action inference latency: 132.96 ms, iters=8
+  Action inference latency: 129.02 ms, iters=7
+  Action inference latency: 151.69 ms, iters=10
+  Action inference latency: 124.28 ms, iters=6
+  Action inference latency: 136.36 ms, iters=9
+  Action inference latency: 140.95 ms, iters=11
+  Action inference latency: 134.04 ms, iters=9
+  Action inference latency: 144.06 ms, iters=9
+  Action inference latency: 125.10 ms, iters=7
+  Action inference latency: 132.22 ms, iters=7
+  Action inference latency: 134.63 ms, iters=8
+  Action inference latency: 129.59 ms, iters=8
+  Action inference latency: 135.34 ms, iters=9
+  Action inference latency: 135.89 ms, iters=8
+  Action inference latency: 144.00 ms, iters=11
+  Action latency summary: 22 preds, raw_avg=131.88 ms, raw_p95=144.06 ms, first=133.66 ms, second=114.43 ms, steady_skip=2, steady_avg=132.67 ms, steady_median=132.59 ms, steady_p90=144.00 ms, steady_p95=144.45 ms
+  Episode iters: 22 preds, avg=7.7
+Saved rollout MP4 (with stats) at path ./rollouts/rd-vla/2026_05_16/2026_05_16-00_55_32--episode=6--success=True--task=pick_up_the_black_bowl_next_to_the_ramekin_and_pla.mp4
+Success: True
+# episodes completed so far: 6
+# successes: 6 (100.0%)
+Current task success rate: 1.0
+Current total success rate: 1.0
+
+=== Task 1 Iteration Stats ===
+  Total predictions: 60
+  Avg iters (all): 7.83 +/- 1.81
+  Avg iters (success): 7.83 +/- 1.81
+Using default initial states
+
+Task: pick up the black bowl from table center and place it on the plate
+Starting episode 1...
+  Action inference latency: 131.81 ms, iters=6
+  Action inference latency: 137.68 ms, iters=6
+  Action inference latency: 137.56 ms, iters=6
+  Action inference latency: 181.14 ms, iters=8
+  Action inference latency: 142.76 ms, iters=8
+  Action inference latency: 151.24 ms, iters=8
+  Action inference latency: 155.16 ms, iters=8
+  Action inference latency: 182.42 ms, iters=11
+  Action inference latency: 140.32 ms, iters=7
+  Action inference latency: 139.21 ms, iters=7
+  Action inference latency: 144.95 ms, iters=8
+  Action inference latency: 159.10 ms, iters=9
+  Action inference latency: 155.89 ms, iters=8
+  Action inference latency: 143.75 ms, iters=8
+  Action inference latency: 145.99 ms, iters=6
+  Action inference latency: 154.76 ms, iters=7
+  Action inference latency: 154.53 ms, iters=8
+  Action inference latency: 155.72 ms, iters=7
+  Action inference latency: 147.58 ms, iters=7
+  Action inference latency: 172.23 ms, iters=11
+  Action latency summary: 20 preds, raw_avg=151.69 ms, raw_p95=181.20 ms, first=131.81 ms, second=137.68 ms, steady_skip=2, steady_avg=153.57 ms, steady_median=152.88 ms, steady_p90=174.91 ms, steady_p95=181.33 ms
+  Episode iters: 20 preds, avg=7.7
+Saved rollout MP4 (with stats) at path ./rollouts/rd-vla/2026_05_16/2026_05_16-00_55_32--episode=7--success=True--task=pick_up_the_black_bowl_from_table_center_and_place.mp4
+Success: True
+# episodes completed so far: 7
+# successes: 7 (100.0%)
+
+Task: pick up the black bowl from table center and place it on the plate
+Starting episode 2...
+  Action inference latency: 151.94 ms, iters=7
+  Action inference latency: 149.06 ms, iters=6
+  Action inference latency: 140.22 ms, iters=7
+  Action inference latency: 150.01 ms, iters=8
+  Action inference latency: 148.92 ms, iters=8
+  Action inference latency: 140.81 ms, iters=8
+  Action inference latency: 143.62 ms, iters=8
+  Action inference latency: 143.76 ms, iters=7
+  Action inference latency: 145.84 ms, iters=7
+  Action inference latency: 154.28 ms, iters=9
+  Action inference latency: 166.88 ms, iters=8
+  Action inference latency: 163.49 ms, iters=8
+  Action inference latency: 150.55 ms, iters=8
+  Action inference latency: 140.10 ms, iters=8
+  Action inference latency: 141.28 ms, iters=7
+  Action inference latency: 144.61 ms, iters=7
+  Action inference latency: 142.25 ms, iters=7
+  Action inference latency: 153.44 ms, iters=7
+  Action inference latency: 162.88 ms, iters=8
+  Action latency summary: 19 preds, raw_avg=149.16 ms, raw_p95=163.83 ms, first=151.94 ms, second=149.06 ms, steady_skip=2, steady_avg=149.00 ms, steady_median=145.84 ms, steady_p90=163.12 ms, steady_p95=164.17 ms
+  Episode iters: 19 preds, avg=7.5
+Saved rollout MP4 (with stats) at path ./rollouts/rd-vla/2026_05_16/2026_05_16-00_55_32--episode=8--success=True--task=pick_up_the_black_bowl_from_table_center_and_place.mp4
+Success: True
+# episodes completed so far: 8
+# successes: 8 (100.0%)
+
+Task: pick up the black bowl from table center and place it on the plate
+Starting episode 3...
+  Action inference latency: 136.93 ms, iters=6
+  Action inference latency: 133.37 ms, iters=6
+  Action inference latency: 127.46 ms, iters=6
+  Action inference latency: 152.16 ms, iters=8
+  Action inference latency: 154.37 ms, iters=8
+  Action inference latency: 139.20 ms, iters=7
+  Action inference latency: 148.73 ms, iters=8
+  Action inference latency: 142.54 ms, iters=7
+  Action inference latency: 148.18 ms, iters=8
+  Action inference latency: 156.63 ms, iters=8
+  Action inference latency: 146.64 ms, iters=8
+  Action inference latency: 137.34 ms, iters=6
+  Action inference latency: 178.11 ms, iters=8
+  Action inference latency: 169.75 ms, iters=9
+  Action inference latency: 165.97 ms, iters=9
+  Action inference latency: 152.35 ms, iters=7
+  Action inference latency: 158.60 ms, iters=7
+  Action inference latency: 167.66 ms, iters=9
+  Action latency summary: 18 preds, raw_avg=150.89 ms, raw_p95=171.01 ms, first=136.93 ms, second=133.37 ms, steady_skip=2, steady_avg=152.86 ms, steady_median=152.25 ms, steady_p90=168.70 ms, steady_p95=171.84 ms
+  Episode iters: 18 preds, avg=7.5
+Saved rollout MP4 (with stats) at path ./rollouts/rd-vla/2026_05_16/2026_05_16-00_55_32--episode=9--success=True--task=pick_up_the_black_bowl_from_table_center_and_place.mp4
+Success: True
+# episodes completed so far: 9
+# successes: 9 (100.0%)
+Current task success rate: 1.0
+Current total success rate: 1.0
+
+=== Task 2 Iteration Stats ===
+  Total predictions: 57
+  Avg iters (all): 7.58 +/- 1.08
+  Avg iters (success): 7.58 +/- 1.08
+Using default initial states
+
+Task: pick up the black bowl on the cookie box and place it on the plate
+Starting episode 1...
+  Action inference latency: 151.06 ms, iters=6
+  Action inference latency: 146.87 ms, iters=5
+  Action inference latency: 128.85 ms, iters=5
+  Action inference latency: 143.88 ms, iters=6
+  Action inference latency: 149.62 ms, iters=7
+  Action inference latency: 160.28 ms, iters=7
+  Action inference latency: 163.09 ms, iters=8
+  Action inference latency: 169.00 ms, iters=10
+  Action inference latency: 164.52 ms, iters=8
+  Action inference latency: 139.39 ms, iters=8
+  Action inference latency: 147.18 ms, iters=9
+  Action inference latency: 142.59 ms, iters=8
+  Action inference latency: 146.02 ms, iters=8
+  Action inference latency: 149.12 ms, iters=8
+  Action inference latency: 155.81 ms, iters=10
+  Action inference latency: 168.07 ms, iters=10
+  Action latency summary: 16 preds, raw_avg=151.58 ms, raw_p95=168.30 ms, first=151.06 ms, second=146.87 ms, steady_skip=2, steady_avg=151.96 ms, steady_median=149.37 ms, steady_p90=167.00 ms, steady_p95=168.39 ms
+  Episode iters: 16 preds, avg=7.7
+Saved rollout MP4 (with stats) at path ./rollouts/rd-vla/2026_05_16/2026_05_16-00_55_32--episode=10--success=True--task=pick_up_the_black_bowl_on_the_cookie_box_and_place.mp4
+Success: True
+# episodes completed so far: 10
+# successes: 10 (100.0%)
+
+Task: pick up the black bowl on the cookie box and place it on the plate
+Starting episode 2...
+  Action inference latency: 125.94 ms, iters=6
+  Action inference latency: 139.41 ms, iters=6
+  Action inference latency: 139.31 ms, iters=6
+  Action inference latency: 138.00 ms, iters=6
+  Action inference latency: 139.67 ms, iters=7
+  Action inference latency: 144.44 ms, iters=7
+  Action inference latency: 149.56 ms, iters=8
+  Action inference latency: 163.41 ms, iters=11
+  Action inference latency: 154.45 ms, iters=9
+  Action inference latency: 136.74 ms, iters=7
+  Action inference latency: 144.88 ms, iters=8
+  Action inference latency: 151.27 ms, iters=9
+  Action inference latency: 141.25 ms, iters=8
+  Action inference latency: 155.37 ms, iters=10
+  Action inference latency: 162.37 ms, iters=10
+  Action inference latency: 165.15 ms, iters=10
+  Action inference latency: 157.97 ms, iters=11
+  Action latency summary: 17 preds, raw_avg=147.60 ms, raw_p95=163.76 ms, first=125.94 ms, second=139.41 ms, steady_skip=2, steady_avg=149.59 ms, steady_median=149.56 ms, steady_p90=163.00 ms, steady_p95=163.93 ms
+  Episode iters: 17 preds, avg=8.2
+Saved rollout MP4 (with stats) at path ./rollouts/rd-vla/2026_05_16/2026_05_16-00_55_32--episode=11--success=True--task=pick_up_the_black_bowl_on_the_cookie_box_and_place.mp4
+Success: True
+# episodes completed so far: 11
+# successes: 11 (100.0%)
+
+Task: pick up the black bowl on the cookie box and place it on the plate
+Starting episode 3...
+  Action inference latency: 150.80 ms, iters=7
+  Action inference latency: 145.96 ms, iters=6
+  Action inference latency: 149.12 ms, iters=6
+  Action inference latency: 141.26 ms, iters=6
+  Action inference latency: 147.74 ms, iters=7
+  Action inference latency: 142.97 ms, iters=7
+  Action inference latency: 144.00 ms, iters=7
+  Action inference latency: 158.36 ms, iters=9
+  Action inference latency: 171.24 ms, iters=10
+  Action inference latency: 148.56 ms, iters=7
+  Action inference latency: 152.59 ms, iters=8
+  Action inference latency: 164.04 ms, iters=9
+  Action inference latency: 149.10 ms, iters=8
+  Action inference latency: 153.28 ms, iters=8
+  Action inference latency: 175.63 ms, iters=11
+  Action inference latency: 159.67 ms, iters=9
+  Action inference latency: 199.89 ms, iters=13
+  Action latency summary: 17 preds, raw_avg=156.13 ms, raw_p95=180.48 ms, first=150.80 ms, second=145.96 ms, steady_skip=2, steady_avg=157.16 ms, steady_median=152.59 ms, steady_p90=173.87 ms, steady_p95=182.91 ms
+  Episode iters: 17 preds, avg=8.1
+Saved rollout MP4 (with stats) at path ./rollouts/rd-vla/2026_05_16/2026_05_16-00_55_32--episode=12--success=True--task=pick_up_the_black_bowl_on_the_cookie_box_and_place.mp4
+Success: True
+# episodes completed so far: 12
+# successes: 12 (100.0%)
+Current task success rate: 1.0
+Current total success rate: 1.0
+
+=== Task 3 Iteration Stats ===
+  Total predictions: 50
+  Avg iters (all): 8.00 +/- 1.73
+  Avg iters (success): 8.00 +/- 1.73
+Using default initial states
+
+Task: pick up the black bowl in the top drawer of the wooden cabinet and place it on the plate
+Starting episode 1...
+  Action inference latency: 139.60 ms, iters=7
+  Action inference latency: 100.52 ms, iters=6
+  Action inference latency: 96.47 ms, iters=6
+  Action inference latency: 98.61 ms, iters=6
+  Action inference latency: 111.07 ms, iters=7
+  Action inference latency: 96.65 ms, iters=8
+  Action inference latency: 88.95 ms, iters=7
+  Action inference latency: 94.01 ms, iters=8
+  Action inference latency: 104.56 ms, iters=7
+  Action inference latency: 93.72 ms, iters=7
+  Action inference latency: 100.63 ms, iters=8
+  Action inference latency: 127.74 ms, iters=9
+  Action inference latency: 119.28 ms, iters=9
+  Action inference latency: 107.09 ms, iters=9
+  Action inference latency: 103.85 ms, iters=8
+  Action inference latency: 106.51 ms, iters=8
+  Action inference latency: 91.72 ms, iters=6
+  Action inference latency: 83.51 ms, iters=6
+  Action inference latency: 115.20 ms, iters=6
+  Action inference latency: 120.43 ms, iters=9
+  Action inference latency: 99.16 ms, iters=9
+  Action inference latency: 100.01 ms, iters=8
+  Action inference latency: 112.45 ms, iters=7
+  Action inference latency: 105.51 ms, iters=8
+  Action inference latency: 97.87 ms, iters=7
+  Action inference latency: 90.58 ms, iters=6
+  Action latency summary: 26 preds, raw_avg=104.06 ms, raw_p95=125.91 ms, first=139.60 ms, second=100.52 ms, steady_skip=2, steady_avg=102.73 ms, steady_median=100.32 ms, steady_p90=118.06 ms, steady_p95=120.26 ms
+  Episode iters: 26 preds, avg=7.4
+Saved rollout MP4 (with stats) at path ./rollouts/rd-vla/2026_05_16/2026_05_16-00_55_32--episode=13--success=True--task=pick_up_the_black_bowl_in_the_top_drawer_of_the_wo.mp4
+Success: True
+# episodes completed so far: 13
+# successes: 13 (100.0%)
+
+Task: pick up the black bowl in the top drawer of the wooden cabinet and place it on the plate
+Starting episode 2...
+  Action inference latency: 146.62 ms, iters=7
+  Action inference latency: 98.28 ms, iters=6
+  Action inference latency: 95.51 ms, iters=6
+  Action inference latency: 93.71 ms, iters=6
+  Action inference latency: 100.87 ms, iters=8
+  Action inference latency: 107.44 ms, iters=9
+  Action inference latency: 103.15 ms, iters=9
+  Action inference latency: 110.45 ms, iters=8
+  Action inference latency: 103.12 ms, iters=9
+  Action inference latency: 102.83 ms, iters=9
+  Action inference latency: 108.49 ms, iters=11
+  Action inference latency: 105.35 ms, iters=9
+  Action inference latency: 106.72 ms, iters=11
+  Action inference latency: 103.99 ms, iters=10
+  Action inference latency: 96.70 ms, iters=8
+  Action inference latency: 87.71 ms, iters=6
+  Action inference latency: 99.20 ms, iters=6
+  Action inference latency: 93.44 ms, iters=6
+  Action inference latency: 104.76 ms, iters=8
+  Action inference latency: 109.82 ms, iters=10
+  Action inference latency: 105.82 ms, iters=9
+  Action inference latency: 94.21 ms, iters=6
+  Action inference latency: 137.58 ms, iters=7
+  Action inference latency: 109.11 ms, iters=7
+  Action inference latency: 118.96 ms, iters=7
+  Action inference latency: 119.14 ms, iters=10
+  Action latency summary: 26 preds, raw_avg=106.27 ms, raw_p95=132.97 ms, first=146.62 ms, second=98.28 ms, steady_skip=2, steady_avg=104.92 ms, steady_median=104.37 ms, steady_p90=116.41 ms, steady_p95=119.12 ms
+  Episode iters: 26 preds, avg=8.0
+Saved rollout MP4 (with stats) at path ./rollouts/rd-vla/2026_05_16/2026_05_16-00_55_32--episode=14--success=True--task=pick_up_the_black_bowl_in_the_top_drawer_of_the_wo.mp4
+Success: True
+# episodes completed so far: 14
+# successes: 14 (100.0%)
+
+Task: pick up the black bowl in the top drawer of the wooden cabinet and place it on the plate
+Starting episode 3...
+  Action inference latency: 172.76 ms, iters=8
+  Action inference latency: 129.02 ms, iters=6
+  Action inference latency: 123.24 ms, iters=6
+  Action inference latency: 98.34 ms, iters=7
+  Action inference latency: 100.96 ms, iters=8
+  Action inference latency: 96.06 ms, iters=7
+  Action inference latency: 103.28 ms, iters=7
+  Action inference latency: 95.52 ms, iters=8
+  Action inference latency: 112.60 ms, iters=6
+  Action inference latency: 113.37 ms, iters=11
+  Action inference latency: 99.64 ms, iters=9
+  Action inference latency: 108.62 ms, iters=10
+  Action inference latency: 100.75 ms, iters=9
+  Action inference latency: 91.97 ms, iters=8
+  Action inference latency: 95.71 ms, iters=7
+  Action inference latency: 93.75 ms, iters=7
+  Action inference latency: 88.42 ms, iters=6
+  Action inference latency: 102.00 ms, iters=7
+  Action inference latency: 98.81 ms, iters=8
+  Action inference latency: 97.69 ms, iters=8
+  Action inference latency: 104.18 ms, iters=8
+  Action inference latency: 105.39 ms, iters=9
+  Action inference latency: 98.49 ms, iters=9
+  Action inference latency: 98.73 ms, iters=9
+  Action inference latency: 105.49 ms, iters=10
+  Action inference latency: 108.18 ms, iters=11
+  Action latency summary: 26 preds, raw_avg=105.50 ms, raw_p95=127.58 ms, first=172.76 ms, second=129.02 ms, steady_skip=2, steady_avg=101.72 ms, steady_median=100.19 ms, steady_p90=111.40 ms, steady_p95=113.25 ms
+  Episode iters: 26 preds, avg=8.0
+Saved rollout MP4 (with stats) at path ./rollouts/rd-vla/2026_05_16/2026_05_16-00_55_32--episode=15--success=True--task=pick_up_the_black_bowl_in_the_top_drawer_of_the_wo.mp4
+Success: True
+# episodes completed so far: 15
+# successes: 15 (100.0%)
+Current task success rate: 1.0
+Current total success rate: 1.0
+
+=== Task 4 Iteration Stats ===
+  Total predictions: 78
+  Avg iters (all): 7.81 +/- 1.42
+  Avg iters (success): 7.81 +/- 1.42
+Using default initial states
+
+Task: pick up the black bowl on the ramekin and place it on the plate
+Starting episode 1...
+  Action inference latency: 104.36 ms, iters=6
+  Action inference latency: 97.79 ms, iters=8
+  Action inference latency: 94.56 ms, iters=7
+  Action inference latency: 96.89 ms, iters=9
+  Action inference latency: 95.23 ms, iters=8
+  Action inference latency: 102.20 ms, iters=9
+  Action inference latency: 121.45 ms, iters=14
+  Action inference latency: 104.02 ms, iters=9
+  Action inference latency: 114.31 ms, iters=12
+  Action inference latency: 108.53 ms, iters=10
+  Action inference latency: 111.03 ms, iters=9
+  Action inference latency: 101.18 ms, iters=8
+  Action inference latency: 103.94 ms, iters=9
+  Action inference latency: 133.44 ms, iters=10
+  Action inference latency: 118.54 ms, iters=9
+  Action inference latency: 105.80 ms, iters=9
+  Action inference latency: 119.21 ms, iters=13
+  Action latency summary: 17 preds, raw_avg=107.79 ms, raw_p95=123.84 ms, first=104.36 ms, second=97.79 ms, steady_skip=2, steady_avg=108.69 ms, steady_median=105.80 ms, steady_p90=120.55 ms, steady_p95=125.04 ms
+  Episode iters: 17 preds, avg=9.4
+Saved rollout MP4 (with stats) at path ./rollouts/rd-vla/2026_05_16/2026_05_16-00_55_32--episode=16--success=True--task=pick_up_the_black_bowl_on_the_ramekin_and_place_it.mp4
+Success: True
+# episodes completed so far: 16
+# successes: 16 (100.0%)
+
+Task: pick up the black bowl on the ramekin and place it on the plate
+Starting episode 2...
+  Action inference latency: 162.64 ms, iters=7
+  Action inference latency: 93.80 ms, iters=7
+  Action inference latency: 105.76 ms, iters=9
+  Action inference latency: 99.97 ms, iters=8
+  Action inference latency: 98.29 ms, iters=9
+  Action inference latency: 125.31 ms, iters=12
+  Action inference latency: 105.52 ms, iters=9
+  Action inference latency: 105.84 ms, iters=9
+  Action inference latency: 111.13 ms, iters=11
+  Action inference latency: 114.61 ms, iters=12
+  Action inference latency: 124.53 ms, iters=12
+  Action inference latency: 94.45 ms, iters=8
+  Action inference latency: 90.96 ms, iters=7
+  Action inference latency: 93.32 ms, iters=8
+  Action inference latency: 118.45 ms, iters=9
+  Action inference latency: 119.63 ms, iters=9
+  Action inference latency: 120.31 ms, iters=11
+  Action inference latency: 112.03 ms, iters=11
+  Action latency summary: 18 preds, raw_avg=110.92 ms, raw_p95=130.91 ms, first=162.64 ms, second=93.80 ms, steady_skip=2, steady_avg=108.76 ms, steady_median=108.49 ms, steady_p90=122.42 ms, steady_p95=124.73 ms
+  Episode iters: 18 preds, avg=9.3
+Saved rollout MP4 (with stats) at path ./rollouts/rd-vla/2026_05_16/2026_05_16-00_55_32--episode=17--success=True--task=pick_up_the_black_bowl_on_the_ramekin_and_place_it.mp4
+Success: True
+# episodes completed so far: 17
+# successes: 17 (100.0%)
+
+Task: pick up the black bowl on the ramekin and place it on the plate
+Starting episode 3...
+  Action inference latency: 151.01 ms, iters=7
+  Action inference latency: 95.77 ms, iters=7
+  Action inference latency: 97.34 ms, iters=8
+  Action inference latency: 93.64 ms, iters=8
+  Action inference latency: 116.01 ms, iters=12
+  Action inference latency: 138.33 ms, iters=8
+  Action inference latency: 107.16 ms, iters=9
+  Action inference latency: 121.70 ms, iters=12
+  Action inference latency: 100.79 ms, iters=10
+  Action inference latency: 103.38 ms, iters=10
+  Action inference latency: 89.72 ms, iters=7
+  Action inference latency: 95.44 ms, iters=8
+  Action inference latency: 123.38 ms, iters=10
+  Action inference latency: 101.97 ms, iters=9
+  Action inference latency: 104.12 ms, iters=10
+  Action latency summary: 15 preds, raw_avg=109.32 ms, raw_p95=142.13 ms, first=151.01 ms, second=95.77 ms, steady_skip=2, steady_avg=107.15 ms, steady_median=103.38 ms, steady_p90=123.04 ms, steady_p95=129.36 ms
+  Episode iters: 15 preds, avg=9.0
+Saved rollout MP4 (with stats) at path ./rollouts/rd-vla/2026_05_16/2026_05_16-00_55_32--episode=18--success=True--task=pick_up_the_black_bowl_on_the_ramekin_and_place_it.mp4
+Success: True
+# episodes completed so far: 18
+# successes: 18 (100.0%)
+Current task success rate: 1.0
+Current total success rate: 1.0
+
+=== Task 5 Iteration Stats ===
+  Total predictions: 50
+  Avg iters (all): 9.24 +/- 1.77
+  Avg iters (success): 9.24 +/- 1.77
+Using default initial states
+
+Task: pick up the black bowl next to the cookie box and place it on the plate
+Starting episode 1...
+  Action inference latency: 112.98 ms, iters=6
+  Action inference latency: 88.20 ms, iters=6
+  Action inference latency: 89.52 ms, iters=6
+  Action inference latency: 85.64 ms, iters=6
+  Action inference latency: 86.56 ms, iters=6
+  Action inference latency: 130.32 ms, iters=8
+  Action inference latency: 88.72 ms, iters=7
+  Action inference latency: 97.98 ms, iters=8
+  Action inference latency: 102.68 ms, iters=7
+  Action inference latency: 102.12 ms, iters=9
+  Action inference latency: 101.64 ms, iters=10
+  Action inference latency: 97.49 ms, iters=8
+  Action inference latency: 104.68 ms, iters=10
+  Action inference latency: 111.41 ms, iters=11
+  Action inference latency: 92.76 ms, iters=8
+  Action inference latency: 100.25 ms, iters=9
+  Action inference latency: 113.33 ms, iters=7
+  Action inference latency: 89.81 ms, iters=7
+  Action inference latency: 97.90 ms, iters=8
+  Action inference latency: 123.53 ms, iters=9
+  Action inference latency: 102.45 ms, iters=9
+  Action inference latency: 94.85 ms, iters=8
+  Action inference latency: 105.24 ms, iters=9
+  Action latency summary: 23 preds, raw_avg=100.87 ms, raw_p95=122.51 ms, first=112.98 ms, second=88.20 ms, steady_skip=2, steady_avg=100.90 ms, steady_median=100.25 ms, steady_p90=113.33 ms, steady_p95=123.53 ms
+  Episode iters: 23 preds, avg=7.9
+Saved rollout MP4 (with stats) at path ./rollouts/rd-vla/2026_05_16/2026_05_16-00_55_32--episode=19--success=True--task=pick_up_the_black_bowl_next_to_the_cookie_box_and_.mp4
+Success: True
+# episodes completed so far: 19
+# successes: 19 (100.0%)
+
+Task: pick up the black bowl next to the cookie box and place it on the plate
+Starting episode 2...
+  Action inference latency: 181.72 ms, iters=6
+  Action inference latency: 128.64 ms, iters=6
+  Action inference latency: 109.31 ms, iters=6
+  Action inference latency: 90.19 ms, iters=6
+  Action inference latency: 92.14 ms, iters=6
+  Action inference latency: 97.95 ms, iters=7
+  Action inference latency: 92.76 ms, iters=7
+  Action inference latency: 87.80 ms, iters=6
+  Action inference latency: 122.99 ms, iters=9
+  Action inference latency: 98.27 ms, iters=9
+  Action inference latency: 102.88 ms, iters=8
+  Action inference latency: 95.92 ms, iters=8
+  Action inference latency: 108.62 ms, iters=9
+  Action inference latency: 101.89 ms, iters=9
+  Action inference latency: 107.49 ms, iters=9
+  Action inference latency: 112.87 ms, iters=8
+  Action inference latency: 91.98 ms, iters=7
+  Action inference latency: 104.43 ms, iters=10
+  Action inference latency: 128.39 ms, iters=11
+  Action inference latency: 105.07 ms, iters=9
+  Action inference latency: 101.37 ms, iters=8
+  Action inference latency: 100.57 ms, iters=9
+  Action inference latency: 114.99 ms, iters=11
+  Action latency summary: 23 preds, raw_avg=107.75 ms, raw_p95=128.62 ms, first=181.72 ms, second=128.64 ms, steady_skip=2, steady_avg=103.23 ms, steady_median=101.89 ms, steady_p90=114.99 ms, steady_p95=122.99 ms
+  Episode iters: 23 preds, avg=8.0
+Saved rollout MP4 (with stats) at path ./rollouts/rd-vla/2026_05_16/2026_05_16-00_55_32--episode=20--success=True--task=pick_up_the_black_bowl_next_to_the_cookie_box_and_.mp4
+Success: True
+# episodes completed so far: 20
+# successes: 20 (100.0%)
+
+Task: pick up the black bowl next to the cookie box and place it on the plate
+Starting episode 3...
+  Action inference latency: 135.67 ms, iters=6
+  Action inference latency: 87.97 ms, iters=6
+  Action inference latency: 91.79 ms, iters=6
+  Action inference latency: 85.04 ms, iters=6
+  Action inference latency: 93.42 ms, iters=7
+  Action inference latency: 90.22 ms, iters=7
+  Action inference latency: 94.75 ms, iters=7
+  Action inference latency: 94.52 ms, iters=8
+  Action inference latency: 103.44 ms, iters=11
+  Action inference latency: 102.99 ms, iters=9
+  Action inference latency: 91.68 ms, iters=7
+  Action inference latency: 101.11 ms, iters=8
+  Action inference latency: 93.76 ms, iters=8
+  Action inference latency: 94.69 ms, iters=8
+  Action inference latency: 98.14 ms, iters=7
+  Action inference latency: 99.12 ms, iters=7
+  Action inference latency: 92.83 ms, iters=7
+  Action inference latency: 114.47 ms, iters=9
+  Action inference latency: 95.87 ms, iters=8
+  Action inference latency: 110.70 ms, iters=13
+  Action latency summary: 20 preds, raw_avg=98.61 ms, raw_p95=115.53 ms, first=135.67 ms, second=87.97 ms, steady_skip=2, steady_avg=97.14 ms, steady_median=94.72 ms, steady_p90=105.62 ms, steady_p95=111.27 ms
+  Episode iters: 20 preds, avg=7.8
+Saved rollout MP4 (with stats) at path ./rollouts/rd-vla/2026_05_16/2026_05_16-00_55_32--episode=21--success=True--task=pick_up_the_black_bowl_next_to_the_cookie_box_and_.mp4
+Success: True
+# episodes completed so far: 21
+# successes: 21 (100.0%)
+Current task success rate: 1.0
+Current total success rate: 1.0
+
+=== Task 6 Iteration Stats ===
+  Total predictions: 66
+  Avg iters (all): 7.89 +/- 1.56
+  Avg iters (success): 7.89 +/- 1.56
+Using default initial states
+
+Task: pick up the black bowl on the stove and place it on the plate
+Starting episode 1...
+  Action inference latency: 169.42 ms, iters=7
+  Action inference latency: 99.65 ms, iters=9
+  Action inference latency: 92.70 ms, iters=8
+  Action inference latency: 95.89 ms, iters=7
+  Action inference latency: 93.96 ms, iters=8
+  Action inference latency: 98.02 ms, iters=9
+  Action inference latency: 103.31 ms, iters=10
+  Action inference latency: 101.53 ms, iters=8
+  Action inference latency: 103.36 ms, iters=10
+  Action inference latency: 105.85 ms, iters=9
+  Action inference latency: 108.00 ms, iters=10
+  Action inference latency: 92.78 ms, iters=6
+  Action inference latency: 97.72 ms, iters=8
+  Action inference latency: 89.60 ms, iters=6
+  Action inference latency: 89.00 ms, iters=6
+  Action inference latency: 91.03 ms, iters=6
+  Action inference latency: 93.27 ms, iters=7
+  Action inference latency: 103.99 ms, iters=8
+  Action inference latency: 99.50 ms, iters=9
+  Action inference latency: 99.45 ms, iters=9
+  Action inference latency: 96.09 ms, iters=9
+  Action inference latency: 100.95 ms, iters=8
+  Action inference latency: 111.63 ms, iters=8
+  Action latency summary: 23 preds, raw_avg=101.59 ms, raw_p95=111.27 ms, first=169.42 ms, second=99.65 ms, steady_skip=2, steady_avg=98.46 ms, steady_median=98.02 ms, steady_p90=105.85 ms, steady_p95=108.00 ms
+  Episode iters: 23 preds, avg=8.0
+Saved rollout MP4 (with stats) at path ./rollouts/rd-vla/2026_05_16/2026_05_16-00_55_32--episode=22--success=True--task=pick_up_the_black_bowl_on_the_stove_and_place_it_o.mp4
+Success: True
+# episodes completed so far: 22
+# successes: 22 (100.0%)
+
+Task: pick up the black bowl on the stove and place it on the plate
+Starting episode 2...
+  Action inference latency: 171.79 ms, iters=7
+  Action inference latency: 143.47 ms, iters=7
+  Action inference latency: 112.11 ms, iters=8
+  Action inference latency: 100.61 ms, iters=8
+  Action inference latency: 101.10 ms, iters=7
+  Action inference latency: 104.95 ms, iters=8
+  Action inference latency: 103.86 ms, iters=9
+  Action inference latency: 100.72 ms, iters=9
+  Action inference latency: 102.52 ms, iters=10
+  Action inference latency: 130.94 ms, iters=10
+  Action inference latency: 107.73 ms, iters=9
+  Action inference latency: 104.36 ms, iters=9
+  Action inference latency: 95.32 ms, iters=8
+  Action inference latency: 90.20 ms, iters=6
+  Action inference latency: 95.14 ms, iters=6
+  Action inference latency: 97.26 ms, iters=7
+  Action inference latency: 106.43 ms, iters=9
+  Action inference latency: 109.84 ms, iters=11
+  Action inference latency: 101.33 ms, iters=8
+  Action inference latency: 97.32 ms, iters=7
+  Action inference latency: 94.73 ms, iters=7
+  Action inference latency: 145.03 ms, iters=12
+  Action latency summary: 22 preds, raw_avg=109.85 ms, raw_p95=144.95 ms, first=171.79 ms, second=143.47 ms, steady_skip=2, steady_avg=105.08 ms, steady_median=101.92 ms, steady_p90=113.99 ms, steady_p95=131.65 ms
+  Episode iters: 22 preds, avg=8.3
+Saved rollout MP4 (with stats) at path ./rollouts/rd-vla/2026_05_16/2026_05_16-00_55_32--episode=23--success=True--task=pick_up_the_black_bowl_on_the_stove_and_place_it_o.mp4
+Success: True
+# episodes completed so far: 23
+# successes: 23 (100.0%)
+
+Task: pick up the black bowl on the stove and place it on the plate
+Starting episode 3...
+  Action inference latency: 112.80 ms, iters=7
+  Action inference latency: 119.49 ms, iters=8
+  Action inference latency: 113.04 ms, iters=7
+  Action inference latency: 111.90 ms, iters=7
+  Action inference latency: 102.64 ms, iters=6
+  Action inference latency: 108.69 ms, iters=7
+  Action inference latency: 105.56 ms, iters=6
+  Action inference latency: 124.47 ms, iters=9
+  Action inference latency: 122.95 ms, iters=9
+  Action inference latency: 119.52 ms, iters=10
+  Action inference latency: 123.07 ms, iters=11
+  Action inference latency: 124.19 ms, iters=8
+  Action inference latency: 124.31 ms, iters=9
+  Action inference latency: 115.64 ms, iters=8
+  Action inference latency: 106.48 ms, iters=7
+  Action inference latency: 110.98 ms, iters=6
+  Action inference latency: 100.21 ms, iters=6
+  Action inference latency: 108.81 ms, iters=6
+  Action inference latency: 121.63 ms, iters=8
+  Action inference latency: 121.00 ms, iters=9
+  Action inference latency: 114.25 ms, iters=9
+  Action inference latency: 119.84 ms, iters=9
+  Action inference latency: 123.85 ms, iters=11
+  Action inference latency: 123.66 ms, iters=9
+  Action inference latency: 124.02 ms, iters=10
+  Action inference latency: 126.26 ms, iters=10
+  Action inference latency: 139.78 ms, iters=13
+  Action inference latency: 128.77 ms, iters=10
+  Action inference latency: 142.70 ms, iters=11
+  Action inference latency: 132.75 ms, iters=11
+  Action inference latency: 138.96 ms, iters=11
+  Action inference latency: 128.54 ms, iters=10
+  Action inference latency: 135.77 ms, iters=11
+  Action inference latency: 127.97 ms, iters=10
+  Action inference latency: 136.84 ms, iters=12
+  Action inference latency: 132.78 ms, iters=12
+  Action inference latency: 129.92 ms, iters=10
+  Action inference latency: 123.06 ms, iters=10
+  Action inference latency: 121.03 ms, iters=10
+  Action inference latency: 127.90 ms, iters=10
+  Action inference latency: 119.15 ms, iters=10
+  Action inference latency: 134.53 ms, iters=11
+  Action inference latency: 124.00 ms, iters=9
+  Action inference latency: 115.32 ms, iters=8
+  Action latency summary: 44 preds, raw_avg=122.02 ms, raw_p95=138.64 ms, first=112.80 ms, second=119.49 ms, steady_skip=2, steady_avg=122.30 ms, steady_median=123.37 ms, steady_p90=135.64 ms, steady_p95=138.85 ms
+  Episode iters: 44 preds, avg=9.1
+Saved rollout MP4 (with stats) at path ./rollouts/rd-vla/2026_05_16/2026_05_16-00_55_32--episode=24--success=False--task=pick_up_the_black_bowl_on_the_stove_and_place_it_o.mp4
+Success: False
+# episodes completed so far: 24
+# successes: 23 (95.8%)
+Current task success rate: 0.6666666666666666
+Current total success rate: 0.9583333333333334
+
+=== Task 7 Iteration Stats ===
+  Total predictions: 89
+  Avg iters (all): 8.63 +/- 1.68
+  Avg iters (success): 8.16 +/- 1.40
+  Avg iters (failure): 9.11 +/- 1.80
+Using default initial states
+
+Task: pick up the black bowl next to the plate and place it on the plate
+Starting episode 1...
+  Action inference latency: 119.75 ms, iters=6
+  Action inference latency: 100.97 ms, iters=6
+  Action inference latency: 112.46 ms, iters=6
+  Action inference latency: 103.49 ms, iters=6
+  Action inference latency: 110.16 ms, iters=6
+  Action inference latency: 111.44 ms, iters=7
+  Action inference latency: 112.98 ms, iters=8
+  Action inference latency: 128.44 ms, iters=9
+  Action inference latency: 111.46 ms, iters=8
+  Action inference latency: 113.08 ms, iters=9
+  Action inference latency: 122.48 ms, iters=9
+  Action inference latency: 119.91 ms, iters=10
+  Action inference latency: 114.79 ms, iters=9
+  Action inference latency: 113.42 ms, iters=9
+  Action inference latency: 118.57 ms, iters=9
+  Action inference latency: 125.35 ms, iters=11
+  Action inference latency: 117.45 ms, iters=9
+  Action inference latency: 113.14 ms, iters=8
+  Action inference latency: 122.68 ms, iters=9
+  Action latency summary: 19 preds, raw_avg=115.37 ms, raw_p95=125.66 ms, first=119.75 ms, second=100.97 ms, steady_skip=2, steady_avg=115.96 ms, steady_median=113.42 ms, steady_p90=123.75 ms, steady_p95=125.97 ms
+  Episode iters: 19 preds, avg=8.1
+Saved rollout MP4 (with stats) at path ./rollouts/rd-vla/2026_05_16/2026_05_16-00_55_32--episode=25--success=True--task=pick_up_the_black_bowl_next_to_the_plate_and_place.mp4
+Success: True
+# episodes completed so far: 25
+# successes: 24 (96.0%)
+
+Task: pick up the black bowl next to the plate and place it on the plate
+Starting episode 2...
+  Action inference latency: 129.50 ms, iters=6
+  Action inference latency: 111.16 ms, iters=6
+  Action inference latency: 102.87 ms, iters=6
+  Action inference latency: 105.35 ms, iters=6
+  Action inference latency: 109.33 ms, iters=7
+  Action inference latency: 113.36 ms, iters=7
+  Action inference latency: 105.60 ms, iters=7
+  Action inference latency: 118.98 ms, iters=8
+  Action inference latency: 133.27 ms, iters=11
+  Action inference latency: 111.06 ms, iters=8
+  Action inference latency: 132.76 ms, iters=10
+  Action inference latency: 119.23 ms, iters=10
+  Action inference latency: 121.89 ms, iters=10
+  Action inference latency: 127.18 ms, iters=10
+  Action inference latency: 121.92 ms, iters=10
+  Action inference latency: 127.51 ms, iters=11
+  Action inference latency: 119.28 ms, iters=11
+  Action inference latency: 131.61 ms, iters=11
+  Action latency summary: 18 preds, raw_avg=118.99 ms, raw_p95=132.84 ms, first=129.50 ms, second=111.16 ms, steady_skip=2, steady_avg=118.82 ms, steady_median=119.25 ms, steady_p90=132.19 ms, steady_p95=132.89 ms
+  Episode iters: 18 preds, avg=8.6
+Saved rollout MP4 (with stats) at path ./rollouts/rd-vla/2026_05_16/2026_05_16-00_55_32--episode=26--success=True--task=pick_up_the_black_bowl_next_to_the_plate_and_place.mp4
+Success: True
+# episodes completed so far: 26
+# successes: 25 (96.2%)
+
+Task: pick up the black bowl next to the plate and place it on the plate
+Starting episode 3...
+  Action inference latency: 119.88 ms, iters=6
+  Action inference latency: 112.53 ms, iters=6
+  Action inference latency: 110.40 ms, iters=6
+  Action inference latency: 117.40 ms, iters=7
+  Action inference latency: 110.36 ms, iters=6
+  Action inference latency: 103.57 ms, iters=6
+  Action inference latency: 114.99 ms, iters=8
+  Action inference latency: 109.66 ms, iters=8
+  Action inference latency: 112.93 ms, iters=9
+  Action inference latency: 124.66 ms, iters=9
+  Action inference latency: 127.17 ms, iters=9
+  Action inference latency: 118.55 ms, iters=9
+  Action inference latency: 123.44 ms, iters=9
+  Action inference latency: 125.68 ms, iters=9
+  Action inference latency: 124.87 ms, iters=9
+  Action inference latency: 136.05 ms, iters=11
+  Action inference latency: 124.83 ms, iters=9
+  Action inference latency: 133.01 ms, iters=10
+  Action inference latency: 120.20 ms, iters=10
+  Action inference latency: 120.20 ms, iters=11
+  Action latency summary: 20 preds, raw_avg=119.52 ms, raw_p95=133.16 ms, first=119.88 ms, second=112.53 ms, steady_skip=2, steady_avg=119.89 ms, steady_median=120.20 ms, steady_p90=128.92 ms, steady_p95=133.47 ms
+  Episode iters: 20 preds, avg=8.3
+Saved rollout MP4 (with stats) at path ./rollouts/rd-vla/2026_05_16/2026_05_16-00_55_32--episode=27--success=True--task=pick_up_the_black_bowl_next_to_the_plate_and_place.mp4
+Success: True
+# episodes completed so far: 27
+# successes: 26 (96.3%)
+Current task success rate: 1.0
+Current total success rate: 0.9629629629629629
+
+=== Task 8 Iteration Stats ===
+  Total predictions: 57
+  Avg iters (all): 8.35 +/- 1.70
+  Avg iters (success): 8.35 +/- 1.70
+Using default initial states
+
+Task: pick up the black bowl on the wooden cabinet and place it on the plate
+Starting episode 1...
+  Action inference latency: 134.79 ms, iters=7
+  Action inference latency: 118.15 ms, iters=7
+  Action inference latency: 114.61 ms, iters=7
+  Action inference latency: 105.02 ms, iters=7
+  Action inference latency: 103.01 ms, iters=6
+  Action inference latency: 110.57 ms, iters=8
+  Action inference latency: 108.46 ms, iters=7
+  Action inference latency: 110.91 ms, iters=9
+  Action inference latency: 112.30 ms, iters=9
+  Action inference latency: 123.92 ms, iters=11
+  Action inference latency: 115.06 ms, iters=9
+  Action inference latency: 108.25 ms, iters=8
+  Action inference latency: 109.91 ms, iters=7
+  Action inference latency: 104.51 ms, iters=6
+  Action inference latency: 111.15 ms, iters=7
+  Action inference latency: 113.45 ms, iters=7
+  Action inference latency: 111.31 ms, iters=7
+  Action inference latency: 118.02 ms, iters=8
+  Action inference latency: 116.66 ms, iters=9
+  Action inference latency: 151.61 ms, iters=12
+  Action inference latency: 126.33 ms, iters=10
+  Action inference latency: 129.59 ms, iters=12
+  Action inference latency: 132.59 ms, iters=11
+  Action latency summary: 23 preds, raw_avg=116.96 ms, raw_p95=134.57 ms, first=134.79 ms, second=118.15 ms, steady_skip=2, steady_avg=116.06 ms, steady_median=112.30 ms, steady_p90=129.59 ms, steady_p95=132.59 ms
+  Episode iters: 23 preds, avg=8.3
+Saved rollout MP4 (with stats) at path ./rollouts/rd-vla/2026_05_16/2026_05_16-00_55_32--episode=28--success=True--task=pick_up_the_black_bowl_on_the_wooden_cabinet_and_p.mp4
+Success: True
+# episodes completed so far: 28
+# successes: 27 (96.4%)
+
+Task: pick up the black bowl on the wooden cabinet and place it on the plate
+Starting episode 2...
+  Action inference latency: 114.06 ms, iters=7
+  Action inference latency: 106.11 ms, iters=7
+  Action inference latency: 109.06 ms, iters=8
+  Action inference latency: 112.47 ms, iters=8
+  Action inference latency: 111.91 ms, iters=7
+  Action inference latency: 113.69 ms, iters=9
+  Action inference latency: 116.87 ms, iters=9
+  Action inference latency: 110.74 ms, iters=8
+  Action inference latency: 140.36 ms, iters=13
+  Action inference latency: 116.50 ms, iters=9
+  Action inference latency: 118.83 ms, iters=9
+  Action inference latency: 149.60 ms, iters=11
+  Action inference latency: 126.33 ms, iters=9
+  Action inference latency: 125.76 ms, iters=9
+  Action inference latency: 112.92 ms, iters=6
+  Action inference latency: 116.84 ms, iters=7
+  Action inference latency: 112.82 ms, iters=7
+  Action inference latency: 116.59 ms, iters=8
+  Action inference latency: 119.73 ms, iters=7
+  Action inference latency: 118.44 ms, iters=9
+  Action inference latency: 128.21 ms, iters=10
+  Action inference latency: 122.49 ms, iters=9
+  Action inference latency: 121.85 ms, iters=10
+  Action inference latency: 127.08 ms, iters=10
+  Action latency summary: 24 preds, raw_avg=119.55 ms, raw_p95=138.53 ms, first=114.06 ms, second=106.11 ms, steady_skip=2, steady_avg=120.41 ms, steady_median=117.66 ms, steady_p90=128.10 ms, steady_p95=139.75 ms
+  Episode iters: 24 preds, avg=8.6
+Saved rollout MP4 (with stats) at path ./rollouts/rd-vla/2026_05_16/2026_05_16-00_55_32--episode=29--success=True--task=pick_up_the_black_bowl_on_the_wooden_cabinet_and_p.mp4
+Success: True
+# episodes completed so far: 29
+# successes: 28 (96.6%)
+
+Task: pick up the black bowl on the wooden cabinet and place it on the plate
+Starting episode 3...
+  Action inference latency: 184.72 ms, iters=8
+  Action inference latency: 111.99 ms, iters=8
+  Action inference latency: 110.25 ms, iters=8
+  Action inference latency: 112.09 ms, iters=8
+  Action inference latency: 115.04 ms, iters=7
+  Action inference latency: 126.67 ms, iters=9
+  Action inference latency: 123.56 ms, iters=10
+  Action inference latency: 118.27 ms, iters=9
+  Action inference latency: 119.90 ms, iters=10
+  Action inference latency: 133.74 ms, iters=11
+  Action inference latency: 118.08 ms, iters=9
+  Action inference latency: 125.13 ms, iters=11
+  Action inference latency: 115.38 ms, iters=9
+  Action inference latency: 118.16 ms, iters=10
+  Action inference latency: 123.02 ms, iters=10
+  Action inference latency: 120.71 ms, iters=9
+  Action inference latency: 127.33 ms, iters=12
+  Action inference latency: 126.84 ms, iters=10
+  Action inference latency: 118.80 ms, iters=9
+  Action inference latency: 122.46 ms, iters=8
+  Action inference latency: 108.09 ms, iters=7
+  Action inference latency: 107.10 ms, iters=7
+  Action inference latency: 97.87 ms, iters=6
+  Action inference latency: 104.58 ms, iters=6
+  Action inference latency: 107.66 ms, iters=7
+  Action inference latency: 117.13 ms, iters=7
+  Action inference latency: 118.88 ms, iters=8
+  Action inference latency: 114.02 ms, iters=8
+  Action inference latency: 112.74 ms, iters=8
+  Action inference latency: 118.85 ms, iters=9
+  Action inference latency: 124.81 ms, iters=10
+  Action inference latency: 127.73 ms, iters=12
+  Action latency summary: 32 preds, raw_avg=119.74 ms, raw_p95=130.43 ms, first=184.72 ms, second=111.99 ms, steady_skip=2, steady_avg=117.83 ms, steady_median=118.54 ms, steady_p90=126.89 ms, steady_p95=127.55 ms
+  Episode iters: 32 preds, avg=8.8
+Saved rollout MP4 (with stats) at path ./rollouts/rd-vla/2026_05_16/2026_05_16-00_55_32--episode=30--success=True--task=pick_up_the_black_bowl_on_the_wooden_cabinet_and_p.mp4
+Success: True
+# episodes completed so far: 30
+# successes: 29 (96.7%)
+Current task success rate: 1.0
+Current total success rate: 0.9666666666666667
+
+=== Task 9 Iteration Stats ===
+  Total predictions: 79
+  Avg iters (all): 8.57 +/- 1.62
+  Avg iters (success): 8.57 +/- 1.62
+Saved JSON results to benchmark_results/step_bench/spatial_adaptive_5e-4_trial3.json
+Final results:
+Total episodes: 30
+Total successes: 29
+Overall success rate: 0.9667 (96.7%)
