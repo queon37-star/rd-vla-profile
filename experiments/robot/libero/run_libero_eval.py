@@ -127,6 +127,10 @@ class GenerateConfig:
     recurrence_cos_thresh: float = 0.999
     recurrence_max_iter: int = 32
 
+    # Adaptive recurrence Coda profiling and final-output cache comparison.
+    profile_coda_cost: bool = False
+    use_cached_final_output: bool = False
+
     # Fixed execution: always use first N actions
     num_exec_actions: int = 5
 
@@ -374,6 +378,21 @@ def summarize_episode_convergence(records: List[Dict[str, Any]], success: bool) 
     }
 
 
+def summarize_coda_profiling(records: List[Dict[str, Any]]) -> Dict[str, Any]:
+    profiled_records = [r for r in records if r.get("profiling_enabled")]
+    return {
+        "enabled_prediction_count": len(profiled_records),
+        "get_output_call_count_stats": _numeric_stats([r.get("get_output_call_count") for r in profiled_records]),
+        "coda_ms_total_stats": _numeric_stats([r.get("coda_ms_total") for r in profiled_records]),
+        "get_output_ms_total_stats": _numeric_stats([r.get("get_output_ms_total") for r in profiled_records]),
+        "run_one_iteration_ms_total_stats": _numeric_stats(
+            [r.get("run_one_iteration_ms_total") for r in profiled_records]
+        ),
+        "output_proj_ms_total_stats": _numeric_stats([r.get("output_proj_ms_total") for r in profiled_records]),
+        "coda_time_ratio_total_stats": _numeric_stats([r.get("coda_time_ratio_total") for r in profiled_records]),
+    }
+
+
 def save_recurrent_convergence_summary(cfg, full_results, log_file=None):
     """Write run-level success/failure comparison for recurrent convergence metrics."""
     step_log_path = get_step_log_file(cfg)
@@ -408,16 +427,19 @@ def save_recurrent_convergence_summary(cfg, full_results, log_file=None):
                 "iteration_stats": _numeric_stats([r.get("recurrent_iteration_count") for r in prediction_records]),
                 "final_mse_stats": _numeric_stats([r.get("final_mse") for r in prediction_records]),
                 "adaptive_stop_count": sum(1 for r in prediction_records if r.get("adaptive_stop")),
+                "coda_profiling": summarize_coda_profiling(prediction_records),
             },
             "success": {
                 "iteration_stats": _numeric_stats([r.get("recurrent_iteration_count") for r in success_records]),
                 "final_mse_stats": _numeric_stats([r.get("final_mse") for r in success_records]),
                 "adaptive_stop_count": sum(1 for r in success_records if r.get("adaptive_stop")),
+                "coda_profiling": summarize_coda_profiling(success_records),
             },
             "failure": {
                 "iteration_stats": _numeric_stats([r.get("recurrent_iteration_count") for r in failure_records]),
                 "final_mse_stats": _numeric_stats([r.get("final_mse") for r in failure_records]),
                 "adaptive_stop_count": sum(1 for r in failure_records if r.get("adaptive_stop")),
+                "coda_profiling": summarize_coda_profiling(failure_records),
             },
         },
         "rollout_level": {
@@ -670,6 +692,25 @@ def run_episode(
                     "rollout_min_iteration": None,
                     "success": None,
                 }
+                step_record["profiling_enabled"] = bool(debug.get("profiling_enabled", False))
+                step_record["use_cached_final_output"] = bool(
+                    debug.get("use_cached_final_output", getattr(cfg, "use_cached_final_output", False))
+                )
+                if step_record["profiling_enabled"]:
+                    for timing_key in (
+                        "run_one_iteration_ms_list",
+                        "get_output_ms_list",
+                        "coda_ms_list",
+                        "output_proj_ms_list",
+                        "convergence_check_ms_list",
+                        "get_output_call_count",
+                        "coda_ms_total",
+                        "get_output_ms_total",
+                        "run_one_iteration_ms_total",
+                        "output_proj_ms_total",
+                        "coda_time_ratio_total",
+                    ):
+                        step_record[timing_key] = debug.get(timing_key)
 
                 prediction_step += 1
                 prev_action_vec = curr_action_vec

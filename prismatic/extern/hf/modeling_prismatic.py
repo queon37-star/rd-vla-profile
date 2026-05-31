@@ -785,6 +785,8 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
         kl_thresh=0.001,
         cos_thresh=0.999,
         max_iter=32,
+        profile_coda_cost=False,
+        use_cached_final_output=False,
     ):
         """Run L1 regression-based continuous action prediction or discrete action tokens prediction."""
 
@@ -842,6 +844,8 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
                 kl_thresh=kl_thresh,
                 cos_thresh=cos_thresh,
                 max_iter=max_iter,
+                profile_coda_cost=profile_coda_cost,
+                use_cached_final_output=use_cached_final_output,
             )
             # Handle convergence-based return (output, num_iters, final_kl) vs fixed return (output)
             actual_iters = None
@@ -888,6 +892,8 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
         kl_thresh: float = 0.001,
         cos_thresh: float = 0.999,
         max_iter: int = 32,
+        profile_coda_cost: bool = False,
+        use_cached_final_output: bool = False,
         **kwargs: str,
     ) -> np.ndarray:
 
@@ -944,6 +950,8 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
             kl_thresh=kl_thresh,
             cos_thresh=cos_thresh,
             max_iter=max_iter,
+            profile_coda_cost=profile_coda_cost,
+            use_cached_final_output=use_cached_final_output,
             )
 
         # Unnormalize predicted actions

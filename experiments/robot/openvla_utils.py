@@ -413,6 +413,8 @@ def get_vla_action(
                 kl_thresh=getattr(cfg, "recurrence_kl_thresh", 0.001),
                 cos_thresh=getattr(cfg, "recurrence_cos_thresh", 0.999),
                 max_iter=getattr(cfg, "recurrence_max_iter", 32),
+                profile_coda_cost=getattr(cfg, "profile_coda_cost", False),
+                use_cached_final_output=getattr(cfg, "use_cached_final_output", False),
             )
             recurrence_debug = getattr(getattr(action_head, "model", None), "last_recurrence_debug", None)
 

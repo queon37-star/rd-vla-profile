@@ -1,4 +1,5 @@
 import math
+import time
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -191,6 +192,7 @@ class VLARecurrent(nn.Module):
         self.output_norm = RMSNorm(dim, cfg.rms_norm_eps)
         self.output_proj = nn.Linear(dim, cfg.action_dim)
         self.gamma_init = nn.Parameter(torch.ones(1))
+        self._last_get_output_timing = None
         self._init_weights()
 
     def _init_weights(self):
@@ -225,17 +227,46 @@ class VLARecurrent(nn.Module):
             x = layer(x, h_a[:, self.recurrent_vlm_layers[i]], h_t[:, self.recurrent_vlm_layers[i]], p)
         return self.recurrent_norm(x)
 
-    def _get_output(self, state, h_a, h_t, p):
+    @staticmethod
+    def _sync_time():
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        return time.perf_counter()
+
+    def _get_output(self, state, h_a, h_t, p, profile=False):
+        if not profile:
+            x = state
+            if self.coda_vlm_layers:
+                for i, layer in enumerate(self.coda):
+                    x = layer(x, h_a[:, self.coda_vlm_layers[i]], h_t[:, self.coda_vlm_layers[i]], p)
+            return self.output_proj(self.output_norm(x))
+
+        get_output_start = self._sync_time()
         x = state
         if self.coda_vlm_layers:
+            coda_start = get_output_start
             for i, layer in enumerate(self.coda):
                 x = layer(x, h_a[:, self.coda_vlm_layers[i]], h_t[:, self.coda_vlm_layers[i]], p)
-        return self.output_proj(self.output_norm(x))
+            coda_end = self._sync_time()
+            coda_ms = (coda_end - coda_start) * 1000.0
+        else:
+            coda_end = get_output_start
+            coda_ms = 0.0
+
+        output = self.output_proj(self.output_norm(x))
+        output_proj_end = self._sync_time()
+        self._last_get_output_timing = {
+            "get_output_ms": (output_proj_end - get_output_start) * 1000.0,
+            "coda_ms": coda_ms,
+            "output_proj_ms": (output_proj_end - coda_end) * 1000.0,
+        }
+        return output
 
     def forward(self, h_a: torch.Tensor, h_t: torch.Tensor, p: torch.Tensor,
                 num_iter: int = None, convergence_strategy: str = None,
                 kl_thresh: float = 0.001, cos_thresh: float = 0.999,
-                max_iter: int = 32, **kwargs) -> torch.Tensor:
+                max_iter: int = 32, profile_coda_cost: bool = False,
+                use_cached_final_output: bool = False, **kwargs) -> torch.Tensor:
         B = h_a.size(0)
         device, dtype = h_a.device, h_a.dtype
 
@@ -248,6 +279,7 @@ class VLARecurrent(nn.Module):
 
         state = self.init_state(B, device, dtype)
         self.last_recurrence_debug = None
+        self._last_get_output_timing = None
 
         # Convergence-based stopping
         # 이게 원본 adaptive branch
@@ -290,12 +322,36 @@ class VLARecurrent(nn.Module):
             first_converged_k_1e_4 = None
             first_converged_k_5e_4 = None
             adaptive_stop = False
+            curr_output = None
+
+            run_one_iteration_ms_list = []
+            # Output timing lists include the final return-path call unless the
+            # cached-final-output option reuses the last adaptive-loop result.
+            get_output_ms_list = []
+            coda_ms_list = []
+            output_proj_ms_list = []
+            convergence_check_ms_list = []
+
+            def append_get_output_timing():
+                timing = self._last_get_output_timing
+                get_output_ms_list.append(timing["get_output_ms"])
+                coda_ms_list.append(timing["coda_ms"])
+                output_proj_ms_list.append(timing["output_proj_ms"])
 
             with torch.no_grad():
                 for it in range(max_iter):
+                    if profile_coda_cost:
+                        run_one_iteration_start = self._sync_time()
                     state = self._run_one_iteration(state, prelude_out, h_a, h_t, p)
+                    if profile_coda_cost:
+                        run_one_iteration_end = self._sync_time()
+                        run_one_iteration_ms_list.append((run_one_iteration_end - run_one_iteration_start) * 1000.0)
+
                     actual_iter = it + 1
-                    curr_output = self._get_output(state, h_a, h_t, p)
+                    curr_output = self._get_output(state, h_a, h_t, p, profile=profile_coda_cost)
+                    if profile_coda_cost:
+                        append_get_output_timing()
+                        convergence_check_start = self._sync_time()
 
                     if prev_output is not None:
                         diff = curr_output - prev_output
@@ -317,14 +373,24 @@ class VLARecurrent(nn.Module):
                             final_kl = 1 - cos_sim
                             if cos_sim > cos_thresh:
                                 adaptive_stop = True
-                                break
                         elif convergence_strategy == "kl_divergence":
                             final_kl = mse
                             if mse < kl_thresh:
                                 adaptive_stop = True
-                                break
 
                     prev_output = curr_output.detach()
+                    if profile_coda_cost:
+                        convergence_check_end = self._sync_time()
+                        convergence_check_ms_list.append((convergence_check_end - convergence_check_start) * 1000.0)
+                    if adaptive_stop:
+                        break
+
+            if use_cached_final_output and curr_output is not None:
+                final_output = curr_output
+            else:
+                final_output = self._get_output(state, h_a, h_t, p, profile=profile_coda_cost)
+                if profile_coda_cost:
+                    append_get_output_timing()
 
             self.last_recurrence_debug = {
                 "strategy": convergence_strategy,
@@ -342,9 +408,35 @@ class VLARecurrent(nn.Module):
                 "first_converged_k_5e_4": first_converged_k_5e_4,
                 "final_mse": conv_score_list[-1] if conv_score_list else None,
                 "final_conv_score": final_kl,
+                "profiling_enabled": bool(profile_coda_cost),
+                "use_cached_final_output": bool(use_cached_final_output),
             }
 
-            return self._get_output(state, h_a, h_t, p), actual_iter, final_kl
+            if profile_coda_cost:
+                run_one_iteration_ms_total = sum(run_one_iteration_ms_list)
+                get_output_ms_total = sum(get_output_ms_list)
+                coda_ms_total = sum(coda_ms_list)
+                output_proj_ms_total = sum(output_proj_ms_list)
+                # Ratio denominator is recurrent-core time plus all _get_output() calls.
+                # The uncached baseline therefore includes the final return-path Coda call.
+                profiled_recurrent_ms_total = run_one_iteration_ms_total + get_output_ms_total
+                self.last_recurrence_debug.update({
+                    "run_one_iteration_ms_list": run_one_iteration_ms_list,
+                    "get_output_ms_list": get_output_ms_list,
+                    "coda_ms_list": coda_ms_list,
+                    "output_proj_ms_list": output_proj_ms_list,
+                    "convergence_check_ms_list": convergence_check_ms_list,
+                    "get_output_call_count": len(get_output_ms_list),
+                    "coda_ms_total": coda_ms_total,
+                    "get_output_ms_total": get_output_ms_total,
+                    "run_one_iteration_ms_total": run_one_iteration_ms_total,
+                    "output_proj_ms_total": output_proj_ms_total,
+                    "coda_time_ratio_total": (
+                        coda_ms_total / profiled_recurrent_ms_total if profiled_recurrent_ms_total else 0.0
+                    ),
+                })
+
+            return final_output, actual_iter, final_kl
 
         # 여기까지가 metric 추가한 adaptive branch
 
@@ -467,7 +559,8 @@ class ActionHeadRecurrent(nn.Module):
 
     def predict_action(self, actions_hidden_states, proprio=None, proprio_projector=None,
                        phase="Inference", num_iter=None, convergence_strategy=None,
-                       kl_thresh=0.001, cos_thresh=0.999, max_iter=32, **kwargs):
+                       kl_thresh=0.001, cos_thresh=0.999, max_iter=32,
+                       profile_coda_cost=False, use_cached_final_output=False, **kwargs):
         B = actions_hidden_states.shape[0]
         proprio = proprio.reshape(B, -1).to(torch.bfloat16)
         proprio_features = proprio_projector(proprio).unsqueeze(1)
@@ -475,4 +568,6 @@ class ActionHeadRecurrent(nn.Module):
         h_a = actions_hidden_states[:, :, self.num_task_tokens:, :]
         return self.model(h_a, h_t, proprio_features, num_iter=num_iter,
                          convergence_strategy=convergence_strategy, kl_thresh=kl_thresh,
-                         cos_thresh=cos_thresh, max_iter=max_iter)
+                         cos_thresh=cos_thresh, max_iter=max_iter,
+                         profile_coda_cost=profile_coda_cost,
+                         use_cached_final_output=use_cached_final_output)

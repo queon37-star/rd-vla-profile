@@ -147,4 +147,4 @@ pretrained_models/*
 beaker/
 scripts.sh
 
-*.pycbenchmark_results/
+benchmark_results/

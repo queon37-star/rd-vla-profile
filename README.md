@@ -122,6 +122,33 @@ RD-VLA supports adaptive stopping based on action convergence:
 --recurrence_strategy cosine_similarity --recurrence_cos_thresh 0.999 --recurrence_max_iter 32
 ```
 
+### Coda Cost Profiling
+
+Profile the adaptive recurrent core, Coda, and output projection costs with a
+single-task smoke run:
+
+```bash
+python -m py_compile prismatic/models/action_heads.py \
+  prismatic/extern/hf/modeling_prismatic.py \
+  experiments/robot/openvla_utils.py \
+  experiments/robot/libero/run_libero_eval.py
+
+python experiments/robot/libero/run_libero_eval.py \
+  --pretrained_checkpoint outputs/12_24-24_24_Spatial_40k \
+  --task_suite_name libero_spatial \
+  --task_id 0 \
+  --num_trials_per_task 1 \
+  --use_recurrent True \
+  --recurrence_strategy kl_divergence \
+  --profile_coda_cost True \
+  --use_cached_final_output False \
+  --json_log_file /tmp/rdvla-coda-smoke/results.json \
+  --recurrent_convergence_dir /tmp/rdvla-coda-smoke/convergence
+```
+
+Repeat with `--use_cached_final_output True` to compare against reuse of the
+last output already computed inside the adaptive loop.
+
 ### Adaptive Execution
 
 Couple recurrence depth with action horizon:
