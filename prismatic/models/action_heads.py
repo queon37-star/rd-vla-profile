@@ -314,11 +314,15 @@ class VLARecurrent(nn.Module):
         # 아래는 측정용 metric 추가를 위해 수정한 adaptive branch
 
         if convergence_strategy in ("kl_divergence", "cosine_similarity") and not self.training:
+            prev_state = None
             prev_output = None
             actual_iter = 0
             final_kl = None
             conv_score_list = []
             action_delta_list = []
+            latent_mse_list = []
+            latent_l2_list = []
+            latent_action_mse_pairs = []
             first_converged_k_1e_4 = None
             first_converged_k_5e_4 = None
             adaptive_stop = False
@@ -355,15 +359,27 @@ class VLARecurrent(nn.Module):
 
                     if prev_output is not None:
                         diff = curr_output - prev_output
-                        mse = torch.mean(diff ** 2).item()
-                        l2 = torch.norm(diff.float()).item()
+                        action_mse = torch.mean(diff ** 2).item()
+                        action_l2 = torch.norm(diff.float()).item()
+                        latent_diff = state.float() - prev_state.float()
+                        latent_mse = torch.mean(latent_diff ** 2).item()
+                        latent_l2 = torch.norm(latent_diff.flatten()).item()
 
-                        conv_score_list.append(mse)
-                        action_delta_list.append(l2)
+                        conv_score_list.append(action_mse)
+                        action_delta_list.append(action_l2)
+                        latent_mse_list.append(latent_mse)
+                        latent_l2_list.append(latent_l2)
+                        latent_action_mse_pairs.append({
+                            "k": int(actual_iter),
+                            "latent_mse": float(latent_mse),
+                            "latent_l2": float(latent_l2),
+                            "action_mse": float(action_mse),
+                            "action_l2": float(action_l2),
+                        })
 
-                        if first_converged_k_1e_4 is None and mse < 1e-4:
+                        if first_converged_k_1e_4 is None and action_mse < 1e-4:
                             first_converged_k_1e_4 = actual_iter
-                        if first_converged_k_5e_4 is None and mse < 5e-4:
+                        if first_converged_k_5e_4 is None and action_mse < 5e-4:
                             first_converged_k_5e_4 = actual_iter
 
                         if convergence_strategy == "cosine_similarity":
@@ -374,10 +390,11 @@ class VLARecurrent(nn.Module):
                             if cos_sim > cos_thresh:
                                 adaptive_stop = True
                         elif convergence_strategy == "kl_divergence":
-                            final_kl = mse
-                            if mse < kl_thresh:
+                            final_kl = action_mse
+                            if action_mse < kl_thresh:
                                 adaptive_stop = True
 
+                    prev_state = state.detach()
                     prev_output = curr_output.detach()
                     if profile_coda_cost:
                         convergence_check_end = self._sync_time()
@@ -404,6 +421,10 @@ class VLARecurrent(nn.Module):
                 "iteration_metric_values": conv_score_list,
                 "conv_score_list": conv_score_list,
                 "action_delta_list": action_delta_list,
+                "latent_mse_list": latent_mse_list,
+                "latent_l2_list": latent_l2_list,
+                "latent_action_mse_pairs": latent_action_mse_pairs,
+                "latent_action_pair_count": len(latent_action_mse_pairs),
                 "first_converged_k_1e_4": first_converged_k_1e_4,
                 "first_converged_k_5e_4": first_converged_k_5e_4,
                 "final_mse": conv_score_list[-1] if conv_score_list else None,
