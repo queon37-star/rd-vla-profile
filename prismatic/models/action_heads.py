@@ -266,7 +266,11 @@ class VLARecurrent(nn.Module):
                 num_iter: int = None, convergence_strategy: str = None,
                 kl_thresh: float = 0.001, cos_thresh: float = 0.999,
                 max_iter: int = 32, profile_coda_cost: bool = False,
-                use_cached_final_output: bool = False, **kwargs) -> torch.Tensor:
+                use_cached_final_output: bool = False,
+                use_latent_precheck: bool = False,
+                latent_precheck_thresh: float = 0.12,
+                latent_precheck_min_iter: int = 2,
+                latent_precheck_force_interval: int = 0, **kwargs) -> torch.Tensor:
         B = h_a.size(0)
         device, dtype = h_a.device, h_a.dtype
 
@@ -323,6 +327,10 @@ class VLARecurrent(nn.Module):
             latent_mse_list = []
             latent_l2_list = []
             latent_action_mse_pairs = []
+            latent_precheck_coda_call_mask = []
+            latent_precheck_skipped_iters = []
+            latent_precheck_called_iters = []
+            latent_precheck_decisions = []
             first_converged_k_1e_4 = None
             first_converged_k_5e_4 = None
             adaptive_stop = False
@@ -352,53 +360,97 @@ class VLARecurrent(nn.Module):
                         run_one_iteration_ms_list.append((run_one_iteration_end - run_one_iteration_start) * 1000.0)
 
                     actual_iter = it + 1
-                    curr_output = self._get_output(state, h_a, h_t, p, profile=profile_coda_cost)
-                    if profile_coda_cost:
-                        append_get_output_timing()
-                        convergence_check_start = self._sync_time()
-
-                    if prev_output is not None:
-                        diff = curr_output - prev_output
-                        action_mse = torch.mean(diff ** 2).item()
-                        action_l2 = torch.norm(diff.float()).item()
+                    latent_mse = None
+                    latent_l2 = None
+                    if prev_state is not None:
                         latent_diff = state.float() - prev_state.float()
                         latent_mse = torch.mean(latent_diff ** 2).item()
                         latent_l2 = torch.norm(latent_diff.flatten()).item()
-
-                        conv_score_list.append(action_mse)
-                        action_delta_list.append(action_l2)
                         latent_mse_list.append(latent_mse)
                         latent_l2_list.append(latent_l2)
-                        latent_action_mse_pairs.append({
-                            "k": int(actual_iter),
-                            "latent_mse": float(latent_mse),
-                            "latent_l2": float(latent_l2),
-                            "action_mse": float(action_mse),
-                            "action_l2": float(action_l2),
-                        })
 
-                        if first_converged_k_1e_4 is None and action_mse < 1e-4:
-                            first_converged_k_1e_4 = actual_iter
-                        if first_converged_k_5e_4 is None and action_mse < 5e-4:
-                            first_converged_k_5e_4 = actual_iter
+                    if not use_latent_precheck:
+                        should_call_coda = True
+                        precheck_reason = "disabled"
+                    elif actual_iter == 1:
+                        should_call_coda = True
+                        precheck_reason = "first_iter"
+                    elif actual_iter == max_iter:
+                        should_call_coda = True
+                        precheck_reason = "max_iter"
+                    elif latent_precheck_force_interval > 0 and actual_iter % latent_precheck_force_interval == 0:
+                        should_call_coda = True
+                        precheck_reason = "force_interval"
+                    elif (
+                        latent_mse is not None
+                        and actual_iter >= latent_precheck_min_iter
+                        and latent_mse <= latent_precheck_thresh
+                    ):
+                        should_call_coda = True
+                        precheck_reason = "latent_below_thresh"
+                    else:
+                        should_call_coda = False
+                        precheck_reason = "skip_latent_above_thresh"
 
-                        if convergence_strategy == "cosine_similarity":
-                            cos_sim = F.cosine_similarity(
-                                prev_output.flatten(), curr_output.flatten(), dim=0
-                            ).item()
-                            final_kl = 1 - cos_sim
-                            if cos_sim > cos_thresh:
-                                adaptive_stop = True
-                        elif convergence_strategy == "kl_divergence":
-                            final_kl = action_mse
-                            if action_mse < kl_thresh:
-                                adaptive_stop = True
+                    latent_precheck_coda_call_mask.append(bool(should_call_coda))
+                    if should_call_coda:
+                        latent_precheck_called_iters.append(int(actual_iter))
+                    else:
+                        latent_precheck_skipped_iters.append(int(actual_iter))
 
+                    action_mse = None
+                    if should_call_coda:
+                        curr_output = self._get_output(state, h_a, h_t, p, profile=profile_coda_cost)
+                        if profile_coda_cost:
+                            append_get_output_timing()
+                            convergence_check_start = self._sync_time()
+
+                        if prev_output is not None:
+                            diff = curr_output - prev_output
+                            action_mse = torch.mean(diff ** 2).item()
+                            action_l2 = torch.norm(diff.float()).item()
+
+                            conv_score_list.append(action_mse)
+                            action_delta_list.append(action_l2)
+                            if latent_mse is not None:
+                                latent_action_mse_pairs.append({
+                                    "k": int(actual_iter),
+                                    "latent_mse": float(latent_mse),
+                                    "latent_l2": float(latent_l2),
+                                    "action_mse": float(action_mse),
+                                    "action_l2": float(action_l2),
+                                })
+
+                            if first_converged_k_1e_4 is None and action_mse < 1e-4:
+                                first_converged_k_1e_4 = actual_iter
+                            if first_converged_k_5e_4 is None and action_mse < 5e-4:
+                                first_converged_k_5e_4 = actual_iter
+
+                            if convergence_strategy == "cosine_similarity":
+                                cos_sim = F.cosine_similarity(
+                                    prev_output.flatten(), curr_output.flatten(), dim=0
+                                ).item()
+                                final_kl = 1 - cos_sim
+                                if cos_sim > cos_thresh:
+                                    adaptive_stop = True
+                            elif convergence_strategy == "kl_divergence":
+                                final_kl = action_mse
+                                if action_mse < kl_thresh:
+                                    adaptive_stop = True
+
+                        prev_output = curr_output.detach()
+                        if profile_coda_cost:
+                            convergence_check_end = self._sync_time()
+                            convergence_check_ms_list.append((convergence_check_end - convergence_check_start) * 1000.0)
+
+                    latent_precheck_decisions.append({
+                        "k": int(actual_iter),
+                        "latent_mse": float(latent_mse) if latent_mse is not None else None,
+                        "call_coda": bool(should_call_coda),
+                        "reason": precheck_reason,
+                        "action_mse": float(action_mse) if action_mse is not None else None,
+                    })
                     prev_state = state.detach()
-                    prev_output = curr_output.detach()
-                    if profile_coda_cost:
-                        convergence_check_end = self._sync_time()
-                        convergence_check_ms_list.append((convergence_check_end - convergence_check_start) * 1000.0)
                     if adaptive_stop:
                         break
 
@@ -425,6 +477,20 @@ class VLARecurrent(nn.Module):
                 "latent_l2_list": latent_l2_list,
                 "latent_action_mse_pairs": latent_action_mse_pairs,
                 "latent_action_pair_count": len(latent_action_mse_pairs),
+                "use_latent_precheck": bool(use_latent_precheck),
+                "latent_precheck_thresh": float(latent_precheck_thresh),
+                "latent_precheck_min_iter": int(latent_precheck_min_iter),
+                "latent_precheck_force_interval": int(latent_precheck_force_interval),
+                "latent_precheck_coda_call_mask": latent_precheck_coda_call_mask,
+                "latent_precheck_skipped_iters": latent_precheck_skipped_iters,
+                "latent_precheck_called_iters": latent_precheck_called_iters,
+                "latent_precheck_skip_count": len(latent_precheck_skipped_iters),
+                "latent_precheck_call_count": len(latent_precheck_called_iters),
+                "latent_precheck_skip_ratio": (
+                    len(latent_precheck_skipped_iters) / len(latent_precheck_coda_call_mask)
+                    if latent_precheck_coda_call_mask else 0.0
+                ),
+                "latent_precheck_decisions": latent_precheck_decisions,
                 "first_converged_k_1e_4": first_converged_k_1e_4,
                 "first_converged_k_5e_4": first_converged_k_5e_4,
                 "final_mse": conv_score_list[-1] if conv_score_list else None,
@@ -581,7 +647,9 @@ class ActionHeadRecurrent(nn.Module):
     def predict_action(self, actions_hidden_states, proprio=None, proprio_projector=None,
                        phase="Inference", num_iter=None, convergence_strategy=None,
                        kl_thresh=0.001, cos_thresh=0.999, max_iter=32,
-                       profile_coda_cost=False, use_cached_final_output=False, **kwargs):
+                       profile_coda_cost=False, use_cached_final_output=False,
+                       use_latent_precheck=False, latent_precheck_thresh=0.12,
+                       latent_precheck_min_iter=2, latent_precheck_force_interval=0, **kwargs):
         B = actions_hidden_states.shape[0]
         proprio = proprio.reshape(B, -1).to(torch.bfloat16)
         proprio_features = proprio_projector(proprio).unsqueeze(1)
@@ -591,4 +659,8 @@ class ActionHeadRecurrent(nn.Module):
                          convergence_strategy=convergence_strategy, kl_thresh=kl_thresh,
                          cos_thresh=cos_thresh, max_iter=max_iter,
                          profile_coda_cost=profile_coda_cost,
-                         use_cached_final_output=use_cached_final_output)
+                         use_cached_final_output=use_cached_final_output,
+                         use_latent_precheck=use_latent_precheck,
+                         latent_precheck_thresh=latent_precheck_thresh,
+                         latent_precheck_min_iter=latent_precheck_min_iter,
+                         latent_precheck_force_interval=latent_precheck_force_interval)

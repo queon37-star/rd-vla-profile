@@ -149,6 +149,30 @@ python experiments/robot/libero/run_libero_eval.py \
 Repeat with `--use_cached_final_output True` to compare against reuse of the
 last output already computed inside the adaptive loop.
 
+### Latent Pre-check for Coda
+
+Use latent-state convergence as a pre-check for whether to call Coda. Adaptive
+stopping still requires the existing action-space convergence check after an
+actual Coda call.
+
+```bash
+python experiments/robot/libero/run_libero_eval.py \
+  --pretrained_checkpoint outputs/12_24-24_24_Spatial_40k \
+  --task_suite_name libero_spatial \
+  --task_id 0 \
+  --num_trials_per_task 1 \
+  --use_recurrent True \
+  --recurrence_strategy kl_divergence \
+  --profile_coda_cost True \
+  --use_cached_final_output True \
+  --use_latent_precheck True \
+  --latent_precheck_thresh 0.12 \
+  --latent_precheck_min_iter 2 \
+  --latent_precheck_force_interval 4 \
+  --json_log_file benchmark_results/latent_precheck/smoke_task0/results.json \
+  --recurrent_convergence_dir benchmark_results/latent_precheck/smoke_task0/convergence
+```
+
 ### Adaptive Execution
 
 Couple recurrence depth with action horizon:

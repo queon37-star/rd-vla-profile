@@ -131,6 +131,12 @@ class GenerateConfig:
     profile_coda_cost: bool = False
     use_cached_final_output: bool = False
 
+    # Optional latent-state pre-check before running Coda in adaptive recurrence.
+    use_latent_precheck: bool = False
+    latent_precheck_thresh: float = 0.12
+    latent_precheck_min_iter: int = 2
+    latent_precheck_force_interval: int = 0
+
     # Fixed execution: always use first N actions
     num_exec_actions: int = 5
 
@@ -393,6 +399,16 @@ def summarize_coda_profiling(records: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
+def summarize_latent_precheck(records: List[Dict[str, Any]]) -> Dict[str, Any]:
+    enabled_records = [r for r in records if r.get("use_latent_precheck")]
+    return {
+        "enabled_prediction_count": len(enabled_records),
+        "skip_count_stats": _numeric_stats([r.get("latent_precheck_skip_count") for r in enabled_records]),
+        "call_count_stats": _numeric_stats([r.get("latent_precheck_call_count") for r in enabled_records]),
+        "skip_ratio_stats": _numeric_stats([r.get("latent_precheck_skip_ratio") for r in enabled_records]),
+    }
+
+
 def save_recurrent_convergence_summary(cfg, full_results, log_file=None):
     """Write run-level success/failure comparison for recurrent convergence metrics."""
     step_log_path = get_step_log_file(cfg)
@@ -428,18 +444,21 @@ def save_recurrent_convergence_summary(cfg, full_results, log_file=None):
                 "final_mse_stats": _numeric_stats([r.get("final_mse") for r in prediction_records]),
                 "adaptive_stop_count": sum(1 for r in prediction_records if r.get("adaptive_stop")),
                 "coda_profiling": summarize_coda_profiling(prediction_records),
+                "latent_precheck": summarize_latent_precheck(prediction_records),
             },
             "success": {
                 "iteration_stats": _numeric_stats([r.get("recurrent_iteration_count") for r in success_records]),
                 "final_mse_stats": _numeric_stats([r.get("final_mse") for r in success_records]),
                 "adaptive_stop_count": sum(1 for r in success_records if r.get("adaptive_stop")),
                 "coda_profiling": summarize_coda_profiling(success_records),
+                "latent_precheck": summarize_latent_precheck(success_records),
             },
             "failure": {
                 "iteration_stats": _numeric_stats([r.get("recurrent_iteration_count") for r in failure_records]),
                 "final_mse_stats": _numeric_stats([r.get("final_mse") for r in failure_records]),
                 "adaptive_stop_count": sum(1 for r in failure_records if r.get("adaptive_stop")),
                 "coda_profiling": summarize_coda_profiling(failure_records),
+                "latent_precheck": summarize_latent_precheck(failure_records),
             },
         },
         "rollout_level": {
@@ -686,6 +705,17 @@ def run_episode(
                     "latent_l2_list": debug.get("latent_l2_list", []),
                     "latent_action_mse_pairs": debug.get("latent_action_mse_pairs", []),
                     "latent_action_pair_count": debug.get("latent_action_pair_count", 0),
+                    "use_latent_precheck": bool(debug.get("use_latent_precheck", False)),
+                    "latent_precheck_thresh": debug.get("latent_precheck_thresh"),
+                    "latent_precheck_min_iter": debug.get("latent_precheck_min_iter"),
+                    "latent_precheck_force_interval": debug.get("latent_precheck_force_interval"),
+                    "latent_precheck_coda_call_mask": debug.get("latent_precheck_coda_call_mask", []),
+                    "latent_precheck_skipped_iters": debug.get("latent_precheck_skipped_iters", []),
+                    "latent_precheck_called_iters": debug.get("latent_precheck_called_iters", []),
+                    "latent_precheck_skip_count": debug.get("latent_precheck_skip_count", 0),
+                    "latent_precheck_call_count": debug.get("latent_precheck_call_count", 0),
+                    "latent_precheck_skip_ratio": debug.get("latent_precheck_skip_ratio", 0.0),
+                    "latent_precheck_decisions": debug.get("latent_precheck_decisions", []),
                     "first_converged_k_1e_4": debug.get("first_converged_k_1e_4", None),
                     "first_converged_k_5e_4": debug.get("first_converged_k_5e_4", None),
                     "prev_action_delta": prev_action_delta,

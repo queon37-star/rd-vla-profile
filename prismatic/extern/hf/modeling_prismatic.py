@@ -787,6 +787,10 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
         max_iter=32,
         profile_coda_cost=False,
         use_cached_final_output=False,
+        use_latent_precheck=False,
+        latent_precheck_thresh=0.12,
+        latent_precheck_min_iter=2,
+        latent_precheck_force_interval=0,
     ):
         """Run L1 regression-based continuous action prediction or discrete action tokens prediction."""
 
@@ -846,6 +850,10 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
                 max_iter=max_iter,
                 profile_coda_cost=profile_coda_cost,
                 use_cached_final_output=use_cached_final_output,
+                use_latent_precheck=use_latent_precheck,
+                latent_precheck_thresh=latent_precheck_thresh,
+                latent_precheck_min_iter=latent_precheck_min_iter,
+                latent_precheck_force_interval=latent_precheck_force_interval,
             )
             # Handle convergence-based return (output, num_iters, final_kl) vs fixed return (output)
             actual_iters = None
@@ -894,6 +902,10 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
         max_iter: int = 32,
         profile_coda_cost: bool = False,
         use_cached_final_output: bool = False,
+        use_latent_precheck: bool = False,
+        latent_precheck_thresh: float = 0.12,
+        latent_precheck_min_iter: int = 2,
+        latent_precheck_force_interval: int = 0,
         **kwargs: str,
     ) -> np.ndarray:
 
@@ -952,6 +964,10 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
             max_iter=max_iter,
             profile_coda_cost=profile_coda_cost,
             use_cached_final_output=use_cached_final_output,
+            use_latent_precheck=use_latent_precheck,
+            latent_precheck_thresh=latent_precheck_thresh,
+            latent_precheck_min_iter=latent_precheck_min_iter,
+            latent_precheck_force_interval=latent_precheck_force_interval,
             )
 
         # Unnormalize predicted actions
