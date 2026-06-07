@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import shutil
 import sys
 import time
 from collections import deque
@@ -43,6 +44,7 @@ from experiments.robot.robot_utils import (
     set_seed_everywhere,
 )
 from prismatic.vla.constants import NUM_ACTIONS_CHUNK
+from prismatic.utils.rdvla_profiler import RDVLAProfiler
 
 
 class TaskSuite(str, Enum):
@@ -131,6 +133,13 @@ class GenerateConfig:
     profile_coda_cost: bool = False
     use_cached_final_output: bool = False
 
+    # Optional PyTorch Profiler instrumentation for RD-VLA action inference.
+    profile_pytorch: bool = False
+    profile_steps: int = 1
+    profile_trace_path: str = "./profiles/rdvla_pytorch_trace.json"
+    profile_record_shapes: bool = False
+    profile_memory: bool = False
+
     # Optional latent-state pre-check before running Coda in adaptive recurrence.
     use_latent_precheck: bool = False
     latent_precheck_thresh: float = 0.12
@@ -178,6 +187,10 @@ def validate_config(cfg: GenerateConfig) -> None:
 
     # Validate task suite
     assert cfg.task_suite_name in [suite.value for suite in TaskSuite], f"Invalid task suite: {cfg.task_suite_name}"
+
+    if cfg.profile_pytorch:
+        assert cfg.profile_steps >= 0, "profile_steps must be non-negative!"
+        assert cfg.profile_trace_path, "profile_trace_path must be non-empty when profile_pytorch is enabled!"
 
 
 def calculate_linear_decay_horizon(actual_iters: int) -> int:
@@ -292,6 +305,72 @@ def log_message(message: str, log_file=None):
     if log_file:
         log_file.write(message + "\n")
         log_file.flush()
+
+
+def _pytorch_profiler_activities():
+    activities = [torch.profiler.ProfilerActivity.CPU]
+    if torch.cuda.is_available():
+        activities.append(torch.profiler.ProfilerActivity.CUDA)
+    return activities
+
+
+def _profile_trace_path_for_call(base_path: str, profile_call_index: int, profile_steps: int) -> Path:
+    path = Path(base_path)
+    if profile_steps <= 1:
+        return path
+
+    suffix = path.suffix or ".json"
+    return path.with_name(f"{path.stem}_step{profile_call_index:04d}{suffix}")
+
+
+def run_with_optional_pytorch_profile(cfg, profile_state, log_file, action_fn):
+    """Run one action inference call, optionally under torch.profiler."""
+    profile_steps = max(0, int(getattr(cfg, "profile_steps", 1)))
+    if (
+        not getattr(cfg, "profile_pytorch", False)
+        or profile_state is None
+        or profile_state.get("profiled_calls", 0) >= profile_steps
+    ):
+        return action_fn()
+
+    profile_call_index = profile_state.get("profiled_calls", 0) + 1
+    RDVLAProfiler.set_enabled(True)
+    try:
+        with torch.profiler.profile(
+            activities=_pytorch_profiler_activities(),
+            record_shapes=getattr(cfg, "profile_record_shapes", False),
+            profile_memory=getattr(cfg, "profile_memory", False),
+        ) as prof:
+            result = action_fn()
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+    finally:
+        RDVLAProfiler.set_enabled(False)
+
+    profile_state["profiled_calls"] = profile_call_index
+    sort_by = "cuda_time_total" if torch.cuda.is_available() else "cpu_time_total"
+    table = prof.key_averages().table(sort_by=sort_by, row_limit=100)
+    header = f"\nPyTorch profiler action inference {profile_call_index}/{profile_steps}"
+    print(header)
+    print(table)
+    if log_file:
+        log_file.write(header + "\n")
+        log_file.write(table + "\n")
+        log_file.flush()
+
+    base_trace_path = Path(getattr(cfg, "profile_trace_path", "") or "./profiles/rdvla_pytorch_trace.json")
+    trace_path = _profile_trace_path_for_call(str(base_trace_path), profile_call_index, profile_steps)
+    trace_path.parent.mkdir(parents=True, exist_ok=True)
+    prof.export_chrome_trace(str(trace_path))
+
+    if trace_path != base_trace_path:
+        base_trace_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(trace_path, base_trace_path)
+        log_message(f"Saved PyTorch profiler trace to {trace_path}; latest trace copied to {base_trace_path}", log_file)
+    else:
+        log_message(f"Saved PyTorch profiler trace to {trace_path}", log_file)
+
+    return result
 
 
 def append_jsonl(path, records):
@@ -567,6 +646,7 @@ def run_episode(
     global_iters=None,
     task_id=None,
     episode_idx=None,
+    profile_state=None,
 ):
     """Run a single episode in the environment."""
     env.reset()
@@ -623,17 +703,25 @@ def run_episode(
                 # )
 
                 # recurrence debug metric 전달을 위해 수정한 호출 코드
-                actions, actual_iters, final_kl, recurrence_debug = get_action(
-                    cfg,
-                    model,
-                    observation,
-                    task_description,
-                    processor=processor,
-                    action_head=action_head,
-                    proprio_projector=proprio_projector,
-                    use_film=cfg.use_film,
-                    use_minivlm=cfg.use_minivlm
-                )
+                def predict_action_once():
+                    return get_action(
+                        cfg,
+                        model,
+                        observation,
+                        task_description,
+                        processor=processor,
+                        action_head=action_head,
+                        proprio_projector=proprio_projector,
+                        use_film=cfg.use_film,
+                        use_minivlm=cfg.use_minivlm
+                    )
+
+                if getattr(cfg, "profile_pytorch", False):
+                    actions, actual_iters, final_kl, recurrence_debug = run_with_optional_pytorch_profile(
+                        cfg, profile_state, log_file, predict_action_once
+                    )
+                else:
+                    actions, actual_iters, final_kl, recurrence_debug = predict_action_once()
 
                 if torch.cuda.is_available():
                     torch.cuda.synchronize()
@@ -847,7 +935,8 @@ def run_task(
     total_episodes=0,
     total_successes=0,
     log_file=None,
-    save_version=None
+    save_version=None,
+    profile_state=None,
 ):
     """Run evaluation for a single task."""
     task = task_suite.get_task(task_id)
@@ -887,6 +976,7 @@ def run_task(
             global_iters=all_iters,
             task_id=task_id,
             episode_idx=episode_idx,
+            profile_state=profile_state,
         )
 
         if episode_iters:
@@ -969,6 +1059,15 @@ def eval_libero(cfg: GenerateConfig) -> float:
     resize_size = get_image_resize_size(cfg)
     log_file, local_log_filepath, run_id = setup_logging(cfg)
 
+    RDVLAProfiler.set_enabled(False)
+    profile_state = {"profiled_calls": 0} if cfg.profile_pytorch else None
+    if cfg.profile_pytorch:
+        log_message(
+            f"PyTorch profiler enabled for first {cfg.profile_steps} action inference calls; "
+            f"trace path: {cfg.profile_trace_path}",
+            log_file,
+        )
+
     convergence_log_path, convergence_summary_path = configure_recurrent_convergence_paths(cfg, run_id)
     log_message(f"Recurrent convergence prediction log: {convergence_log_path}", log_file)
     log_message(f"Recurrent convergence summary file: {convergence_summary_path}", log_file)
@@ -1009,7 +1108,8 @@ def eval_libero(cfg: GenerateConfig) -> float:
             total_episodes,
             total_successes,
             log_file,
-            cfg.save_version
+            cfg.save_version,
+            profile_state
         )
         task = task_suite.get_task(task_id)
         full_results["tasks"][task.name] = task_stats
@@ -1048,6 +1148,8 @@ def eval_libero(cfg: GenerateConfig) -> float:
             }
         )
         wandb.save(local_log_filepath)
+
+    RDVLAProfiler.set_enabled(False)
 
     if log_file:
         log_file.close()

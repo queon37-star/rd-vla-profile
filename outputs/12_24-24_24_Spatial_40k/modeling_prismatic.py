@@ -24,6 +24,7 @@ from prismatic.training.train_utils import (
     get_current_action_mask,
     get_next_actions_mask,
 )
+from prismatic.utils.rdvla_profiler import rdvla_range
 from prismatic.vla.constants import (
     ACTION_DIM,
     ACTION_PROPRIO_NORMALIZATION_TYPE,
@@ -417,36 +418,41 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
 
     def _replace_input_embeddings(self, input_embeddings, all_actions_mask, replacement_features):
         """Replace embeddings at masked positions with replacement_features."""
-        new_input_embeddings = input_embeddings.clone()
-        repositioned_features = torch.zeros_like(input_embeddings)
+        with rdvla_range("RDVLA/vlm/replace_action_embeddings"):
+            new_input_embeddings = input_embeddings.clone()
+            repositioned_features = torch.zeros_like(input_embeddings)
 
-        batch_indices = torch.arange(input_embeddings.shape[0], device=input_embeddings.device)
-        batch_indices = batch_indices.unsqueeze(1).expand(-1, replacement_features.shape[1])
-        masked_indices = torch.stack([torch.where(mask)[0] for mask in all_actions_mask])
-        repositioned_features[batch_indices, masked_indices] = replacement_features
+            batch_indices = torch.arange(input_embeddings.shape[0], device=input_embeddings.device)
+            batch_indices = batch_indices.unsqueeze(1).expand(-1, replacement_features.shape[1])
+            masked_indices = torch.stack([torch.where(mask)[0] for mask in all_actions_mask])
+            repositioned_features[batch_indices, masked_indices] = replacement_features
 
-        new_input_embeddings = torch.where(
-            all_actions_mask.unsqueeze(-1), repositioned_features, new_input_embeddings
-        )
-        return new_input_embeddings
+            new_input_embeddings = torch.where(
+                all_actions_mask.unsqueeze(-1), repositioned_features, new_input_embeddings
+            )
+            return new_input_embeddings
 
     def _process_action_masks(self, labels):
         """Helper to get action masks from labels"""
-        current_action_mask = get_current_action_mask(labels)
-        next_actions_mask = get_next_actions_mask(labels)
-        all_actions_mask = current_action_mask | next_actions_mask  # (B, seq_len)
-        return all_actions_mask
+        with rdvla_range("RDVLA/vlm/process_action_masks"):
+            current_action_mask = get_current_action_mask(labels)
+            next_actions_mask = get_next_actions_mask(labels)
+            all_actions_mask = current_action_mask | next_actions_mask  # (B, seq_len)
+            return all_actions_mask
 
     def _process_vision_features(self, pixel_values, language_embeddings=None, use_film=False):
         """Process vision features with optional FiLM conditioning"""
-        if use_film:
-            # FiLM: Infuse language inputs into visual features
-            patch_features = self.vision_backbone(pixel_values, language_embeddings)  # (bsz, 256 * num_images, D)
-        else:
-            patch_features = self.vision_backbone(pixel_values)  # (bsz, 256 * num_images, D)
+        with rdvla_range("RDVLA/vlm/process_vision_features_total"):
+            with rdvla_range("RDVLA/vlm/vision_backbone"):
+                if use_film:
+                    # FiLM: Infuse language inputs into visual features
+                    patch_features = self.vision_backbone(pixel_values, language_embeddings)  # (bsz, 256 * num_images, D)
+                else:
+                    patch_features = self.vision_backbone(pixel_values)  # (bsz, 256 * num_images, D)
 
-        # Project patch embeddings into language embedding space
-        return self.projector(patch_features)
+            # Project patch embeddings into language embedding space
+            with rdvla_range("RDVLA/vlm/projector"):
+                return self.projector(patch_features)
 
     def _process_proprio_features(self, projected_patch_embeddings, proprio, proprio_projector):
         """Process proprioceptive features and append to vision features"""
@@ -462,29 +468,30 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
 
     def _build_multimodal_attention(self, input_embeddings, projected_patch_embeddings, attention_mask):
         """Build multimodal embeddings and attention mask"""
-        # Update attention mask
-        
-        projected_patch_attention_mask = None
-        if attention_mask is not None:
-            projected_patch_attention_mask = torch.full(
-                (projected_patch_embeddings.shape[0], projected_patch_embeddings.shape[1]),
-                fill_value=True,
-                dtype=attention_mask.dtype,
-                device=attention_mask.device,
+        with rdvla_range("RDVLA/vlm/build_multimodal_attention"):
+            # Update attention mask
+
+            projected_patch_attention_mask = None
+            if attention_mask is not None:
+                projected_patch_attention_mask = torch.full(
+                    (projected_patch_embeddings.shape[0], projected_patch_embeddings.shape[1]),
+                    fill_value=True,
+                    dtype=attention_mask.dtype,
+                    device=attention_mask.device,
+                )
+
+            # Build multimodal embeddings & attention mask; insert embeddings after <BOS> token (1:)
+            multimodal_embeddings = torch.cat(
+                [input_embeddings[:, :1, :], projected_patch_embeddings, input_embeddings[:, 1:, :]], dim=1
             )
 
-        # Build multimodal embeddings & attention mask; insert embeddings after <BOS> token (1:)
-        multimodal_embeddings = torch.cat(
-            [input_embeddings[:, :1, :], projected_patch_embeddings, input_embeddings[:, 1:, :]], dim=1
-        )
+            multimodal_attention_mask = None
+            if attention_mask is not None:
+                multimodal_attention_mask = torch.cat(
+                    [attention_mask[:, :1], projected_patch_attention_mask, attention_mask[:, 1:]], dim=1
+                )
 
-        multimodal_attention_mask = None
-        if attention_mask is not None:
-            multimodal_attention_mask = torch.cat(
-                [attention_mask[:, :1], projected_patch_attention_mask, attention_mask[:, 1:]], dim=1
-            )
-
-        return multimodal_embeddings, multimodal_attention_mask
+            return multimodal_embeddings, multimodal_attention_mask
 
     def _build_multimodal_labels(self, labels, projected_patch_embeddings):
         """Build multimodal labels with IGNORE_INDEX for patch embeddings"""
@@ -710,62 +717,65 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
 
     def _prepare_input_for_action_prediction(self, input_ids, attention_mask):
         """Prepares input for action prediction by adding necessary tokens"""
-        # Add (ACTION_DIM * NUM_ACTIONS_CHUNK) placeholder tokens to input_ids to simulate action tokens
-        placeholder_action_token_ids = (
-            torch.ones((input_ids.shape[0], NUM_TOKENS)).to(input_ids.device).to(input_ids.dtype)
-        )
-        input_ids = torch.cat([input_ids, placeholder_action_token_ids], dim=-1)
+        with rdvla_range("RDVLA/vlm/prepare_input_for_action_prediction"):
+            # Add (ACTION_DIM * NUM_ACTIONS_CHUNK) placeholder tokens to input_ids to simulate action tokens
+            placeholder_action_token_ids = (
+                torch.ones((input_ids.shape[0], NUM_TOKENS)).to(input_ids.device).to(input_ids.dtype)
+            )
+            input_ids = torch.cat([input_ids, placeholder_action_token_ids], dim=-1)
 
-        # Add stop token to sequence (needed in non-causal bi-directional self-attention, as it appears at train time)
-        stop_token_id = torch.ones((input_ids.shape[0], 1)).to(input_ids.device).to(input_ids.dtype) * STOP_INDEX
-        input_ids = torch.cat([input_ids, stop_token_id], dim=-1)
+            # Add stop token to sequence (needed in non-causal bi-directional self-attention, as it appears at train time)
+            stop_token_id = torch.ones((input_ids.shape[0], 1)).to(input_ids.device).to(input_ids.dtype) * STOP_INDEX
+            input_ids = torch.cat([input_ids, stop_token_id], dim=-1)
 
-        # Extend the attention mask to fit the new shape of input
-        # Note: Only batch size == 1 supported right now
-        mask_extension = (
-            torch.ones((attention_mask.shape[0], input_ids.shape[-1] - attention_mask.shape[-1]))
-            .to(attention_mask.device)
-            .to(attention_mask.dtype)
-        )
-        attention_mask = torch.cat([attention_mask, mask_extension], dim=-1)
+            # Extend the attention mask to fit the new shape of input
+            # Note: Only batch size == 1 supported right now
+            mask_extension = (
+                torch.ones((attention_mask.shape[0], input_ids.shape[-1] - attention_mask.shape[-1]))
+                .to(attention_mask.device)
+                .to(attention_mask.dtype)
+            )
+            attention_mask = torch.cat([attention_mask, mask_extension], dim=-1)
 
-        return input_ids, attention_mask
+            return input_ids, attention_mask
 
     def _prepare_labels_for_action_prediction(self, labels, input_ids):
         """Creates labels tensor for action prediction if not provided"""
-        # Extend labels tensor with fake action labels
-        ARBITRARY_ACTION_TOKEN_IDX = ACTION_TOKEN_BEGIN_IDX + 1
-        labels_extension = (
-            torch.ones((labels.shape[0], input_ids.shape[-1] - labels.shape[-1])).to(labels.device).to(labels.dtype)
-            * ARBITRARY_ACTION_TOKEN_IDX
-        )
-        labels = torch.cat([labels, labels_extension], dim=-1)
+        with rdvla_range("RDVLA/vlm/prepare_labels_for_action_prediction"):
+            # Extend labels tensor with fake action labels
+            ARBITRARY_ACTION_TOKEN_IDX = ACTION_TOKEN_BEGIN_IDX + 1
+            labels_extension = (
+                torch.ones((labels.shape[0], input_ids.shape[-1] - labels.shape[-1])).to(labels.device).to(labels.dtype)
+                * ARBITRARY_ACTION_TOKEN_IDX
+            )
+            labels = torch.cat([labels, labels_extension], dim=-1)
 
-        # Replace last label token with stop token
-        labels[:, -1] = STOP_INDEX
+            # Replace last label token with stop token
+            labels[:, -1] = STOP_INDEX
 
-        return labels
+            return labels
 
     def _unnormalize_actions(self, normalized_actions, unnorm_key=None):
         """Unnormalize actions using dataset statistics"""
-        action_norm_stats = self.get_action_stats(unnorm_key)
+        with rdvla_range("RDVLA/vlm/unnormalize_actions"):
+            action_norm_stats = self.get_action_stats(unnorm_key)
 
-        if ACTION_PROPRIO_NORMALIZATION_TYPE == NormalizationType.BOUNDS:
-            mask = action_norm_stats.get("mask", np.ones_like(action_norm_stats["min"], dtype=bool))
-            action_high, action_low = np.array(action_norm_stats["max"]), np.array(action_norm_stats["min"])
-        elif ACTION_PROPRIO_NORMALIZATION_TYPE == NormalizationType.BOUNDS_Q99:
-            mask = action_norm_stats.get("mask", np.ones_like(action_norm_stats["q01"], dtype=bool))
-            action_high, action_low = np.array(action_norm_stats["q99"]), np.array(action_norm_stats["q01"])
-        else:
-            raise ValueError("Unsupported action/proprio normalization type detected!")
+            if ACTION_PROPRIO_NORMALIZATION_TYPE == NormalizationType.BOUNDS:
+                mask = action_norm_stats.get("mask", np.ones_like(action_norm_stats["min"], dtype=bool))
+                action_high, action_low = np.array(action_norm_stats["max"]), np.array(action_norm_stats["min"])
+            elif ACTION_PROPRIO_NORMALIZATION_TYPE == NormalizationType.BOUNDS_Q99:
+                mask = action_norm_stats.get("mask", np.ones_like(action_norm_stats["q01"], dtype=bool))
+                action_high, action_low = np.array(action_norm_stats["q99"]), np.array(action_norm_stats["q01"])
+            else:
+                raise ValueError("Unsupported action/proprio normalization type detected!")
 
-        actions = np.where(
-            mask,
-            0.5 * (normalized_actions + 1) * (action_high - action_low + 1e-8) + action_low,
-            normalized_actions,
-        )
+            actions = np.where(
+                mask,
+                0.5 * (normalized_actions + 1) * (action_high - action_low + 1e-8) + action_low,
+                normalized_actions,
+            )
 
-        return actions
+            return actions
 
 
     def _regression_or_discrete_prediction(
@@ -785,6 +795,12 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
         kl_thresh=0.001,
         cos_thresh=0.999,
         max_iter=32,
+        profile_coda_cost=False,
+        use_cached_final_output=False,
+        use_latent_precheck=False,
+        latent_precheck_thresh=0.12,
+        latent_precheck_min_iter=2,
+        latent_precheck_force_interval=0,
     ):
         """Run L1 regression-based continuous action prediction or discrete action tokens prediction."""
 
@@ -799,50 +815,59 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
         )
 
         # Forward pass through language model
-        language_model_output = self.language_model(
-            input_ids=None,
-            attention_mask=multimodal_attention_mask,
-            position_ids=None,
-            past_key_values=None,
-            inputs_embeds=multimodal_embeddings,
-            labels=None,
-            use_cache=None,
-            output_attentions=False,
-            output_hidden_states=True,
-            return_dict=True,
-        )
+        with rdvla_range("RDVLA/vlm/language_model_forward"):
+            language_model_output = self.language_model(
+                input_ids=None,
+                attention_mask=multimodal_attention_mask,
+                position_ids=None,
+                past_key_values=None,
+                inputs_embeds=multimodal_embeddings,
+                labels=None,
+                use_cache=None,
+                output_attentions=False,
+                output_hidden_states=True,
+                return_dict=True,
+            )
 
         # Extract hidden states for action tokens
-        multi_layer_hidden_states = []
-        
-        for item in language_model_output.hidden_states[0:]:
-            # last_hidden_states = output.hidden_states[-1]  # (B, seq_len, D)
-            # Get hidden states for text portion of prompt+response (after the vision patches)
-            text_hidden_states = item
-            # Get hidden states for action portion of response
-            actions_hidden_states = text_hidden_states[:, NUM_PATCHES+ NUM_PROMPT_TOKENS : NUM_PATCHES + NUM_PROMPT_TOKENS + NUM_TOKENS, :,].reshape(1, 1, NUM_TOKENS, -1).to(torch.bfloat16)
-            
-            batch_size = item.shape[0]
-            task_latten_states = item[:, :NUM_PATCHES].reshape(batch_size, 1, NUM_PATCHES , -1)
-            all_hidden_states = torch.cat((task_latten_states, actions_hidden_states),2)
-            multi_layer_hidden_states.append(all_hidden_states)
-            
-        multi_layer_hidden_states = torch.cat(multi_layer_hidden_states, dim = 1)
-        
+        with rdvla_range("RDVLA/vlm/extract_hidden_states"):
+            multi_layer_hidden_states = []
+
+            for item in language_model_output.hidden_states[0:]:
+                # last_hidden_states = output.hidden_states[-1]  # (B, seq_len, D)
+                # Get hidden states for text portion of prompt+response (after the vision patches)
+                text_hidden_states = item
+                # Get hidden states for action portion of response
+                actions_hidden_states = text_hidden_states[:, NUM_PATCHES+ NUM_PROMPT_TOKENS : NUM_PATCHES + NUM_PROMPT_TOKENS + NUM_TOKENS, :,].reshape(1, 1, NUM_TOKENS, -1).to(torch.bfloat16)
+
+                batch_size = item.shape[0]
+                task_latten_states = item[:, :NUM_PATCHES].reshape(batch_size, 1, NUM_PATCHES , -1)
+                all_hidden_states = torch.cat((task_latten_states, actions_hidden_states),2)
+                multi_layer_hidden_states.append(all_hidden_states)
+
+            multi_layer_hidden_states = torch.cat(multi_layer_hidden_states, dim = 1)
+
 
         # Handle different prediction methods
         if action_head is not None:
             # L1 regression prediction
-            result = action_head.predict_action(
-                multi_layer_hidden_states,
-                proprio=proprio,
-                proprio_projector=proprio_projector,
-                num_iter=num_iter,
-                convergence_strategy=convergence_strategy,
-                kl_thresh=kl_thresh,
-                cos_thresh=cos_thresh,
-                max_iter=max_iter,
-            )
+            with rdvla_range("RDVLA/action_head/predict_action_total"):
+                result = action_head.predict_action(
+                    multi_layer_hidden_states,
+                    proprio=proprio,
+                    proprio_projector=proprio_projector,
+                    num_iter=num_iter,
+                    convergence_strategy=convergence_strategy,
+                    kl_thresh=kl_thresh,
+                    cos_thresh=cos_thresh,
+                    max_iter=max_iter,
+                    profile_coda_cost=profile_coda_cost,
+                    use_cached_final_output=use_cached_final_output,
+                    use_latent_precheck=use_latent_precheck,
+                    latent_precheck_thresh=latent_precheck_thresh,
+                    latent_precheck_min_iter=latent_precheck_min_iter,
+                    latent_precheck_force_interval=latent_precheck_force_interval,
+                )
             # Handle convergence-based return (output, num_iters, final_kl) vs fixed return (output)
             actual_iters = None
             final_kl = None
@@ -888,6 +913,12 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
         kl_thresh: float = 0.001,
         cos_thresh: float = 0.999,
         max_iter: int = 32,
+        profile_coda_cost: bool = False,
+        use_cached_final_output: bool = False,
+        use_latent_precheck: bool = False,
+        latent_precheck_thresh: float = 0.12,
+        latent_precheck_min_iter: int = 2,
+        latent_precheck_force_interval: int = 0,
         **kwargs: str,
     ) -> np.ndarray:
 
@@ -908,13 +939,15 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
         labels = self._prepare_labels_for_action_prediction(labels, input_ids)
 
         # Get input embeddings and action masks
-        input_embeddings = self.get_input_embeddings()(input_ids)
+        with rdvla_range("RDVLA/vlm/input_embeddings"):
+            input_embeddings = self.get_input_embeddings()(input_ids)
         all_actions_mask = self._process_action_masks(labels)
 
         # Extract language embeddings
-        language_embeddings = input_embeddings[~all_actions_mask].reshape(
-            input_embeddings.shape[0], -1, input_embeddings.shape[2]
-        )
+        with rdvla_range("RDVLA/vlm/language_embeddings_extract"):
+            language_embeddings = input_embeddings[~all_actions_mask].reshape(
+                input_embeddings.shape[0], -1, input_embeddings.shape[2]
+            )
 
         # Process vision features
         projected_patch_embeddings = self._process_vision_features(pixel_values, language_embeddings, use_film)
@@ -944,6 +977,12 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
             kl_thresh=kl_thresh,
             cos_thresh=cos_thresh,
             max_iter=max_iter,
+            profile_coda_cost=profile_coda_cost,
+            use_cached_final_output=use_cached_final_output,
+            use_latent_precheck=use_latent_precheck,
+            latent_precheck_thresh=latent_precheck_thresh,
+            latent_precheck_min_iter=latent_precheck_min_iter,
+            latent_precheck_force_interval=latent_precheck_force_interval,
             )
 
         # Unnormalize predicted actions

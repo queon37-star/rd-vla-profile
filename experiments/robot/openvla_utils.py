@@ -24,6 +24,7 @@ from prismatic.extern.hf.processing_prismatic import PrismaticImageProcessor, Pr
 from prismatic.models.action_heads import ActionHeadRecurrent, RecurrentConfigInternal
 from prismatic.models.film_vit_wrapper import FiLMedPrismaticVisionBackbone
 from prismatic.models.projectors import ProprioProjector
+from prismatic.utils.rdvla_profiler import rdvla_range
 from prismatic.vla.constants import ACTION_DIM, ACTION_PROPRIO_NORMALIZATION_TYPE
 from prismatic.vla.datasets.rlds.utils.data_utils import NormalizationType
 
@@ -342,92 +343,101 @@ def get_vla_action(
     proprio_projector: Optional[torch.nn.Module] = None,
     use_film: bool = False, use_minivlm: bool = False,
 ) -> List[np.ndarray]:
-    with torch.inference_mode():
-        all_images = [obs["full_image"]]
-        if cfg.num_images_in_input > 1:
-            all_images.extend([obs[k] for k in obs.keys() if "wrist" in k])
+    with rdvla_range("RDVLA/get_vla_action_total"):
+        with torch.inference_mode():
+            with rdvla_range("RDVLA/get_vla_action/collect_images"):
+                all_images = [obs["full_image"]]
+                if cfg.num_images_in_input > 1:
+                    all_images.extend([obs[k] for k in obs.keys() if "wrist" in k])
 
-        all_images = prepare_images_for_vla(all_images, cfg)
-        primary_image = all_images.pop(0)
+            with rdvla_range("RDVLA/get_vla_action/prepare_images"):
+                all_images = prepare_images_for_vla(all_images, cfg)
+                primary_image = all_images.pop(0)
 
-        if not use_minivlm:
-            prompt = f"In: What action should the robot take to {task_label.lower()}?\nOut:"
-        else:
-            prompt = f'<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.<|im_end|>\n<|im_start|>user\nWhat action should the robot take to {task_label.lower()}?<|im_end|>\n<|im_start|>assistant\n'
+            with rdvla_range("RDVLA/get_vla_action/build_prompt"):
+                if not use_minivlm:
+                    prompt = f"In: What action should the robot take to {task_label.lower()}?\nOut:"
+                else:
+                    prompt = f'<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.<|im_end|>\n<|im_start|>user\nWhat action should the robot take to {task_label.lower()}?<|im_end|>\n<|im_start|>assistant\n'
 
-        inputs = processor(prompt, primary_image).to(DEVICE, dtype=torch.bfloat16)
+            with rdvla_range("RDVLA/get_vla_action/processor_primary"):
+                inputs = processor(prompt, primary_image).to(DEVICE, dtype=torch.bfloat16)
 
-        if all_images:
-            all_wrist_inputs = [
-                processor(prompt, image_wrist).to(DEVICE, dtype=torch.bfloat16) for image_wrist in all_images
-            ]
-            primary_pixel_values = inputs["pixel_values"]
-            all_wrist_pixel_values = [wrist_inputs["pixel_values"] for wrist_inputs in all_wrist_inputs]
-            inputs["pixel_values"] = torch.cat([primary_pixel_values] + all_wrist_pixel_values, dim=1)
+            if all_images:
+                with rdvla_range("RDVLA/get_vla_action/processor_wrist"):
+                    all_wrist_inputs = [
+                        processor(prompt, image_wrist).to(DEVICE, dtype=torch.bfloat16) for image_wrist in all_images
+                    ]
+                    primary_pixel_values = inputs["pixel_values"]
+                    all_wrist_pixel_values = [wrist_inputs["pixel_values"] for wrist_inputs in all_wrist_inputs]
+                    inputs["pixel_values"] = torch.cat([primary_pixel_values] + all_wrist_pixel_values, dim=1)
 
-        proprio = None
-        if cfg.use_proprio:
-            proprio = obs["state"]
-            proprio_norm_stats = vla.norm_stats[cfg.unnorm_key]["proprio"]
-            obs["state"] = normalize_proprio(proprio, proprio_norm_stats)
-            proprio = obs["state"]
+            proprio = None
+            if cfg.use_proprio:
+                with rdvla_range("RDVLA/get_vla_action/normalize_proprio"):
+                    proprio = obs["state"]
+                    proprio_norm_stats = vla.norm_stats[cfg.unnorm_key]["proprio"]
+                    obs["state"] = normalize_proprio(proprio, proprio_norm_stats)
+                    proprio = obs["state"]
 
-        # 원본 recurrence 호출/반환 코드
-        # actual_iters = None
-        # final_kl = None
-        # if action_head is None:
-        #     action, _, actual_iters, final_kl = vla.predict_action(**inputs, unnorm_key=cfg.unnorm_key, do_sample=False)
-        # else:
-        #     convergence_strategy = getattr(cfg, 'recurrence_strategy', 'fixed')
-        #     if convergence_strategy == 'fixed':
-        #         convergence_strategy = None
-        #     action, _, actual_iters, final_kl = vla.predict_action(
-        #         **inputs, unnorm_key=cfg.unnorm_key, do_sample=False,
-        #         proprio=proprio, proprio_projector=proprio_projector,
-        #         action_head=action_head, use_film=use_film,
-        #         num_iter=getattr(cfg, 'recurrent_num_iter', None),
-        #         convergence_strategy=convergence_strategy,
-        #         kl_thresh=getattr(cfg, 'recurrence_kl_thresh', 0.001),
-        #         cos_thresh=getattr(cfg, 'recurrence_cos_thresh', 0.999),
-        #         max_iter=getattr(cfg, 'recurrence_max_iter', 32),
-        #     )
+            # 원본 recurrence 호출/반환 코드
+            # actual_iters = None
+            # final_kl = None
+            # if action_head is None:
+            #     action, _, actual_iters, final_kl = vla.predict_action(**inputs, unnorm_key=cfg.unnorm_key, do_sample=False)
+            # else:
+            #     convergence_strategy = getattr(cfg, 'recurrence_strategy', 'fixed')
+            #     if convergence_strategy == 'fixed':
+            #         convergence_strategy = None
+            #     action, _, actual_iters, final_kl = vla.predict_action(
+            #         **inputs, unnorm_key=cfg.unnorm_key, do_sample=False,
+            #         proprio=proprio, proprio_projector=proprio_projector,
+            #         action_head=action_head, use_film=use_film,
+            #         num_iter=getattr(cfg, 'recurrent_num_iter', None),
+            #         convergence_strategy=convergence_strategy,
+            #         kl_thresh=getattr(cfg, 'recurrence_kl_thresh', 0.001),
+            #         cos_thresh=getattr(cfg, 'recurrence_cos_thresh', 0.999),
+            #         max_iter=getattr(cfg, 'recurrence_max_iter', 32),
+            #     )
 
-        # recurrence debug metric 전달을 위해 수정한 코드
-        actual_iters = None
-        final_kl = None
-        recurrence_debug = None
-        if action_head is None:
-            action, _, actual_iters, final_kl = vla.predict_action(
-                **inputs, unnorm_key=cfg.unnorm_key, do_sample=False
-            )
-        else:
-            convergence_strategy = getattr(cfg, "recurrence_strategy", "fixed")
-            if convergence_strategy == "fixed":
-                convergence_strategy = None
-            action, _, actual_iters, final_kl = vla.predict_action(
-                **inputs, unnorm_key=cfg.unnorm_key, do_sample=False,
-                proprio=proprio, proprio_projector=proprio_projector,
-                action_head=action_head, use_film=use_film,
-                num_iter=getattr(cfg, "recurrent_num_iter", None),
-                convergence_strategy=convergence_strategy,
-                kl_thresh=getattr(cfg, "recurrence_kl_thresh", 0.001),
-                cos_thresh=getattr(cfg, "recurrence_cos_thresh", 0.999),
-                max_iter=getattr(cfg, "recurrence_max_iter", 32),
-                profile_coda_cost=getattr(cfg, "profile_coda_cost", False),
-                use_cached_final_output=getattr(cfg, "use_cached_final_output", False),
-                use_latent_precheck=getattr(cfg, "use_latent_precheck", False),
-                latent_precheck_thresh=getattr(cfg, "latent_precheck_thresh", 0.12),
-                latent_precheck_min_iter=getattr(cfg, "latent_precheck_min_iter", 2),
-                latent_precheck_force_interval=getattr(cfg, "latent_precheck_force_interval", 0),
-            )
-            recurrence_debug = getattr(getattr(action_head, "model", None), "last_recurrence_debug", None)
+            # recurrence debug metric 전달을 위해 수정한 코드
+            actual_iters = None
+            final_kl = None
+            recurrence_debug = None
+            with rdvla_range("RDVLA/get_vla_action/vla_predict_action"):
+                if action_head is None:
+                    action, _, actual_iters, final_kl = vla.predict_action(
+                        **inputs, unnorm_key=cfg.unnorm_key, do_sample=False
+                    )
+                else:
+                    convergence_strategy = getattr(cfg, "recurrence_strategy", "fixed")
+                    if convergence_strategy == "fixed":
+                        convergence_strategy = None
+                    action, _, actual_iters, final_kl = vla.predict_action(
+                        **inputs, unnorm_key=cfg.unnorm_key, do_sample=False,
+                        proprio=proprio, proprio_projector=proprio_projector,
+                        action_head=action_head, use_film=use_film,
+                        num_iter=getattr(cfg, "recurrent_num_iter", None),
+                        convergence_strategy=convergence_strategy,
+                        kl_thresh=getattr(cfg, "recurrence_kl_thresh", 0.001),
+                        cos_thresh=getattr(cfg, "recurrence_cos_thresh", 0.999),
+                        max_iter=getattr(cfg, "recurrence_max_iter", 32),
+                        profile_coda_cost=getattr(cfg, "profile_coda_cost", False),
+                        use_cached_final_output=getattr(cfg, "use_cached_final_output", False),
+                        use_latent_precheck=getattr(cfg, "use_latent_precheck", False),
+                        latent_precheck_thresh=getattr(cfg, "latent_precheck_thresh", 0.12),
+                        latent_precheck_min_iter=getattr(cfg, "latent_precheck_min_iter", 2),
+                        latent_precheck_force_interval=getattr(cfg, "latent_precheck_force_interval", 0),
+                    )
+                    recurrence_debug = getattr(getattr(action_head, "model", None), "last_recurrence_debug", None)
 
-    actions = [action[i] for i in range(min(len(action), cfg.num_open_loop_steps))]
-    # 원본 반환 코드
-    # return actions, actual_iters, final_kl
+        with rdvla_range("RDVLA/get_vla_action/action_postprocess"):
+            actions = [action[i] for i in range(min(len(action), cfg.num_open_loop_steps))]
+        # 원본 반환 코드
+        # return actions, actual_iters, final_kl
 
-    # recurrence debug metric 전달을 위해 수정한 반환 코드
-    return actions, actual_iters, final_kl, recurrence_debug
+        # recurrence debug metric 전달을 위해 수정한 반환 코드
+        return actions, actual_iters, final_kl, recurrence_debug
 
 
 def get_action_from_server(

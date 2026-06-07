@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from prismatic.vla.constants import ACTION_DIM, NUM_ACTIONS_CHUNK
+from prismatic.utils.rdvla_profiler import rdvla_range
 from dataclasses import dataclass
 
 
@@ -209,10 +210,11 @@ class VLARecurrent(nn.Module):
         nn.init.trunc_normal_(self.action_queries, mean=0.0, std=cfg.init_std, a=-3*cfg.init_std, b=3*cfg.init_std)
 
     def init_state(self, B: int, device, dtype) -> torch.Tensor:
-        std = (self.gamma_init * self.cfg.init_std).item()
-        state = torch.empty(B, self.cfg.action_chunk_len, self.cfg.hidden_dim, device=device, dtype=dtype)
-        nn.init.trunc_normal_(state, mean=0.0, std=std, a=-3*std, b=3*std)
-        return state
+        with rdvla_range("RDVLA/action_head/init_state"):
+            std = (self.gamma_init * self.cfg.init_std).item()
+            state = torch.empty(B, self.cfg.action_chunk_len, self.cfg.hidden_dim, device=device, dtype=dtype)
+            nn.init.trunc_normal_(state, mean=0.0, std=std, a=-3*std, b=3*std)
+            return state
 
     def sample_iterations(self) -> int:
         r_mean = self.cfg.mean_recurrence
@@ -221,11 +223,16 @@ class VLARecurrent(nn.Module):
         return max(1, min(torch.poisson(lam).int().item() + 1, 64))
 
     def _run_one_iteration(self, state, prelude_out, h_a, h_t, p):
-        x = self.adapter(torch.cat([state, prelude_out], dim=-1))
-        x = self.adapter_norm(self.gamma_adapt * x)
-        for i, layer in enumerate(self.recurrent):
-            x = layer(x, h_a[:, self.recurrent_vlm_layers[i]], h_t[:, self.recurrent_vlm_layers[i]], p)
-        return self.recurrent_norm(x)
+        with rdvla_range("RDVLA/action_head/recurrent_one_iteration"):
+            with rdvla_range("RDVLA/action_head/iter_adapter"):
+                x = self.adapter(torch.cat([state, prelude_out], dim=-1))
+                x = self.adapter_norm(self.gamma_adapt * x)
+            with rdvla_range("RDVLA/action_head/iter_recurrent_layers_total"):
+                for i, layer in enumerate(self.recurrent):
+                    with rdvla_range(f"RDVLA/action_head/iter_recurrent_layer_{i}"):
+                        x = layer(x, h_a[:, self.recurrent_vlm_layers[i]], h_t[:, self.recurrent_vlm_layers[i]], p)
+            with rdvla_range("RDVLA/action_head/iter_recurrent_norm"):
+                return self.recurrent_norm(x)
 
     @staticmethod
     def _sync_time():
@@ -236,24 +243,30 @@ class VLARecurrent(nn.Module):
     def _get_output(self, state, h_a, h_t, p, profile=False):
         if not profile:
             x = state
-            if self.coda_vlm_layers:
-                for i, layer in enumerate(self.coda):
-                    x = layer(x, h_a[:, self.coda_vlm_layers[i]], h_t[:, self.coda_vlm_layers[i]], p)
-            return self.output_proj(self.output_norm(x))
+            with rdvla_range("RDVLA/action_head/coda_total"):
+                if self.coda_vlm_layers:
+                    for i, layer in enumerate(self.coda):
+                        with rdvla_range(f"RDVLA/action_head/coda_layer_{i}"):
+                            x = layer(x, h_a[:, self.coda_vlm_layers[i]], h_t[:, self.coda_vlm_layers[i]], p)
+            with rdvla_range("RDVLA/action_head/output_norm_proj"):
+                return self.output_proj(self.output_norm(x))
 
         get_output_start = self._sync_time()
         x = state
-        if self.coda_vlm_layers:
-            coda_start = get_output_start
-            for i, layer in enumerate(self.coda):
-                x = layer(x, h_a[:, self.coda_vlm_layers[i]], h_t[:, self.coda_vlm_layers[i]], p)
-            coda_end = self._sync_time()
-            coda_ms = (coda_end - coda_start) * 1000.0
-        else:
-            coda_end = get_output_start
-            coda_ms = 0.0
+        with rdvla_range("RDVLA/action_head/coda_total"):
+            if self.coda_vlm_layers:
+                coda_start = get_output_start
+                for i, layer in enumerate(self.coda):
+                    with rdvla_range(f"RDVLA/action_head/coda_layer_{i}"):
+                        x = layer(x, h_a[:, self.coda_vlm_layers[i]], h_t[:, self.coda_vlm_layers[i]], p)
+                coda_end = self._sync_time()
+                coda_ms = (coda_end - coda_start) * 1000.0
+            else:
+                coda_end = get_output_start
+                coda_ms = 0.0
 
-        output = self.output_proj(self.output_norm(x))
+        with rdvla_range("RDVLA/action_head/output_norm_proj"):
+            output = self.output_proj(self.output_norm(x))
         output_proj_end = self._sync_time()
         self._last_get_output_timing = {
             "get_output_ms": (output_proj_end - get_output_start) * 1000.0,
@@ -268,17 +281,20 @@ class VLARecurrent(nn.Module):
                 max_iter: int = 32, profile_coda_cost: bool = False,
                 use_cached_final_output: bool = False,
                 use_latent_precheck: bool = False,
-                latent_precheck_thresh: float = 0.12,
-                latent_precheck_min_iter: int = 2,
-                latent_precheck_force_interval: int = 0, **kwargs) -> torch.Tensor:
+        latent_precheck_thresh: float = 0.12,
+        latent_precheck_min_iter: int = 2,
+        latent_precheck_force_interval: int = 0, **kwargs) -> torch.Tensor:
         B = h_a.size(0)
         device, dtype = h_a.device, h_a.dtype
 
-        x = self.action_queries.unsqueeze(0).expand(B, -1, -1).to(dtype=dtype)
+        with rdvla_range("RDVLA/action_head/action_queries"):
+            x = self.action_queries.unsqueeze(0).expand(B, -1, -1).to(dtype=dtype)
 
-        if self.prelude_vlm_layers:
-            for i, layer in enumerate(self.prelude):
-                x = layer(x, h_a[:, self.prelude_vlm_layers[i]], h_t[:, self.prelude_vlm_layers[i]], p)
+        with rdvla_range("RDVLA/action_head/prelude_total"):
+            if self.prelude_vlm_layers:
+                for i, layer in enumerate(self.prelude):
+                    with rdvla_range(f"RDVLA/action_head/prelude_layer_{i}"):
+                        x = layer(x, h_a[:, self.prelude_vlm_layers[i]], h_t[:, self.prelude_vlm_layers[i]], p)
         prelude_out = x
 
         state = self.init_state(B, device, dtype)
@@ -350,116 +366,119 @@ class VLARecurrent(nn.Module):
                 coda_ms_list.append(timing["coda_ms"])
                 output_proj_ms_list.append(timing["output_proj_ms"])
 
-            with torch.no_grad():
-                for it in range(max_iter):
-                    if profile_coda_cost:
-                        run_one_iteration_start = self._sync_time()
-                    state = self._run_one_iteration(state, prelude_out, h_a, h_t, p)
-                    if profile_coda_cost:
-                        run_one_iteration_end = self._sync_time()
-                        run_one_iteration_ms_list.append((run_one_iteration_end - run_one_iteration_start) * 1000.0)
-
-                    actual_iter = it + 1
-                    latent_mse = None
-                    latent_l2 = None
-                    if prev_state is not None:
-                        latent_diff = state.float() - prev_state.float()
-                        latent_mse = torch.mean(latent_diff ** 2).item()
-                        latent_l2 = torch.norm(latent_diff.flatten()).item()
-                        latent_mse_list.append(latent_mse)
-                        latent_l2_list.append(latent_l2)
-
-                    if not use_latent_precheck:
-                        should_call_coda = True
-                        precheck_reason = "disabled"
-                    elif actual_iter == 1:
-                        should_call_coda = True
-                        precheck_reason = "first_iter"
-                    elif actual_iter == max_iter:
-                        should_call_coda = True
-                        precheck_reason = "max_iter"
-                    elif latent_precheck_force_interval > 0 and actual_iter % latent_precheck_force_interval == 0:
-                        should_call_coda = True
-                        precheck_reason = "force_interval"
-                    elif (
-                        latent_mse is not None
-                        and actual_iter >= latent_precheck_min_iter
-                        and latent_mse <= latent_precheck_thresh
-                    ):
-                        should_call_coda = True
-                        precheck_reason = "latent_below_thresh"
-                    else:
-                        should_call_coda = False
-                        precheck_reason = "skip_latent_above_thresh"
-
-                    latent_precheck_coda_call_mask.append(bool(should_call_coda))
-                    if should_call_coda:
-                        latent_precheck_called_iters.append(int(actual_iter))
-                    else:
-                        latent_precheck_skipped_iters.append(int(actual_iter))
-
-                    action_mse = None
-                    if should_call_coda:
-                        curr_output = self._get_output(state, h_a, h_t, p, profile=profile_coda_cost)
+            with rdvla_range("RDVLA/action_head/recurrent_loop_total"):
+                with torch.no_grad():
+                    for it in range(max_iter):
                         if profile_coda_cost:
-                            append_get_output_timing()
-                            convergence_check_start = self._sync_time()
-
-                        if prev_output is not None:
-                            diff = curr_output - prev_output
-                            action_mse = torch.mean(diff ** 2).item()
-                            action_l2 = torch.norm(diff.float()).item()
-
-                            conv_score_list.append(action_mse)
-                            action_delta_list.append(action_l2)
-                            if latent_mse is not None:
-                                latent_action_mse_pairs.append({
-                                    "k": int(actual_iter),
-                                    "latent_mse": float(latent_mse),
-                                    "latent_l2": float(latent_l2),
-                                    "action_mse": float(action_mse),
-                                    "action_l2": float(action_l2),
-                                })
-
-                            if first_converged_k_1e_4 is None and action_mse < 1e-4:
-                                first_converged_k_1e_4 = actual_iter
-                            if first_converged_k_5e_4 is None and action_mse < 5e-4:
-                                first_converged_k_5e_4 = actual_iter
-
-                            if convergence_strategy == "cosine_similarity":
-                                cos_sim = F.cosine_similarity(
-                                    prev_output.flatten(), curr_output.flatten(), dim=0
-                                ).item()
-                                final_kl = 1 - cos_sim
-                                if cos_sim > cos_thresh:
-                                    adaptive_stop = True
-                            elif convergence_strategy == "kl_divergence":
-                                final_kl = action_mse
-                                if action_mse < kl_thresh:
-                                    adaptive_stop = True
-
-                        prev_output = curr_output.detach()
+                            run_one_iteration_start = self._sync_time()
+                        state = self._run_one_iteration(state, prelude_out, h_a, h_t, p)
                         if profile_coda_cost:
-                            convergence_check_end = self._sync_time()
-                            convergence_check_ms_list.append((convergence_check_end - convergence_check_start) * 1000.0)
+                            run_one_iteration_end = self._sync_time()
+                            run_one_iteration_ms_list.append((run_one_iteration_end - run_one_iteration_start) * 1000.0)
 
-                    latent_precheck_decisions.append({
-                        "k": int(actual_iter),
-                        "latent_mse": float(latent_mse) if latent_mse is not None else None,
-                        "call_coda": bool(should_call_coda),
-                        "reason": precheck_reason,
-                        "action_mse": float(action_mse) if action_mse is not None else None,
-                    })
-                    prev_state = state.detach()
-                    if adaptive_stop:
-                        break
+                        actual_iter = it + 1
+                        latent_mse = None
+                        latent_l2 = None
+                        if prev_state is not None:
+                            latent_diff = state.float() - prev_state.float()
+                            latent_mse = torch.mean(latent_diff ** 2).item()
+                            latent_l2 = torch.norm(latent_diff.flatten()).item()
+                            latent_mse_list.append(latent_mse)
+                            latent_l2_list.append(latent_l2)
 
-            if use_cached_final_output and curr_output is not None:
-                final_output = curr_output
-            else:
-                final_output = self._get_output(state, h_a, h_t, p, profile=profile_coda_cost)
-                if profile_coda_cost:
-                    append_get_output_timing()
+                        if not use_latent_precheck:
+                            should_call_coda = True
+                            precheck_reason = "disabled"
+                        elif actual_iter == 1:
+                            should_call_coda = True
+                            precheck_reason = "first_iter"
+                        elif actual_iter == max_iter:
+                            should_call_coda = True
+                            precheck_reason = "max_iter"
+                        elif latent_precheck_force_interval > 0 and actual_iter % latent_precheck_force_interval == 0:
+                            should_call_coda = True
+                            precheck_reason = "force_interval"
+                        elif (
+                            latent_mse is not None
+                            and actual_iter >= latent_precheck_min_iter
+                            and latent_mse <= latent_precheck_thresh
+                        ):
+                            should_call_coda = True
+                            precheck_reason = "latent_below_thresh"
+                        else:
+                            should_call_coda = False
+                            precheck_reason = "skip_latent_above_thresh"
+
+                        latent_precheck_coda_call_mask.append(bool(should_call_coda))
+                        if should_call_coda:
+                            latent_precheck_called_iters.append(int(actual_iter))
+                        else:
+                            latent_precheck_skipped_iters.append(int(actual_iter))
+
+                        action_mse = None
+                        if should_call_coda:
+                            with rdvla_range("RDVLA/action_head/get_output_each_iter"):
+                                curr_output = self._get_output(state, h_a, h_t, p, profile=profile_coda_cost)
+                            if profile_coda_cost:
+                                append_get_output_timing()
+                                convergence_check_start = self._sync_time()
+
+                            if prev_output is not None:
+                                diff = curr_output - prev_output
+                                action_mse = torch.mean(diff ** 2).item()
+                                action_l2 = torch.norm(diff.float()).item()
+
+                                conv_score_list.append(action_mse)
+                                action_delta_list.append(action_l2)
+                                if latent_mse is not None:
+                                    latent_action_mse_pairs.append({
+                                        "k": int(actual_iter),
+                                        "latent_mse": float(latent_mse),
+                                        "latent_l2": float(latent_l2),
+                                        "action_mse": float(action_mse),
+                                        "action_l2": float(action_l2),
+                                    })
+
+                                if first_converged_k_1e_4 is None and action_mse < 1e-4:
+                                    first_converged_k_1e_4 = actual_iter
+                                if first_converged_k_5e_4 is None and action_mse < 5e-4:
+                                    first_converged_k_5e_4 = actual_iter
+
+                                if convergence_strategy == "cosine_similarity":
+                                    cos_sim = F.cosine_similarity(
+                                        prev_output.flatten(), curr_output.flatten(), dim=0
+                                    ).item()
+                                    final_kl = 1 - cos_sim
+                                    if cos_sim > cos_thresh:
+                                        adaptive_stop = True
+                                elif convergence_strategy == "kl_divergence":
+                                    final_kl = action_mse
+                                    if action_mse < kl_thresh:
+                                        adaptive_stop = True
+
+                            prev_output = curr_output.detach()
+                            if profile_coda_cost:
+                                convergence_check_end = self._sync_time()
+                                convergence_check_ms_list.append((convergence_check_end - convergence_check_start) * 1000.0)
+
+                        latent_precheck_decisions.append({
+                            "k": int(actual_iter),
+                            "latent_mse": float(latent_mse) if latent_mse is not None else None,
+                            "call_coda": bool(should_call_coda),
+                            "reason": precheck_reason,
+                            "action_mse": float(action_mse) if action_mse is not None else None,
+                        })
+                        prev_state = state.detach()
+                        if adaptive_stop:
+                            break
+
+            with rdvla_range("RDVLA/action_head/final_get_output"):
+                if use_cached_final_output and curr_output is not None:
+                    final_output = curr_output
+                else:
+                    final_output = self._get_output(state, h_a, h_t, p, profile=profile_coda_cost)
+                    if profile_coda_cost:
+                        append_get_output_timing()
 
             self.last_recurrence_debug = {
                 "strategy": convergence_strategy,
@@ -569,27 +588,29 @@ class VLARecurrent(nn.Module):
             curr_output = None
             actual_iter = 0
 
-            with torch.no_grad():
-                for it in range(total):
-                    state = self._run_one_iteration(state, prelude_out, h_a, h_t, p)
-                    curr_output = self._get_output(state, h_a, h_t, p)
-                    actual_iter = it + 1
+            with rdvla_range("RDVLA/action_head/recurrent_loop_total"):
+                with torch.no_grad():
+                    for it in range(total):
+                        state = self._run_one_iteration(state, prelude_out, h_a, h_t, p)
+                        with rdvla_range("RDVLA/action_head/get_output_each_iter"):
+                            curr_output = self._get_output(state, h_a, h_t, p)
+                        actual_iter = it + 1
 
-                    if prev_output is not None:
-                        diff = curr_output - prev_output
-                        mse = torch.mean(diff ** 2).item()
-                        l2 = torch.norm(diff.float()).item()
+                        if prev_output is not None:
+                            diff = curr_output - prev_output
+                            mse = torch.mean(diff ** 2).item()
+                            l2 = torch.norm(diff.float()).item()
 
-                        conv_score_list.append(mse)
-                        action_delta_list.append(l2)
-                        final_conv_score = mse
+                            conv_score_list.append(mse)
+                            action_delta_list.append(l2)
+                            final_conv_score = mse
 
-                        if first_converged_k_1e_4 is None and mse < 1e-4:
-                            first_converged_k_1e_4 = actual_iter
-                        if first_converged_k_5e_4 is None and mse < 5e-4:
-                            first_converged_k_5e_4 = actual_iter
+                            if first_converged_k_1e_4 is None and mse < 1e-4:
+                                first_converged_k_1e_4 = actual_iter
+                            if first_converged_k_5e_4 is None and mse < 5e-4:
+                                first_converged_k_5e_4 = actual_iter
 
-                    prev_output = curr_output.detach()
+                        prev_output = curr_output.detach()
 
             self.last_recurrence_debug = {
                 "strategy": "fixed",
@@ -609,21 +630,25 @@ class VLARecurrent(nn.Module):
                 "final_conv_score": final_conv_score,
             }
 
-            return curr_output, actual_iter, final_conv_score
+            with rdvla_range("RDVLA/action_head/final_get_output"):
+                final_output = curr_output
+            return final_output, actual_iter, final_conv_score
 
         # Training-time fixed branch: 기존 코드 유지
         k = self.cfg.backprop_depth
         n_no_grad = max(0, total - k)
 
-        if n_no_grad > 0:
-            with torch.no_grad():
-                for _ in range(n_no_grad):
-                    state = self._run_one_iteration(state, prelude_out, h_a, h_t, p)
+        with rdvla_range("RDVLA/action_head/recurrent_loop_total"):
+            if n_no_grad > 0:
+                with torch.no_grad():
+                    for _ in range(n_no_grad):
+                        state = self._run_one_iteration(state, prelude_out, h_a, h_t, p)
 
-        for _ in range(min(k, total)):
-            state = self._run_one_iteration(state, prelude_out, h_a, h_t, p)
+            for _ in range(min(k, total)):
+                state = self._run_one_iteration(state, prelude_out, h_a, h_t, p)
 
-        return self._get_output(state, h_a, h_t, p)
+        with rdvla_range("RDVLA/action_head/final_get_output"):
+            return self._get_output(state, h_a, h_t, p)
 
         #여기까지가 수정한 metric 측정용 fixed branch
 
@@ -650,17 +675,21 @@ class ActionHeadRecurrent(nn.Module):
                        profile_coda_cost=False, use_cached_final_output=False,
                        use_latent_precheck=False, latent_precheck_thresh=0.12,
                        latent_precheck_min_iter=2, latent_precheck_force_interval=0, **kwargs):
-        B = actions_hidden_states.shape[0]
-        proprio = proprio.reshape(B, -1).to(torch.bfloat16)
-        proprio_features = proprio_projector(proprio).unsqueeze(1)
-        h_t = actions_hidden_states[:, :, :self.num_task_tokens, :]
-        h_a = actions_hidden_states[:, :, self.num_task_tokens:, :]
-        return self.model(h_a, h_t, proprio_features, num_iter=num_iter,
-                         convergence_strategy=convergence_strategy, kl_thresh=kl_thresh,
-                         cos_thresh=cos_thresh, max_iter=max_iter,
-                         profile_coda_cost=profile_coda_cost,
-                         use_cached_final_output=use_cached_final_output,
-                         use_latent_precheck=use_latent_precheck,
-                         latent_precheck_thresh=latent_precheck_thresh,
-                         latent_precheck_min_iter=latent_precheck_min_iter,
-                         latent_precheck_force_interval=latent_precheck_force_interval)
+        with rdvla_range("RDVLA/action_head/wrapper_total"):
+            B = actions_hidden_states.shape[0]
+            proprio = proprio.reshape(B, -1).to(torch.bfloat16)
+            with rdvla_range("RDVLA/action_head/proprio_projector"):
+                proprio_features = proprio_projector(proprio).unsqueeze(1)
+            with rdvla_range("RDVLA/action_head/split_h_t_h_a"):
+                h_t = actions_hidden_states[:, :, :self.num_task_tokens, :]
+                h_a = actions_hidden_states[:, :, self.num_task_tokens:, :]
+            with rdvla_range("RDVLA/action_head/vla_recurrent_total"):
+                return self.model(h_a, h_t, proprio_features, num_iter=num_iter,
+                                 convergence_strategy=convergence_strategy, kl_thresh=kl_thresh,
+                                 cos_thresh=cos_thresh, max_iter=max_iter,
+                                 profile_coda_cost=profile_coda_cost,
+                                 use_cached_final_output=use_cached_final_output,
+                                 use_latent_precheck=use_latent_precheck,
+                                 latent_precheck_thresh=latent_precheck_thresh,
+                                 latent_precheck_min_iter=latent_precheck_min_iter,
+                                 latent_precheck_force_interval=latent_precheck_force_interval)
