@@ -139,6 +139,10 @@ class GenerateConfig:
     profile_trace_path: str = "./profiles/rdvla_pytorch_trace.json"
     profile_record_shapes: bool = False
     profile_memory: bool = False
+    profile_timing_summary: bool = False
+    profile_timing_summary_path: str = "./benchmark_results/profiler/rdvla_timing_summary.jsonl"
+    profile_timing_steps: int = 1
+    profile_timing_cuda_sync: bool = False
 
     # Optional latent-state pre-check before running Coda in adaptive recurrence.
     use_latent_precheck: bool = False
@@ -191,6 +195,12 @@ def validate_config(cfg: GenerateConfig) -> None:
     if cfg.profile_pytorch:
         assert cfg.profile_steps >= 0, "profile_steps must be non-negative!"
         assert cfg.profile_trace_path, "profile_trace_path must be non-empty when profile_pytorch is enabled!"
+
+    if cfg.profile_timing_summary:
+        assert cfg.profile_timing_steps >= 0, "profile_timing_steps must be non-negative!"
+        assert cfg.profile_timing_summary_path, (
+            "profile_timing_summary_path must be non-empty when profile_timing_summary is enabled!"
+        )
 
 
 def calculate_linear_decay_horizon(actual_iters: int) -> int:
@@ -369,6 +379,115 @@ def run_with_optional_pytorch_profile(cfg, profile_state, log_file, action_fn):
         log_message(f"Saved PyTorch profiler trace to {trace_path}; latest trace copied to {base_trace_path}", log_file)
     else:
         log_message(f"Saved PyTorch profiler trace to {trace_path}", log_file)
+
+    return result
+
+
+def _timing_ms(timings: Dict[str, float], *names: str) -> Optional[float]:
+    for name in names:
+        if name in timings:
+            return float(timings[name])
+    return None
+
+
+def _build_timing_summary_record(timing_record, result):
+    timings = timing_record.get("timings_ms", {})
+    counts = timing_record.get("counts", {})
+    metadata = dict(timing_record.get("metadata", {}))
+
+    actual_iters = None
+    final_kl = None
+    recurrence_debug = {}
+    if isinstance(result, tuple):
+        if len(result) > 1:
+            actual_iters = result[1]
+        if len(result) > 2:
+            final_kl = result[2]
+        if len(result) > 3 and result[3] is not None:
+            recurrence_debug = result[3]
+
+    final_mse = recurrence_debug.get("final_mse")
+    if final_mse is None:
+        final_mse = recurrence_debug.get("final_conv_score", final_kl)
+
+    record = {
+        **metadata,
+        "total_ms": _timing_ms(timings, "RDVLA/get_vla_action_total"),
+        "prepare_images_ms": _timing_ms(timings, "RDVLA/get_vla_action/prepare_images"),
+        "processor_primary_ms": _timing_ms(timings, "RDVLA/get_vla_action/processor_primary"),
+        "vla_predict_action_ms": _timing_ms(timings, "RDVLA/get_vla_action/vla_predict_action"),
+        "vision_backbone_ms": _timing_ms(timings, "RDVLA/vlm/vision_backbone"),
+        "projector_ms": _timing_ms(timings, "RDVLA/vlm/projector"),
+        "language_model_forward_ms": _timing_ms(timings, "RDVLA/vlm/language_model_forward"),
+        "extract_hidden_states_ms": _timing_ms(
+            timings,
+            "RDVLA/vlm/extract_hidden_states_total",
+            "RDVLA/vlm/extract_hidden_states",
+        ),
+        "action_head_total_ms": _timing_ms(
+            timings,
+            "RDVLA/action_head/predict_action_total",
+            "RDVLA/action_head/wrapper_total",
+        ),
+        "init_state_ms": _timing_ms(
+            timings,
+            "RDVLA/action_head/init_state_total",
+            "RDVLA/action_head/init_state",
+        ),
+        "prelude_ms": _timing_ms(timings, "RDVLA/action_head/prelude_total"),
+        "recurrent_loop_ms": _timing_ms(timings, "RDVLA/action_head/recurrent_loop_total"),
+        "get_output_each_iter_ms": _timing_ms(timings, "RDVLA/action_head/get_output_each_iter"),
+        "final_get_output_ms": _timing_ms(timings, "RDVLA/action_head/final_get_output"),
+        "actual_iters": _as_int(actual_iters),
+        "final_mse": _as_float(final_mse),
+        "final_kl": _as_float(final_kl),
+        "stop_reason": recurrence_debug.get("stop_reason"),
+        "used_latent_precheck": bool(recurrence_debug.get("use_latent_precheck", False)),
+        "used_coda_stop": bool(recurrence_debug.get("adaptive_stop", False)),
+        "timings_ms": timings,
+        "timing_counts": counts,
+    }
+    return record
+
+
+def run_action_with_optional_profiles(
+    cfg,
+    profile_state,
+    timing_state,
+    log_file,
+    action_fn,
+    timing_metadata,
+):
+    timing_steps = max(0, int(getattr(cfg, "profile_timing_steps", 1)))
+    should_time = (
+        getattr(cfg, "profile_timing_summary", False)
+        and timing_state is not None
+        and timing_state.get("timed_calls", 0) < timing_steps
+    )
+
+    if not should_time and not getattr(cfg, "profile_pytorch", False):
+        return action_fn()
+
+    if should_time:
+        RDVLAProfiler.set_timing_cuda_sync(getattr(cfg, "profile_timing_cuda_sync", False))
+        RDVLAProfiler.set_timing_enabled(True)
+        RDVLAProfiler.start_timing_record(timing_metadata)
+
+    timing_record = None
+    try:
+        if getattr(cfg, "profile_pytorch", False):
+            result = run_with_optional_pytorch_profile(cfg, profile_state, log_file, action_fn)
+        else:
+            result = action_fn()
+    finally:
+        if should_time:
+            timing_record = RDVLAProfiler.finish_timing_record()
+            RDVLAProfiler.set_timing_enabled(False)
+
+    if timing_record is not None:
+        timing_state["timed_calls"] = timing_state.get("timed_calls", 0) + 1
+        timing_summary = _build_timing_summary_record(timing_record, result)
+        append_jsonl(getattr(cfg, "profile_timing_summary_path", None), [timing_summary])
 
     return result
 
@@ -647,6 +766,7 @@ def run_episode(
     task_id=None,
     episode_idx=None,
     profile_state=None,
+    timing_state=None,
 ):
     """Run a single episode in the environment."""
     env.reset()
@@ -716,12 +836,21 @@ def run_episode(
                         use_minivlm=cfg.use_minivlm
                     )
 
-                if getattr(cfg, "profile_pytorch", False):
-                    actions, actual_iters, final_kl, recurrence_debug = run_with_optional_pytorch_profile(
-                        cfg, profile_state, log_file, predict_action_once
-                    )
-                else:
-                    actions, actual_iters, final_kl, recurrence_debug = predict_action_once()
+                timing_metadata = {
+                    "task_id": task_id,
+                    "episode_id": episode_idx,
+                    "timestep": int(t),
+                    "action_prediction_index": prediction_step,
+                    "prediction_step": prediction_step,
+                }
+                actions, actual_iters, final_kl, recurrence_debug = run_action_with_optional_profiles(
+                    cfg,
+                    profile_state,
+                    timing_state,
+                    log_file,
+                    predict_action_once,
+                    timing_metadata,
+                )
 
                 if torch.cuda.is_available():
                     torch.cuda.synchronize()
@@ -937,6 +1066,7 @@ def run_task(
     log_file=None,
     save_version=None,
     profile_state=None,
+    timing_state=None,
 ):
     """Run evaluation for a single task."""
     task = task_suite.get_task(task_id)
@@ -977,6 +1107,7 @@ def run_task(
             task_id=task_id,
             episode_idx=episode_idx,
             profile_state=profile_state,
+            timing_state=timing_state,
         )
 
         if episode_iters:
@@ -1060,11 +1191,24 @@ def eval_libero(cfg: GenerateConfig) -> float:
     log_file, local_log_filepath, run_id = setup_logging(cfg)
 
     RDVLAProfiler.set_enabled(False)
+    RDVLAProfiler.set_timing_enabled(False)
     profile_state = {"profiled_calls": 0} if cfg.profile_pytorch else None
+    timing_state = {"timed_calls": 0} if cfg.profile_timing_summary else None
     if cfg.profile_pytorch:
         log_message(
             f"PyTorch profiler enabled for first {cfg.profile_steps} action inference calls; "
             f"trace path: {cfg.profile_trace_path}",
+            log_file,
+        )
+    if cfg.profile_timing_summary:
+        timing_summary_path = cfg.profile_timing_summary_path
+        os.makedirs(os.path.dirname(timing_summary_path) or ".", exist_ok=True)
+        if os.path.exists(timing_summary_path):
+            os.remove(timing_summary_path)
+            log_message(f"Removed existing PyTorch timing summary file: {timing_summary_path}", log_file)
+        log_message(
+            f"PyTorch timing summary enabled for first {cfg.profile_timing_steps} action inference calls; "
+            f"summary path: {timing_summary_path}",
             log_file,
         )
 
@@ -1109,7 +1253,8 @@ def eval_libero(cfg: GenerateConfig) -> float:
             total_successes,
             log_file,
             cfg.save_version,
-            profile_state
+            profile_state,
+            timing_state,
         )
         task = task_suite.get_task(task_id)
         full_results["tasks"][task.name] = task_stats
@@ -1150,6 +1295,7 @@ def eval_libero(cfg: GenerateConfig) -> float:
         wandb.save(local_log_filepath)
 
     RDVLAProfiler.set_enabled(False)
+    RDVLAProfiler.set_timing_enabled(False)
 
     if log_file:
         log_file.close()

@@ -211,10 +211,15 @@ class VLARecurrent(nn.Module):
 
     def init_state(self, B: int, device, dtype) -> torch.Tensor:
         with rdvla_range("RDVLA/action_head/init_state"):
-            std = (self.gamma_init * self.cfg.init_std).item()
-            state = torch.empty(B, self.cfg.action_chunk_len, self.cfg.hidden_dim, device=device, dtype=dtype)
-            nn.init.trunc_normal_(state, mean=0.0, std=std, a=-3*std, b=3*std)
-            return state
+            with rdvla_range("RDVLA/action_head/init_state_total"):
+                with rdvla_range("RDVLA/action_head/init_state/gamma_item"):
+                    std = (self.gamma_init * self.cfg.init_std).item()
+                with rdvla_range("RDVLA/action_head/init_state/random_noise"):
+                    state = torch.empty(B, self.cfg.action_chunk_len, self.cfg.hidden_dim, device=device, dtype=dtype)
+                with rdvla_range("RDVLA/action_head/init_state/trunc_normal"):
+                    nn.init.trunc_normal_(state, mean=0.0, std=std, a=-3*std, b=3*std)
+                with rdvla_range("RDVLA/action_head/init_state/device_dtype_cast"):
+                    return state
 
     def sample_iterations(self) -> int:
         r_mean = self.cfg.mean_recurrence
@@ -350,6 +355,7 @@ class VLARecurrent(nn.Module):
             first_converged_k_1e_4 = None
             first_converged_k_5e_4 = None
             adaptive_stop = False
+            stop_reason = None
             curr_output = None
 
             run_one_iteration_ms_list = []
@@ -377,37 +383,42 @@ class VLARecurrent(nn.Module):
                             run_one_iteration_ms_list.append((run_one_iteration_end - run_one_iteration_start) * 1000.0)
 
                         actual_iter = it + 1
-                        latent_mse = None
-                        latent_l2 = None
-                        if prev_state is not None:
-                            latent_diff = state.float() - prev_state.float()
-                            latent_mse = torch.mean(latent_diff ** 2).item()
-                            latent_l2 = torch.norm(latent_diff.flatten()).item()
-                            latent_mse_list.append(latent_mse)
-                            latent_l2_list.append(latent_l2)
+                        with rdvla_range("RDVLA/action_head/latent_precheck_total"):
+                            latent_mse = None
+                            latent_l2 = None
+                            if prev_state is not None:
+                                with rdvla_range("RDVLA/action_head/latent_precheck/mse_compute"):
+                                    latent_diff = state.float() - prev_state.float()
+                                    latent_mse_tensor = torch.mean(latent_diff ** 2)
+                                    latent_l2_tensor = torch.norm(latent_diff.flatten())
+                                with rdvla_range("RDVLA/action_head/latent_precheck/item_sync"):
+                                    latent_mse = latent_mse_tensor.item()
+                                    latent_l2 = latent_l2_tensor.item()
+                                latent_mse_list.append(latent_mse)
+                                latent_l2_list.append(latent_l2)
 
-                        if not use_latent_precheck:
-                            should_call_coda = True
-                            precheck_reason = "disabled"
-                        elif actual_iter == 1:
-                            should_call_coda = True
-                            precheck_reason = "first_iter"
-                        elif actual_iter == max_iter:
-                            should_call_coda = True
-                            precheck_reason = "max_iter"
-                        elif latent_precheck_force_interval > 0 and actual_iter % latent_precheck_force_interval == 0:
-                            should_call_coda = True
-                            precheck_reason = "force_interval"
-                        elif (
-                            latent_mse is not None
-                            and actual_iter >= latent_precheck_min_iter
-                            and latent_mse <= latent_precheck_thresh
-                        ):
-                            should_call_coda = True
-                            precheck_reason = "latent_below_thresh"
-                        else:
-                            should_call_coda = False
-                            precheck_reason = "skip_latent_above_thresh"
+                            if not use_latent_precheck:
+                                should_call_coda = True
+                                precheck_reason = "disabled"
+                            elif actual_iter == 1:
+                                should_call_coda = True
+                                precheck_reason = "first_iter"
+                            elif actual_iter == max_iter:
+                                should_call_coda = True
+                                precheck_reason = "max_iter"
+                            elif latent_precheck_force_interval > 0 and actual_iter % latent_precheck_force_interval == 0:
+                                should_call_coda = True
+                                precheck_reason = "force_interval"
+                            elif (
+                                latent_mse is not None
+                                and actual_iter >= latent_precheck_min_iter
+                                and latent_mse <= latent_precheck_thresh
+                            ):
+                                should_call_coda = True
+                                precheck_reason = "latent_below_thresh"
+                            else:
+                                should_call_coda = False
+                                precheck_reason = "skip_latent_above_thresh"
 
                         latent_precheck_coda_call_mask.append(bool(should_call_coda))
                         if should_call_coda:
@@ -416,50 +427,65 @@ class VLARecurrent(nn.Module):
                             latent_precheck_skipped_iters.append(int(actual_iter))
 
                         action_mse = None
-                        if should_call_coda:
-                            with rdvla_range("RDVLA/action_head/get_output_each_iter"):
-                                curr_output = self._get_output(state, h_a, h_t, p, profile=profile_coda_cost)
-                            if profile_coda_cost:
-                                append_get_output_timing()
-                                convergence_check_start = self._sync_time()
+                        with rdvla_range("RDVLA/action_head/coda_stop_check_total"):
+                            if should_call_coda:
+                                with rdvla_range("RDVLA/action_head/coda_stop_get_output"):
+                                    with rdvla_range("RDVLA/action_head/get_output_each_iter"):
+                                        curr_output = self._get_output(state, h_a, h_t, p, profile=profile_coda_cost)
+                                if profile_coda_cost:
+                                    append_get_output_timing()
+                                    convergence_check_start = self._sync_time()
 
-                            if prev_output is not None:
-                                diff = curr_output - prev_output
-                                action_mse = torch.mean(diff ** 2).item()
-                                action_l2 = torch.norm(diff.float()).item()
+                                if prev_output is not None:
+                                    with rdvla_range("RDVLA/action_head/stop_check/mse_compute"):
+                                        diff = curr_output - prev_output
+                                        action_mse_tensor = torch.mean(diff ** 2)
+                                    with rdvla_range("RDVLA/action_head/stop_check/item_sync"):
+                                        action_mse = action_mse_tensor.item()
+                                    with rdvla_range("RDVLA/action_head/stop_check/mse_compute"):
+                                        action_l2_tensor = torch.norm(diff.float())
+                                    with rdvla_range("RDVLA/action_head/stop_check/item_sync"):
+                                        action_l2 = action_l2_tensor.item()
 
-                                conv_score_list.append(action_mse)
-                                action_delta_list.append(action_l2)
-                                if latent_mse is not None:
-                                    latent_action_mse_pairs.append({
-                                        "k": int(actual_iter),
-                                        "latent_mse": float(latent_mse),
-                                        "latent_l2": float(latent_l2),
-                                        "action_mse": float(action_mse),
-                                        "action_l2": float(action_l2),
-                                    })
+                                    conv_score_list.append(action_mse)
+                                    action_delta_list.append(action_l2)
+                                    if latent_mse is not None:
+                                        latent_action_mse_pairs.append({
+                                            "k": int(actual_iter),
+                                            "latent_mse": float(latent_mse),
+                                            "latent_l2": float(latent_l2),
+                                            "action_mse": float(action_mse),
+                                            "action_l2": float(action_l2),
+                                        })
 
-                                if first_converged_k_1e_4 is None and action_mse < 1e-4:
-                                    first_converged_k_1e_4 = actual_iter
-                                if first_converged_k_5e_4 is None and action_mse < 5e-4:
-                                    first_converged_k_5e_4 = actual_iter
+                                    with rdvla_range("RDVLA/action_head/stop_check/condition"):
+                                        if first_converged_k_1e_4 is None and action_mse < 1e-4:
+                                            first_converged_k_1e_4 = actual_iter
+                                        if first_converged_k_5e_4 is None and action_mse < 5e-4:
+                                            first_converged_k_5e_4 = actual_iter
 
-                                if convergence_strategy == "cosine_similarity":
-                                    cos_sim = F.cosine_similarity(
-                                        prev_output.flatten(), curr_output.flatten(), dim=0
-                                    ).item()
-                                    final_kl = 1 - cos_sim
-                                    if cos_sim > cos_thresh:
-                                        adaptive_stop = True
-                                elif convergence_strategy == "kl_divergence":
-                                    final_kl = action_mse
-                                    if action_mse < kl_thresh:
-                                        adaptive_stop = True
+                                        if convergence_strategy == "cosine_similarity":
+                                            cos_sim_tensor = F.cosine_similarity(
+                                                prev_output.flatten(), curr_output.flatten(), dim=0
+                                            )
+                                            with rdvla_range("RDVLA/action_head/stop_check/item_sync"):
+                                                cos_sim = cos_sim_tensor.item()
+                                            final_kl = 1 - cos_sim
+                                            if cos_sim > cos_thresh:
+                                                with rdvla_range("RDVLA/action_head/stop_reason_update"):
+                                                    adaptive_stop = True
+                                                    stop_reason = "cosine_similarity"
+                                        elif convergence_strategy == "kl_divergence":
+                                            final_kl = action_mse
+                                            if action_mse < kl_thresh:
+                                                with rdvla_range("RDVLA/action_head/stop_reason_update"):
+                                                    adaptive_stop = True
+                                                    stop_reason = "kl_divergence"
 
-                            prev_output = curr_output.detach()
-                            if profile_coda_cost:
-                                convergence_check_end = self._sync_time()
-                                convergence_check_ms_list.append((convergence_check_end - convergence_check_start) * 1000.0)
+                                prev_output = curr_output.detach()
+                                if profile_coda_cost:
+                                    convergence_check_end = self._sync_time()
+                                    convergence_check_ms_list.append((convergence_check_end - convergence_check_start) * 1000.0)
 
                         latent_precheck_decisions.append({
                             "k": int(actual_iter),
@@ -471,6 +497,10 @@ class VLARecurrent(nn.Module):
                         prev_state = state.detach()
                         if adaptive_stop:
                             break
+
+            if stop_reason is None and actual_iter >= max_iter:
+                with rdvla_range("RDVLA/action_head/stop_reason_update"):
+                    stop_reason = "max_iter"
 
             with rdvla_range("RDVLA/action_head/final_get_output"):
                 if use_cached_final_output and curr_output is not None:
@@ -514,6 +544,7 @@ class VLARecurrent(nn.Module):
                 "first_converged_k_5e_4": first_converged_k_5e_4,
                 "final_mse": conv_score_list[-1] if conv_score_list else None,
                 "final_conv_score": final_kl,
+                "stop_reason": stop_reason,
                 "profiling_enabled": bool(profile_coda_cost),
                 "use_cached_final_output": bool(use_cached_final_output),
             }
@@ -597,18 +628,25 @@ class VLARecurrent(nn.Module):
                         actual_iter = it + 1
 
                         if prev_output is not None:
-                            diff = curr_output - prev_output
-                            mse = torch.mean(diff ** 2).item()
-                            l2 = torch.norm(diff.float()).item()
+                            with rdvla_range("RDVLA/action_head/stop_check/mse_compute"):
+                                diff = curr_output - prev_output
+                                mse_tensor = torch.mean(diff ** 2)
+                            with rdvla_range("RDVLA/action_head/stop_check/item_sync"):
+                                mse = mse_tensor.item()
+                            with rdvla_range("RDVLA/action_head/stop_check/mse_compute"):
+                                l2_tensor = torch.norm(diff.float())
+                            with rdvla_range("RDVLA/action_head/stop_check/item_sync"):
+                                l2 = l2_tensor.item()
 
                             conv_score_list.append(mse)
                             action_delta_list.append(l2)
                             final_conv_score = mse
 
-                            if first_converged_k_1e_4 is None and mse < 1e-4:
-                                first_converged_k_1e_4 = actual_iter
-                            if first_converged_k_5e_4 is None and mse < 5e-4:
-                                first_converged_k_5e_4 = actual_iter
+                            with rdvla_range("RDVLA/action_head/stop_check/condition"):
+                                if first_converged_k_1e_4 is None and mse < 1e-4:
+                                    first_converged_k_1e_4 = actual_iter
+                                if first_converged_k_5e_4 is None and mse < 5e-4:
+                                    first_converged_k_5e_4 = actual_iter
 
                         prev_output = curr_output.detach()
 
@@ -628,6 +666,7 @@ class VLARecurrent(nn.Module):
                 "first_converged_k_5e_4": first_converged_k_5e_4,
                 "final_mse": final_conv_score,
                 "final_conv_score": final_conv_score,
+                "stop_reason": None,
             }
 
             with rdvla_range("RDVLA/action_head/final_get_output"):

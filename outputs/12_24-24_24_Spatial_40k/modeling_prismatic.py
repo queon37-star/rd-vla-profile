@@ -419,18 +419,20 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
     def _replace_input_embeddings(self, input_embeddings, all_actions_mask, replacement_features):
         """Replace embeddings at masked positions with replacement_features."""
         with rdvla_range("RDVLA/vlm/replace_action_embeddings"):
-            new_input_embeddings = input_embeddings.clone()
-            repositioned_features = torch.zeros_like(input_embeddings)
+            with rdvla_range("RDVLA/vlm/replace_action_embeddings/clone"):
+                new_input_embeddings = input_embeddings.clone()
+            with rdvla_range("RDVLA/vlm/replace_action_embeddings/replace"):
+                repositioned_features = torch.zeros_like(input_embeddings)
 
-            batch_indices = torch.arange(input_embeddings.shape[0], device=input_embeddings.device)
-            batch_indices = batch_indices.unsqueeze(1).expand(-1, replacement_features.shape[1])
-            masked_indices = torch.stack([torch.where(mask)[0] for mask in all_actions_mask])
-            repositioned_features[batch_indices, masked_indices] = replacement_features
+                batch_indices = torch.arange(input_embeddings.shape[0], device=input_embeddings.device)
+                batch_indices = batch_indices.unsqueeze(1).expand(-1, replacement_features.shape[1])
+                masked_indices = torch.stack([torch.where(mask)[0] for mask in all_actions_mask])
+                repositioned_features[batch_indices, masked_indices] = replacement_features
 
-            new_input_embeddings = torch.where(
-                all_actions_mask.unsqueeze(-1), repositioned_features, new_input_embeddings
-            )
-            return new_input_embeddings
+                new_input_embeddings = torch.where(
+                    all_actions_mask.unsqueeze(-1), repositioned_features, new_input_embeddings
+                )
+                return new_input_embeddings
 
     def _process_action_masks(self, labels):
         """Helper to get action masks from labels"""
@@ -831,21 +833,28 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
 
         # Extract hidden states for action tokens
         with rdvla_range("RDVLA/vlm/extract_hidden_states"):
-            multi_layer_hidden_states = []
+            with rdvla_range("RDVLA/vlm/extract_hidden_states_total"):
+                multi_layer_hidden_states = []
 
-            for item in language_model_output.hidden_states[0:]:
-                # last_hidden_states = output.hidden_states[-1]  # (B, seq_len, D)
-                # Get hidden states for text portion of prompt+response (after the vision patches)
-                text_hidden_states = item
-                # Get hidden states for action portion of response
-                actions_hidden_states = text_hidden_states[:, NUM_PATCHES+ NUM_PROMPT_TOKENS : NUM_PATCHES + NUM_PROMPT_TOKENS + NUM_TOKENS, :,].reshape(1, 1, NUM_TOKENS, -1).to(torch.bfloat16)
+                for item in language_model_output.hidden_states[0:]:
+                    # last_hidden_states = output.hidden_states[-1]  # (B, seq_len, D)
+                    # Get hidden states for text portion of prompt+response (after the vision patches)
+                    text_hidden_states = item
+                    # Get hidden states for action portion of response
+                    with rdvla_range("RDVLA/vlm/extract_hidden_states/action_token_slice"):
+                        actions_hidden_states = text_hidden_states[:, NUM_PATCHES+ NUM_PROMPT_TOKENS : NUM_PATCHES + NUM_PROMPT_TOKENS + NUM_TOKENS, :,].reshape(1, 1, NUM_TOKENS, -1)
+                    with rdvla_range("RDVLA/vlm/extract_hidden_states/dtype_cast"):
+                        actions_hidden_states = actions_hidden_states.to(torch.bfloat16)
 
-                batch_size = item.shape[0]
-                task_latten_states = item[:, :NUM_PATCHES].reshape(batch_size, 1, NUM_PATCHES , -1)
-                all_hidden_states = torch.cat((task_latten_states, actions_hidden_states),2)
-                multi_layer_hidden_states.append(all_hidden_states)
+                    batch_size = item.shape[0]
+                    with rdvla_range("RDVLA/vlm/extract_hidden_states/task_latent_slice"):
+                        task_latten_states = item[:, :NUM_PATCHES].reshape(batch_size, 1, NUM_PATCHES , -1)
+                    with rdvla_range("RDVLA/vlm/extract_hidden_states/cat_per_layer"):
+                        all_hidden_states = torch.cat((task_latten_states, actions_hidden_states),2)
+                    multi_layer_hidden_states.append(all_hidden_states)
 
-            multi_layer_hidden_states = torch.cat(multi_layer_hidden_states, dim = 1)
+                with rdvla_range("RDVLA/vlm/extract_hidden_states/final_cat"):
+                    multi_layer_hidden_states = torch.cat(multi_layer_hidden_states, dim = 1)
 
 
         # Handle different prediction methods
