@@ -76,6 +76,42 @@ def format_pct(value):
     return "-" if value is None else f"{value:.1f}%"
 
 
+def print_candidate_summary(records):
+    candidate_records = [record for record in records if record.get("candidate_batch_enabled")]
+    if not candidate_records:
+        return
+
+    batch_sizes = {}
+    selected = {}
+    mean_l2 = []
+    max_l2 = []
+    for record in candidate_records:
+        batch_size = record.get("candidate_batch_size")
+        batch_sizes[batch_size] = batch_sizes.get(batch_size, 0) + 1
+
+        selected_idx = record.get("selected_candidate_idx")
+        selected[selected_idx] = selected.get(selected_idx, 0) + 1
+
+        mean_value = as_float(record.get("candidate_action_mean_l2_to_lane0"))
+        if mean_value is not None:
+            mean_l2.append(mean_value)
+        max_value = as_float(record.get("candidate_action_max_l2_to_lane0"))
+        if max_value is not None:
+            max_l2.append(max_value)
+
+    batch_summary = ", ".join(f"{key}: {value}" for key, value in sorted(batch_sizes.items(), key=lambda item: str(item[0])))
+    selected_summary = ", ".join(f"{key}: {value}" for key, value in sorted(selected.items(), key=lambda item: str(item[0])))
+
+    print()
+    print("Candidate Summary")
+    print()
+    print(f"- candidate records: {len(candidate_records)}")
+    print(f"- candidate_batch_size counts: {batch_summary}")
+    print(f"- selected_candidate_idx distribution: {selected_summary}")
+    print(f"- mean candidate_action_mean_l2_to_lane0: {format_ms(statistics.mean(mean_l2) if mean_l2 else None)}")
+    print(f"- mean candidate_action_max_l2_to_lane0: {format_ms(statistics.mean(max_l2) if max_l2 else None)}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Analyze RD-VLA timing summary JSONL/JSON files.")
     parser.add_argument("summary_path", type=Path)
@@ -110,6 +146,8 @@ def main():
             f"| {component} | {len(values)} | {format_ms(mean_value)} | "
             f"{format_ms(median_value)} | {format_ms(p95_value)} | {format_pct(ratio)} |"
         )
+
+    print_candidate_summary(records)
 
 
 if __name__ == "__main__":

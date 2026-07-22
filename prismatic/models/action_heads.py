@@ -239,6 +239,89 @@ class VLARecurrent(nn.Module):
             with rdvla_range("RDVLA/action_head/iter_recurrent_norm"):
                 return self.recurrent_norm(x)
 
+    def _prepare_candidate_batch(self, h_a, h_t, p, prelude_out, base_state, candidate_batch_size, candidate_noise_std):
+        if h_a.size(0) != 1:
+            raise ValueError("Candidate batch currently supports only base batch size 1")
+
+        candidate_batch_size = int(candidate_batch_size)
+        h_a = h_a.expand(candidate_batch_size, -1, -1, -1)
+        h_t = h_t.expand(candidate_batch_size, -1, -1, -1)
+        p = p.expand(candidate_batch_size, -1, -1)
+        prelude_out = prelude_out.expand(candidate_batch_size, -1, -1)
+
+        state = base_state.expand(candidate_batch_size, -1, -1).clone()
+        if candidate_batch_size > 1 and candidate_noise_std > 0:
+            state[1:] = state[1:] + float(candidate_noise_std) * torch.randn_like(state[1:])
+
+        return h_a, h_t, p, prelude_out, state
+
+    @staticmethod
+    def _candidate_pairwise_l2_mean(outputs):
+        if outputs.size(0) <= 1:
+            return None
+        diffs = outputs.float().unsqueeze(1) - outputs.float().unsqueeze(0)
+        pairwise = torch.norm(diffs.flatten(start_dim=2), dim=-1)
+        upper = torch.triu(torch.ones_like(pairwise, dtype=torch.bool), diagonal=1)
+        if not torch.any(upper):
+            return None
+        return pairwise[upper].mean().item()
+
+    def _select_candidate_output(
+        self,
+        outputs,
+        candidate_select_strategy,
+        candidate_final_mse_tensor=None,
+        use_candidate_batch=False,
+        candidate_batch_size=1,
+        candidate_noise_std=0.01,
+        log_candidate_metrics=False,
+    ):
+        if not use_candidate_batch or int(candidate_batch_size) <= 1:
+            return outputs, {}
+
+        candidate_batch_size = int(candidate_batch_size)
+        strategy = candidate_select_strategy or "first"
+        if strategy == "first":
+            selected_idx = 0
+            selected_output = outputs[:1]
+        elif strategy == "mean":
+            selected_idx = None
+            selected_output = outputs.float().mean(dim=0, keepdim=True).to(outputs.dtype)
+        elif strategy == "min_final_mse":
+            if candidate_final_mse_tensor is None:
+                selected_idx = 0
+            else:
+                selected_idx = int(torch.argmin(candidate_final_mse_tensor).item())
+            selected_output = outputs[selected_idx:selected_idx + 1]
+        else:
+            raise ValueError(f"Unsupported candidate_select_strategy: {strategy}")
+
+        metrics = {
+            "candidate_batch_enabled": True,
+            "candidate_batch_size": candidate_batch_size,
+            "candidate_select_strategy": strategy,
+            "selected_candidate_idx": selected_idx,
+            "candidate_noise_std": float(candidate_noise_std),
+        }
+        if log_candidate_metrics:
+            lane0 = outputs[:1].float()
+            l2_to_lane0 = torch.norm((outputs.float() - lane0).flatten(start_dim=1), dim=-1)
+            metrics.update({
+                "candidate_action_mean_l2_to_lane0": float(l2_to_lane0.mean().item()),
+                "candidate_action_max_l2_to_lane0": float(l2_to_lane0.max().item()),
+                "candidate_action_pairwise_l2_mean": (
+                    self._candidate_pairwise_l2_mean(outputs) if outputs.size(0) > 1 else None
+                ),
+                "candidate_final_mse_list": (
+                    candidate_final_mse_tensor.float().detach().cpu().tolist()
+                    if candidate_final_mse_tensor is not None else None
+                ),
+                "candidate_recurrent_loop_ms": None,
+                "candidate_total_action_head_ms": None,
+            })
+
+        return selected_output, metrics
+
     @staticmethod
     def _sync_time():
         if torch.cuda.is_available():
@@ -286,11 +369,18 @@ class VLARecurrent(nn.Module):
                 max_iter: int = 32, profile_coda_cost: bool = False,
                 use_cached_final_output: bool = False,
                 use_latent_precheck: bool = False,
-        latent_precheck_thresh: float = 0.12,
-        latent_precheck_min_iter: int = 2,
-        latent_precheck_force_interval: int = 0, **kwargs) -> torch.Tensor:
+                latent_precheck_thresh: float = 0.12,
+                latent_precheck_min_iter: int = 2,
+                latent_precheck_force_interval: int = 0,
+                use_candidate_batch: bool = False,
+                candidate_batch_size: int = 1,
+                candidate_noise_std: float = 0.01,
+                candidate_select_strategy: str = "first",
+                log_candidate_metrics: bool = False,
+                **kwargs) -> torch.Tensor:
         B = h_a.size(0)
         device, dtype = h_a.device, h_a.dtype
+        use_candidate_batch = bool(use_candidate_batch) and int(candidate_batch_size) > 1
 
         with rdvla_range("RDVLA/action_head/action_queries"):
             x = self.action_queries.unsqueeze(0).expand(B, -1, -1).to(dtype=dtype)
@@ -303,6 +393,18 @@ class VLARecurrent(nn.Module):
         prelude_out = x
 
         state = self.init_state(B, device, dtype)
+        if use_candidate_batch:
+            with rdvla_range("RDVLA/action_head/candidate_batch_expand"):
+                h_a, h_t, p, prelude_out, state = self._prepare_candidate_batch(
+                    h_a,
+                    h_t,
+                    p,
+                    prelude_out,
+                    state,
+                    candidate_batch_size,
+                    candidate_noise_std,
+                )
+            B = int(candidate_batch_size)
         self.last_recurrence_debug = None
         self._last_get_output_timing = None
 
@@ -357,6 +459,8 @@ class VLARecurrent(nn.Module):
             adaptive_stop = False
             stop_reason = None
             curr_output = None
+            candidate_final_mse_tensor = None
+            candidate_metrics = {}
 
             run_one_iteration_ms_list = []
             # Output timing lists include the final return-path call unless the
@@ -439,6 +543,7 @@ class VLARecurrent(nn.Module):
                                 if prev_output is not None:
                                     with rdvla_range("RDVLA/action_head/stop_check/mse_compute"):
                                         diff = curr_output - prev_output
+                                        per_lane_mse_tensor = torch.mean(diff.float() ** 2, dim=(1, 2))
                                         action_mse_tensor = torch.mean(diff ** 2)
                                     with rdvla_range("RDVLA/action_head/stop_check/item_sync"):
                                         action_mse = action_mse_tensor.item()
@@ -449,6 +554,7 @@ class VLARecurrent(nn.Module):
 
                                     conv_score_list.append(action_mse)
                                     action_delta_list.append(action_l2)
+                                    candidate_final_mse_tensor = per_lane_mse_tensor.detach()
                                     if latent_mse is not None:
                                         latent_action_mse_pairs.append({
                                             "k": int(actual_iter),
@@ -509,6 +615,16 @@ class VLARecurrent(nn.Module):
                     final_output = self._get_output(state, h_a, h_t, p, profile=profile_coda_cost)
                     if profile_coda_cost:
                         append_get_output_timing()
+                if use_candidate_batch:
+                    final_output, candidate_metrics = self._select_candidate_output(
+                        final_output,
+                        candidate_select_strategy,
+                        candidate_final_mse_tensor=candidate_final_mse_tensor,
+                        use_candidate_batch=use_candidate_batch,
+                        candidate_batch_size=candidate_batch_size,
+                        candidate_noise_std=candidate_noise_std,
+                        log_candidate_metrics=log_candidate_metrics,
+                    )
 
             self.last_recurrence_debug = {
                 "strategy": convergence_strategy,
@@ -548,6 +664,7 @@ class VLARecurrent(nn.Module):
                 "profiling_enabled": bool(profile_coda_cost),
                 "use_cached_final_output": bool(use_cached_final_output),
             }
+            self.last_recurrence_debug.update(candidate_metrics)
 
             if profile_coda_cost:
                 run_one_iteration_ms_total = sum(run_one_iteration_ms_list)
@@ -618,6 +735,8 @@ class VLARecurrent(nn.Module):
             final_conv_score = None
             curr_output = None
             actual_iter = 0
+            candidate_final_mse_tensor = None
+            candidate_metrics = {}
 
             with rdvla_range("RDVLA/action_head/recurrent_loop_total"):
                 with torch.no_grad():
@@ -630,6 +749,7 @@ class VLARecurrent(nn.Module):
                         if prev_output is not None:
                             with rdvla_range("RDVLA/action_head/stop_check/mse_compute"):
                                 diff = curr_output - prev_output
+                                per_lane_mse_tensor = torch.mean(diff.float() ** 2, dim=(1, 2))
                                 mse_tensor = torch.mean(diff ** 2)
                             with rdvla_range("RDVLA/action_head/stop_check/item_sync"):
                                 mse = mse_tensor.item()
@@ -641,6 +761,7 @@ class VLARecurrent(nn.Module):
                             conv_score_list.append(mse)
                             action_delta_list.append(l2)
                             final_conv_score = mse
+                            candidate_final_mse_tensor = per_lane_mse_tensor.detach()
 
                             with rdvla_range("RDVLA/action_head/stop_check/condition"):
                                 if first_converged_k_1e_4 is None and mse < 1e-4:
@@ -671,6 +792,17 @@ class VLARecurrent(nn.Module):
 
             with rdvla_range("RDVLA/action_head/final_get_output"):
                 final_output = curr_output
+                if use_candidate_batch:
+                    final_output, candidate_metrics = self._select_candidate_output(
+                        final_output,
+                        candidate_select_strategy,
+                        candidate_final_mse_tensor=candidate_final_mse_tensor,
+                        use_candidate_batch=use_candidate_batch,
+                        candidate_batch_size=candidate_batch_size,
+                        candidate_noise_std=candidate_noise_std,
+                        log_candidate_metrics=log_candidate_metrics,
+                    )
+                    self.last_recurrence_debug.update(candidate_metrics)
             return final_output, actual_iter, final_conv_score
 
         # Training-time fixed branch: 기존 코드 유지
@@ -687,7 +819,18 @@ class VLARecurrent(nn.Module):
                 state = self._run_one_iteration(state, prelude_out, h_a, h_t, p)
 
         with rdvla_range("RDVLA/action_head/final_get_output"):
-            return self._get_output(state, h_a, h_t, p)
+            final_output = self._get_output(state, h_a, h_t, p)
+            if use_candidate_batch:
+                final_output, _ = self._select_candidate_output(
+                    final_output,
+                    candidate_select_strategy,
+                    candidate_final_mse_tensor=None,
+                    use_candidate_batch=use_candidate_batch,
+                    candidate_batch_size=candidate_batch_size,
+                    candidate_noise_std=candidate_noise_std,
+                    log_candidate_metrics=log_candidate_metrics,
+                )
+            return final_output
 
         #여기까지가 수정한 metric 측정용 fixed branch
 
@@ -713,7 +856,10 @@ class ActionHeadRecurrent(nn.Module):
                        kl_thresh=0.001, cos_thresh=0.999, max_iter=32,
                        profile_coda_cost=False, use_cached_final_output=False,
                        use_latent_precheck=False, latent_precheck_thresh=0.12,
-                       latent_precheck_min_iter=2, latent_precheck_force_interval=0, **kwargs):
+                       latent_precheck_min_iter=2, latent_precheck_force_interval=0,
+                       use_candidate_batch=False, candidate_batch_size=1,
+                       candidate_noise_std=0.01, candidate_select_strategy="first",
+                       log_candidate_metrics=False, **kwargs):
         with rdvla_range("RDVLA/action_head/wrapper_total"):
             B = actions_hidden_states.shape[0]
             proprio = proprio.reshape(B, -1).to(torch.bfloat16)
@@ -731,4 +877,9 @@ class ActionHeadRecurrent(nn.Module):
                                  use_latent_precheck=use_latent_precheck,
                                  latent_precheck_thresh=latent_precheck_thresh,
                                  latent_precheck_min_iter=latent_precheck_min_iter,
-                                 latent_precheck_force_interval=latent_precheck_force_interval)
+                                 latent_precheck_force_interval=latent_precheck_force_interval,
+                                 use_candidate_batch=use_candidate_batch,
+                                 candidate_batch_size=candidate_batch_size,
+                                 candidate_noise_std=candidate_noise_std,
+                                 candidate_select_strategy=candidate_select_strategy,
+                                 log_candidate_metrics=log_candidate_metrics)

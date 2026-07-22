@@ -144,6 +144,13 @@ class GenerateConfig:
     profile_timing_steps: int = 1
     profile_timing_cuda_sync: bool = False
 
+    # Optional candidate-batch recurrent action-head inference diagnostics.
+    use_candidate_batch: bool = False
+    candidate_batch_size: int = 1
+    candidate_noise_std: float = 0.01
+    candidate_select_strategy: str = "first"
+    log_candidate_metrics: bool = False
+
     # Optional latent-state pre-check before running Coda in adaptive recurrence.
     use_latent_precheck: bool = False
     latent_precheck_thresh: float = 0.12
@@ -201,6 +208,12 @@ def validate_config(cfg: GenerateConfig) -> None:
         assert cfg.profile_timing_summary_path, (
             "profile_timing_summary_path must be non-empty when profile_timing_summary is enabled!"
         )
+
+    assert cfg.candidate_batch_size >= 1, "candidate_batch_size must be >= 1!"
+    assert cfg.candidate_noise_std >= 0.0, "candidate_noise_std must be non-negative!"
+    assert cfg.candidate_select_strategy in {"first", "min_final_mse", "mean"}, (
+        f"Invalid candidate_select_strategy: {cfg.candidate_select_strategy}"
+    )
 
 
 def calculate_linear_decay_horizon(actual_iters: int) -> int:
@@ -447,6 +460,31 @@ def _build_timing_summary_record(timing_record, result):
         "timings_ms": timings,
         "timing_counts": counts,
     }
+    candidate_keys = (
+        "candidate_batch_enabled",
+        "candidate_batch_size",
+        "candidate_select_strategy",
+        "selected_candidate_idx",
+        "candidate_noise_std",
+        "candidate_action_mean_l2_to_lane0",
+        "candidate_action_max_l2_to_lane0",
+        "candidate_action_pairwise_l2_mean",
+        "candidate_final_mse_list",
+        "candidate_recurrent_loop_ms",
+        "candidate_total_action_head_ms",
+    )
+    for key in candidate_keys:
+        if key in recurrence_debug:
+            record[key] = recurrence_debug.get(key)
+    if recurrence_debug.get("candidate_batch_enabled"):
+        if record.get("candidate_recurrent_loop_ms") is None:
+            record["candidate_recurrent_loop_ms"] = _timing_ms(timings, "RDVLA/action_head/recurrent_loop_total")
+        if record.get("candidate_total_action_head_ms") is None:
+            record["candidate_total_action_head_ms"] = _timing_ms(
+                timings,
+                "RDVLA/action_head/predict_action_total",
+                "RDVLA/action_head/wrapper_total",
+            )
     return record
 
 
@@ -962,6 +1000,22 @@ def run_episode(
                         "coda_time_ratio_total",
                     ):
                         step_record[timing_key] = debug.get(timing_key)
+
+                for candidate_key in (
+                    "candidate_batch_enabled",
+                    "candidate_batch_size",
+                    "candidate_select_strategy",
+                    "selected_candidate_idx",
+                    "candidate_noise_std",
+                    "candidate_action_mean_l2_to_lane0",
+                    "candidate_action_max_l2_to_lane0",
+                    "candidate_action_pairwise_l2_mean",
+                    "candidate_final_mse_list",
+                    "candidate_recurrent_loop_ms",
+                    "candidate_total_action_head_ms",
+                ):
+                    if candidate_key in debug:
+                        step_record[candidate_key] = debug.get(candidate_key)
 
                 prediction_step += 1
                 prev_action_vec = curr_action_vec

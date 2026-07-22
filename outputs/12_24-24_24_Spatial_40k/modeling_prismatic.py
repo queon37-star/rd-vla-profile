@@ -803,6 +803,11 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
         latent_precheck_thresh=0.12,
         latent_precheck_min_iter=2,
         latent_precheck_force_interval=0,
+        use_candidate_batch=False,
+        candidate_batch_size=1,
+        candidate_noise_std=0.01,
+        candidate_select_strategy="first",
+        log_candidate_metrics=False,
     ):
         """Run L1 regression-based continuous action prediction or discrete action tokens prediction."""
 
@@ -876,6 +881,11 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
                     latent_precheck_thresh=latent_precheck_thresh,
                     latent_precheck_min_iter=latent_precheck_min_iter,
                     latent_precheck_force_interval=latent_precheck_force_interval,
+                    use_candidate_batch=use_candidate_batch,
+                    candidate_batch_size=candidate_batch_size,
+                    candidate_noise_std=candidate_noise_std,
+                    candidate_select_strategy=candidate_select_strategy,
+                    log_candidate_metrics=log_candidate_metrics,
                 )
             # Handle convergence-based return (output, num_iters, final_kl) vs fixed return (output)
             actual_iters = None
@@ -928,6 +938,11 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
         latent_precheck_thresh: float = 0.12,
         latent_precheck_min_iter: int = 2,
         latent_precheck_force_interval: int = 0,
+        use_candidate_batch: bool = False,
+        candidate_batch_size: int = 1,
+        candidate_noise_std: float = 0.01,
+        candidate_select_strategy: str = "first",
+        log_candidate_metrics: bool = False,
         **kwargs: str,
     ) -> np.ndarray:
 
@@ -992,6 +1007,11 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
             latent_precheck_thresh=latent_precheck_thresh,
             latent_precheck_min_iter=latent_precheck_min_iter,
             latent_precheck_force_interval=latent_precheck_force_interval,
+            use_candidate_batch=use_candidate_batch,
+            candidate_batch_size=candidate_batch_size,
+            candidate_noise_std=candidate_noise_std,
+            candidate_select_strategy=candidate_select_strategy,
+            log_candidate_metrics=log_candidate_metrics,
             )
 
         # Unnormalize predicted actions

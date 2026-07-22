@@ -428,6 +428,11 @@ def get_vla_action(
                         latent_precheck_thresh=getattr(cfg, "latent_precheck_thresh", 0.12),
                         latent_precheck_min_iter=getattr(cfg, "latent_precheck_min_iter", 2),
                         latent_precheck_force_interval=getattr(cfg, "latent_precheck_force_interval", 0),
+                        use_candidate_batch=getattr(cfg, "use_candidate_batch", False),
+                        candidate_batch_size=getattr(cfg, "candidate_batch_size", 1),
+                        candidate_noise_std=getattr(cfg, "candidate_noise_std", 0.01),
+                        candidate_select_strategy=getattr(cfg, "candidate_select_strategy", "first"),
+                        log_candidate_metrics=getattr(cfg, "log_candidate_metrics", False),
                     )
                     recurrence_debug = getattr(getattr(action_head, "model", None), "last_recurrence_debug", None)
 
