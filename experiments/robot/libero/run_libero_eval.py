@@ -129,6 +129,10 @@ class GenerateConfig:
     recurrence_cos_thresh: float = 0.999
     recurrence_max_iter: int = 32
 
+    # Disabled-by-default warm-start plumbing. State reuse begins in Phase 2.
+    use_warm_start: bool = False
+    warm_start_source: str = "s1"
+
     # Adaptive recurrence Coda profiling and final-output cache comparison.
     profile_coda_cost: bool = False
     use_cached_final_output: bool = False
@@ -188,6 +192,7 @@ def validate_config(cfg: GenerateConfig) -> None:
         assert cfg.center_crop, "Expecting `center_crop==True` because model was trained with image augmentations!"
 
     assert not (cfg.load_in_8bit and cfg.load_in_4bit), "Cannot use both 8-bit and 4-bit quantization!"
+    assert cfg.warm_start_source == "s1", f"Unsupported warm_start_source: {cfg.warm_start_source}"
 
     # Validate task suite
     assert cfg.task_suite_name in [suite.value for suite in TaskSuite], f"Invalid task suite: {cfg.task_suite_name}"
@@ -404,7 +409,11 @@ def _build_timing_summary_record(timing_record, result):
         if len(result) > 2:
             final_kl = result[2]
         if len(result) > 3 and result[3] is not None:
-            recurrence_debug = result[3]
+            payload = result[3]
+            if isinstance(payload, dict):
+                recurrence_debug = payload.get("recurrence_debug", payload) or {}
+                if not isinstance(recurrence_debug, dict):
+                    recurrence_debug = {}
 
     final_mse = recurrence_debug.get("final_mse")
     if final_mse is None:
@@ -781,6 +790,7 @@ def run_episode(
     max_steps = TASK_MAX_STEPS[cfg.task_suite_name]
 
     action_queue = deque()
+    warm_start_state = None
     episode_iters = []
     replay_stats = []  # (iters, num_actions) per prediction
     episode_action_latencies_ms = []
@@ -833,7 +843,8 @@ def run_episode(
                         action_head=action_head,
                         proprio_projector=proprio_projector,
                         use_film=cfg.use_film,
-                        use_minivlm=cfg.use_minivlm
+                        use_minivlm=cfg.use_minivlm,
+                        warm_start_state=warm_start_state,
                     )
 
                 timing_metadata = {
@@ -843,7 +854,7 @@ def run_episode(
                     "action_prediction_index": prediction_step,
                     "prediction_step": prediction_step,
                 }
-                actions, actual_iters, final_kl, recurrence_debug = run_action_with_optional_profiles(
+                actions, actual_iters, final_kl, inference_metadata = run_action_with_optional_profiles(
                     cfg,
                     profile_state,
                     timing_state,
@@ -851,6 +862,8 @@ def run_episode(
                     predict_action_once,
                     timing_metadata,
                 )
+                inference_metadata = inference_metadata or {}
+                recurrence_debug = inference_metadata.get("recurrence_debug")
 
                 if torch.cuda.is_available():
                     torch.cuda.synchronize()

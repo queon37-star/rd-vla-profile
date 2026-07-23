@@ -342,7 +342,11 @@ def get_vla_action(
     action_head: Optional[torch.nn.Module] = None,
     proprio_projector: Optional[torch.nn.Module] = None,
     use_film: bool = False, use_minivlm: bool = False,
+    warm_start_state=None,
 ) -> List[np.ndarray]:
+    effective_warm_start_state = (
+        warm_start_state if getattr(cfg, "use_warm_start", False) else None
+    )
     with rdvla_range("RDVLA/get_vla_action_total"):
         with torch.inference_mode():
             with rdvla_range("RDVLA/get_vla_action/collect_images"):
@@ -422,6 +426,7 @@ def get_vla_action(
                         kl_thresh=getattr(cfg, "recurrence_kl_thresh", 0.001),
                         cos_thresh=getattr(cfg, "recurrence_cos_thresh", 0.999),
                         max_iter=getattr(cfg, "recurrence_max_iter", 32),
+                        warm_start_state=effective_warm_start_state,
                         profile_coda_cost=getattr(cfg, "profile_coda_cost", False),
                         use_cached_final_output=getattr(cfg, "use_cached_final_output", False),
                         use_latent_precheck=getattr(cfg, "use_latent_precheck", False),
@@ -433,11 +438,17 @@ def get_vla_action(
 
         with rdvla_range("RDVLA/get_vla_action/action_postprocess"):
             actions = [action[i] for i in range(min(len(action), cfg.num_open_loop_steps))]
-        # 원본 반환 코드
-        # return actions, actual_iters, final_kl
-
-        # recurrence debug metric 전달을 위해 수정한 반환 코드
-        return actions, actual_iters, final_kl, recurrence_debug
+        inference_metadata = {
+            "recurrence_debug": recurrence_debug,
+            "warm_start": {
+                "enabled": bool(getattr(cfg, "use_warm_start", False)),
+                "source": getattr(cfg, "warm_start_source", "s1"),
+                "state_provided": effective_warm_start_state is not None,
+                "state_used": False,
+            },
+            "next_warm_start_state": None,
+        }
+        return actions, actual_iters, final_kl, inference_metadata
 
 
 def get_action_from_server(

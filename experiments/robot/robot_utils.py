@@ -105,6 +105,7 @@ def get_action(
     proprio_projector: Optional[torch.nn.Module] = None,
     use_film: bool = False,
     use_minivlm: bool = False,
+    warm_start_state=None,
 ) -> Union[List[np.ndarray], np.ndarray]:
     """Query the model to get action predictions."""
     with torch.no_grad():
@@ -122,8 +123,9 @@ def get_action(
             #     use_minivlm=use_minivlm
             # )
 
-            # recurrence debug metric 전달을 위해 수정한 코드
-            actions, actual_iters, final_kl, recurrence_debug = get_vla_action(
+            # Structured inference metadata keeps recurrence diagnostics separate
+            # from future tensor-valued warm-start state.
+            actions, actual_iters, final_kl, inference_metadata = get_vla_action(
                 cfg=cfg,
                 vla=model,
                 processor=processor,
@@ -132,7 +134,8 @@ def get_action(
                 action_head=action_head,
                 proprio_projector=proprio_projector,
                 use_film=use_film,
-                use_minivlm=use_minivlm
+                use_minivlm=use_minivlm,
+                warm_start_state=warm_start_state,
             )
         else:
             raise ValueError(f"Unsupported model family: {cfg.model_family}")
@@ -140,8 +143,7 @@ def get_action(
     # 원본 반환 코드
     # return actions, actual_iters, final_kl
 
-    # recurrence debug metric 전달을 위해 수정한 반환 코드
-    return actions, actual_iters, final_kl, recurrence_debug
+    return actions, actual_iters, final_kl, inference_metadata
 
 
 def normalize_gripper_action(action: np.ndarray, binarize: bool = True) -> np.ndarray:

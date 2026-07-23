@@ -282,6 +282,7 @@ class VLARecurrent(nn.Module):
 
     def forward(self, h_a: torch.Tensor, h_t: torch.Tensor, p: torch.Tensor,
                 num_iter: int = None, convergence_strategy: str = None,
+                warm_start_state: torch.Tensor = None,
                 kl_thresh: float = 0.001, cos_thresh: float = 0.999,
                 max_iter: int = 32, profile_coda_cost: bool = False,
                 use_cached_final_output: bool = False,
@@ -302,6 +303,8 @@ class VLARecurrent(nn.Module):
                         x = layer(x, h_a[:, self.prelude_vlm_layers[i]], h_t[:, self.prelude_vlm_layers[i]], p)
         prelude_out = x
 
+        if warm_start_state is not None:
+            raise NotImplementedError("Warm-start state reuse is not implemented until Phase 2")
         state = self.init_state(B, device, dtype)
         self.last_recurrence_debug = None
         self._last_get_output_timing = None
@@ -711,6 +714,7 @@ class ActionHeadRecurrent(nn.Module):
     def predict_action(self, actions_hidden_states, proprio=None, proprio_projector=None,
                        phase="Inference", num_iter=None, convergence_strategy=None,
                        kl_thresh=0.001, cos_thresh=0.999, max_iter=32,
+                       warm_start_state=None,
                        profile_coda_cost=False, use_cached_final_output=False,
                        use_latent_precheck=False, latent_precheck_thresh=0.12,
                        latent_precheck_min_iter=2, latent_precheck_force_interval=0, **kwargs):
@@ -726,6 +730,7 @@ class ActionHeadRecurrent(nn.Module):
                 return self.model(h_a, h_t, proprio_features, num_iter=num_iter,
                                  convergence_strategy=convergence_strategy, kl_thresh=kl_thresh,
                                  cos_thresh=cos_thresh, max_iter=max_iter,
+                                 warm_start_state=warm_start_state,
                                  profile_coda_cost=profile_coda_cost,
                                  use_cached_final_output=use_cached_final_output,
                                  use_latent_precheck=use_latent_precheck,
