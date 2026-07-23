@@ -408,6 +408,7 @@ def get_vla_action(
             actual_iters = None
             final_kl = None
             recurrence_debug = None
+            action_head_inference_metadata = {}
             with rdvla_range("RDVLA/get_vla_action/vla_predict_action"):
                 if action_head is None:
                     action, _, actual_iters, final_kl = vla.predict_action(
@@ -427,6 +428,10 @@ def get_vla_action(
                         cos_thresh=getattr(cfg, "recurrence_cos_thresh", 0.999),
                         max_iter=getattr(cfg, "recurrence_max_iter", 32),
                         warm_start_state=effective_warm_start_state,
+                        enable_warm_start=bool(getattr(cfg, "use_warm_start", False)),
+                        validate_warm_start_finite=bool(
+                            getattr(cfg, "validate_warm_start_finite", False)
+                        ),
                         profile_coda_cost=getattr(cfg, "profile_coda_cost", False),
                         use_cached_final_output=getattr(cfg, "use_cached_final_output", False),
                         use_latent_precheck=getattr(cfg, "use_latent_precheck", False),
@@ -435,18 +440,28 @@ def get_vla_action(
                         latent_precheck_force_interval=getattr(cfg, "latent_precheck_force_interval", 0),
                     )
                     recurrence_debug = getattr(getattr(action_head, "model", None), "last_recurrence_debug", None)
+                    action_head_inference_metadata = (
+                        getattr(getattr(action_head, "model", None), "last_inference_metadata", None) or {}
+                    )
 
         with rdvla_range("RDVLA/get_vla_action/action_postprocess"):
             actions = [action[i] for i in range(min(len(action), cfg.num_open_loop_steps))]
+        warm_start_metadata = action_head_inference_metadata.get("warm_start", {})
         inference_metadata = {
             "recurrence_debug": recurrence_debug,
+            "next_warm_start_state": action_head_inference_metadata.get("next_warm_start_state"),
             "warm_start": {
                 "enabled": bool(getattr(cfg, "use_warm_start", False)),
                 "source": getattr(cfg, "warm_start_source", "s1"),
-                "state_provided": effective_warm_start_state is not None,
-                "state_used": False,
+                "source_iteration": 1,
+                "state_provided": bool(
+                    warm_start_metadata.get("state_provided", effective_warm_start_state is not None)
+                ),
+                "state_used": bool(warm_start_metadata.get("state_used", False)),
+                "initial_state_origin": warm_start_metadata.get("initial_state_origin", "random"),
+                "reset": bool(warm_start_metadata.get("reset", False)),
+                "reset_reason": warm_start_metadata.get("reset_reason"),
             },
-            "next_warm_start_state": None,
         }
         return actions, actual_iters, final_kl, inference_metadata
 

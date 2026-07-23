@@ -129,9 +129,10 @@ class GenerateConfig:
     recurrence_cos_thresh: float = 0.999
     recurrence_max_iter: int = 32
 
-    # Disabled-by-default warm-start plumbing. State reuse begins in Phase 2.
+    # Disabled-by-default warm-start inference settings.
     use_warm_start: bool = False
     warm_start_source: str = "s1"
+    validate_warm_start_finite: bool = False
 
     # Adaptive recurrence Coda profiling and final-output cache comparison.
     profile_coda_cost: bool = False
@@ -193,6 +194,8 @@ def validate_config(cfg: GenerateConfig) -> None:
 
     assert not (cfg.load_in_8bit and cfg.load_in_4bit), "Cannot use both 8-bit and 4-bit quantization!"
     assert cfg.warm_start_source == "s1", f"Unsupported warm_start_source: {cfg.warm_start_source}"
+    if cfg.use_warm_start:
+        assert cfg.use_recurrent, "Warm-start requires recurrent inference"
 
     # Validate task suite
     assert cfg.task_suite_name in [suite.value for suite in TaskSuite], f"Invalid task suite: {cfg.task_suite_name}"
@@ -791,6 +794,7 @@ def run_episode(
 
     action_queue = deque()
     warm_start_state = None
+    warm_start_cache_age = 0
     episode_iters = []
     replay_stats = []  # (iters, num_actions) per prediction
     episode_action_latencies_ms = []
@@ -811,6 +815,7 @@ def run_episode(
             replay_images.append(img)
 
             if len(action_queue) == 0:
+                cache_age_for_prediction = warm_start_cache_age
                 proprio_before_pred = None
                 if "state" in observation:
                     proprio_before_pred = np.array(observation["state"], dtype=np.float32).reshape(-1).copy()
@@ -863,7 +868,27 @@ def run_episode(
                     timing_metadata,
                 )
                 inference_metadata = inference_metadata or {}
-                recurrence_debug = inference_metadata.get("recurrence_debug")
+                if isinstance(inference_metadata, dict):
+                    recurrence_debug = inference_metadata.get("recurrence_debug", inference_metadata)
+                    warm_start_metadata = dict(inference_metadata.get("warm_start") or {})
+                    next_warm_start_state = inference_metadata.get("next_warm_start_state")
+                else:
+                    recurrence_debug = {}
+                    warm_start_metadata = {}
+                    next_warm_start_state = None
+
+                warm_start_enabled = bool(
+                    warm_start_metadata.get("enabled", getattr(cfg, "use_warm_start", False))
+                )
+                warm_start_state_provided = bool(warm_start_metadata.get("state_provided", False))
+                warm_start_used = bool(warm_start_metadata.get("state_used", False))
+                warm_start_source = warm_start_metadata.get(
+                    "source", getattr(cfg, "warm_start_source", "s1")
+                )
+                warm_start_source_iteration = warm_start_metadata.get("source_iteration", 1)
+                initial_state_origin = warm_start_metadata.get("initial_state_origin", "random")
+                warm_start_reset = bool(warm_start_metadata.get("reset", False))
+                warm_start_reset_reason = warm_start_metadata.get("reset_reason")
 
                 if torch.cuda.is_available():
                     torch.cuda.synchronize()
@@ -873,6 +898,22 @@ def run_episode(
                     f"  Action inference latency: {action_latency_ms:.2f} ms, iters={actual_iters}",
                     log_file,
                 )
+
+                if getattr(cfg, "use_warm_start", False):
+                    if warm_start_reset:
+                        warm_start_cache_age = 0
+                    if torch.is_tensor(next_warm_start_state):
+                        warm_start_state = next_warm_start_state
+                        warm_start_cache_age += 1
+                    else:
+                        warm_start_state = None
+                        warm_start_cache_age = 0
+                        if not warm_start_reset:
+                            warm_start_reset = True
+                            warm_start_reset_reason = "next_warm_start_state_missing"
+                else:
+                    warm_start_state = None
+                    warm_start_cache_age = 0
 
                 if actual_iters is not None:
                     episode_iters.append(actual_iters)
@@ -948,6 +989,15 @@ def run_episode(
                     "latent_precheck_decisions": debug.get("latent_precheck_decisions", []),
                     "first_converged_k_1e_4": debug.get("first_converged_k_1e_4", None),
                     "first_converged_k_5e_4": debug.get("first_converged_k_5e_4", None),
+                    "warm_start_enabled": warm_start_enabled,
+                    "warm_start_used": warm_start_used,
+                    "warm_start_state_provided": warm_start_state_provided,
+                    "warm_start_source": warm_start_source,
+                    "warm_start_source_iteration": warm_start_source_iteration,
+                    "warm_start_cache_age": int(cache_age_for_prediction),
+                    "warm_start_reset": warm_start_reset,
+                    "warm_start_reset_reason": warm_start_reset_reason,
+                    "initial_state_origin": initial_state_origin,
                     "prev_action_delta": prev_action_delta,
                     "proprio_delta": proprio_delta,
                     "latency_ms": action_latency_ms,

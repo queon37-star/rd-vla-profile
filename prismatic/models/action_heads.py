@@ -194,6 +194,7 @@ class VLARecurrent(nn.Module):
         self.output_proj = nn.Linear(dim, cfg.action_dim)
         self.gamma_init = nn.Parameter(torch.ones(1))
         self._last_get_output_timing = None
+        self.last_inference_metadata = None
         self._init_weights()
 
     def _init_weights(self):
@@ -220,6 +221,50 @@ class VLARecurrent(nn.Module):
                     nn.init.trunc_normal_(state, mean=0.0, std=std, a=-3*std, b=3*std)
                 with rdvla_range("RDVLA/action_head/init_state/device_dtype_cast"):
                     return state
+
+    def _select_initial_state(
+        self, warm_start_state, B: int, device, dtype, validate_warm_start_finite: bool = False
+    ):
+        expected_shape = (B, self.cfg.action_chunk_len, self.cfg.hidden_dim)
+        metadata = {
+            "state_provided": warm_start_state is not None,
+            "state_used": False,
+            "initial_state_origin": "random",
+            "reset": False,
+            "reset_reason": None,
+        }
+
+        if warm_start_state is None:
+            return self.init_state(B, device, dtype), metadata
+
+        reset_reason = None
+        if not torch.is_tensor(warm_start_state):
+            reset_reason = "warm_start_state_not_tensor"
+        elif tuple(warm_start_state.shape) != expected_shape:
+            reset_reason = (
+                f"warm_start_shape_mismatch:expected={expected_shape},"
+                f"actual={tuple(warm_start_state.shape)}"
+            )
+        else:
+            try:
+                state = warm_start_state.detach().clone().to(device=device, dtype=dtype)
+                is_finite = (
+                    bool(torch.isfinite(state).all().item())
+                    if validate_warm_start_finite
+                    else True
+                )
+            except (RuntimeError, TypeError) as exc:
+                reset_reason = f"warm_start_conversion_failed:{type(exc).__name__}"
+            else:
+                if is_finite:
+                    metadata["state_used"] = True
+                    metadata["initial_state_origin"] = "cached"
+                    return state, metadata
+                reset_reason = "warm_start_state_non_finite"
+
+        metadata["reset"] = True
+        metadata["reset_reason"] = reset_reason
+        return self.init_state(B, device, dtype), metadata
 
     def sample_iterations(self) -> int:
         r_mean = self.cfg.mean_recurrence
@@ -283,6 +328,8 @@ class VLARecurrent(nn.Module):
     def forward(self, h_a: torch.Tensor, h_t: torch.Tensor, p: torch.Tensor,
                 num_iter: int = None, convergence_strategy: str = None,
                 warm_start_state: torch.Tensor = None,
+                enable_warm_start: bool = False,
+                validate_warm_start_finite: bool = False,
                 kl_thresh: float = 0.001, cos_thresh: float = 0.999,
                 max_iter: int = 32, profile_coda_cost: bool = False,
                 use_cached_final_output: bool = False,
@@ -303,9 +350,29 @@ class VLARecurrent(nn.Module):
                         x = layer(x, h_a[:, self.prelude_vlm_layers[i]], h_t[:, self.prelude_vlm_layers[i]], p)
         prelude_out = x
 
-        if warm_start_state is not None:
-            raise NotImplementedError("Warm-start state reuse is not implemented until Phase 2")
-        state = self.init_state(B, device, dtype)
+        capture_s1 = bool(enable_warm_start and not self.training)
+        if capture_s1:
+            state, warm_start_metadata = self._select_initial_state(
+                warm_start_state,
+                B,
+                device,
+                dtype,
+                validate_warm_start_finite=validate_warm_start_finite,
+            )
+        else:
+            state = self.init_state(B, device, dtype)
+            warm_start_metadata = {
+                "state_provided": False,
+                "state_used": False,
+                "initial_state_origin": "random",
+                "reset": False,
+                "reset_reason": None,
+            }
+        s1_state = None
+        self.last_inference_metadata = {
+            "next_warm_start_state": None,
+            "warm_start": warm_start_metadata,
+        }
         self.last_recurrence_debug = None
         self._last_get_output_timing = None
 
@@ -384,6 +451,8 @@ class VLARecurrent(nn.Module):
                         if profile_coda_cost:
                             run_one_iteration_end = self._sync_time()
                             run_one_iteration_ms_list.append((run_one_iteration_end - run_one_iteration_start) * 1000.0)
+                        if capture_s1 and it == 0:
+                            s1_state = state.detach().clone()
 
                         actual_iter = it + 1
                         with rdvla_range("RDVLA/action_head/latent_precheck_total"):
@@ -576,6 +645,7 @@ class VLARecurrent(nn.Module):
                     ),
                 })
 
+            self.last_inference_metadata["next_warm_start_state"] = s1_state
             return final_output, actual_iter, final_kl
 
         # 여기까지가 metric 추가한 adaptive branch
@@ -626,6 +696,8 @@ class VLARecurrent(nn.Module):
                 with torch.no_grad():
                     for it in range(total):
                         state = self._run_one_iteration(state, prelude_out, h_a, h_t, p)
+                        if capture_s1 and it == 0:
+                            s1_state = state.detach().clone()
                         with rdvla_range("RDVLA/action_head/get_output_each_iter"):
                             curr_output = self._get_output(state, h_a, h_t, p)
                         actual_iter = it + 1
@@ -674,6 +746,7 @@ class VLARecurrent(nn.Module):
 
             with rdvla_range("RDVLA/action_head/final_get_output"):
                 final_output = curr_output
+            self.last_inference_metadata["next_warm_start_state"] = s1_state
             return final_output, actual_iter, final_conv_score
 
         # Training-time fixed branch: 기존 코드 유지
@@ -714,7 +787,8 @@ class ActionHeadRecurrent(nn.Module):
     def predict_action(self, actions_hidden_states, proprio=None, proprio_projector=None,
                        phase="Inference", num_iter=None, convergence_strategy=None,
                        kl_thresh=0.001, cos_thresh=0.999, max_iter=32,
-                       warm_start_state=None,
+                       warm_start_state=None, enable_warm_start: bool = False,
+                       validate_warm_start_finite: bool = False,
                        profile_coda_cost=False, use_cached_final_output=False,
                        use_latent_precheck=False, latent_precheck_thresh=0.12,
                        latent_precheck_min_iter=2, latent_precheck_force_interval=0, **kwargs):
@@ -731,6 +805,8 @@ class ActionHeadRecurrent(nn.Module):
                                  convergence_strategy=convergence_strategy, kl_thresh=kl_thresh,
                                  cos_thresh=cos_thresh, max_iter=max_iter,
                                  warm_start_state=warm_start_state,
+                                 enable_warm_start=enable_warm_start,
+                                 validate_warm_start_finite=validate_warm_start_finite,
                                  profile_coda_cost=profile_coda_cost,
                                  use_cached_final_output=use_cached_final_output,
                                  use_latent_precheck=use_latent_precheck,
