@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import random
 import shutil
 import sys
 import time
@@ -115,6 +116,8 @@ class GenerateConfig:
     wandb_project: str = "your-wandb-project"        # Name of WandB project
 
     seed: int = 7                                    # Random Seed (for reproducibility)
+    reset_rng_each_episode: bool = False             # Reset policy/environment RNG once per episode
+    episode_seed_stride: int = 1                     # Offset between consecutive episode seeds
 
     # fmt: on
     save_version: str = "rd-vla"                     # Version tag for saved videos
@@ -132,6 +135,7 @@ class GenerateConfig:
     # Disabled-by-default warm-start inference settings.
     use_warm_start: bool = False
     warm_start_source: str = "s1"
+    warm_start_min_iter: int = 2
     validate_warm_start_finite: bool = False
 
     # Adaptive recurrence Coda profiling and final-output cache comparison.
@@ -196,6 +200,10 @@ def validate_config(cfg: GenerateConfig) -> None:
     assert cfg.warm_start_source == "s1", f"Unsupported warm_start_source: {cfg.warm_start_source}"
     if cfg.use_warm_start:
         assert cfg.use_recurrent, "Warm-start requires recurrent inference"
+    if cfg.warm_start_min_iter < 2:
+        raise ValueError("warm_start_min_iter must be at least 2")
+    if cfg.episode_seed_stride < 1:
+        raise ValueError("episode_seed_stride must be at least 1")
 
     # Validate task suite
     assert cfg.task_suite_name in [suite.value for suite in TaskSuite], f"Invalid task suite: {cfg.task_suite_name}"
@@ -781,6 +789,16 @@ def run_episode(
     timing_state=None,
 ):
     """Run a single episode in the environment."""
+    episode_seed = None
+    if getattr(cfg, "reset_rng_each_episode", False):
+        episode_id_for_seed = int(episode_idx) if episode_idx is not None else 0
+        episode_seed = int(cfg.seed) + episode_id_for_seed * int(cfg.episode_seed_stride)
+        random.seed(episode_seed)
+        np.random.seed(episode_seed)
+        torch.manual_seed(episode_seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(episode_seed)
+
     env.reset()
 
     if initial_state is not None:
@@ -957,6 +975,8 @@ def run_episode(
                     "timestep": int(t),
                     "action_prediction_index": prediction_step,
                     "prediction_step": prediction_step,
+                    "reset_rng_each_episode": bool(getattr(cfg, "reset_rng_each_episode", False)),
+                    "episode_seed": episode_seed,
                     "method": debug.get("strategy", recurrence_strategy),
                     "recurrence_strategy": debug.get("strategy", recurrence_strategy),
                     "threshold": threshold,
@@ -998,6 +1018,12 @@ def run_episode(
                     "warm_start_reset": warm_start_reset,
                     "warm_start_reset_reason": warm_start_reset_reason,
                     "initial_state_origin": initial_state_origin,
+                    "warm_start_min_iter": _as_int(
+                        debug.get("warm_start_min_iter_configured", getattr(cfg, "warm_start_min_iter", 2))
+                    ),
+                    "effective_min_iter": _as_int(debug.get("effective_min_iter", 2)),
+                    "min_iter_gate_block_count": _as_int(debug.get("min_iter_gate_block_count", 0)),
+                    "first_threshold_satisfied_k": _as_int(debug.get("first_threshold_satisfied_k")),
                     "prev_action_delta": prev_action_delta,
                     "proprio_delta": proprio_delta,
                     "latency_ms": action_latency_ms,

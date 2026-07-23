@@ -429,6 +429,7 @@ def get_vla_action(
                         max_iter=getattr(cfg, "recurrence_max_iter", 32),
                         warm_start_state=effective_warm_start_state,
                         enable_warm_start=bool(getattr(cfg, "use_warm_start", False)),
+                        warm_start_min_iter=getattr(cfg, "warm_start_min_iter", 2),
                         validate_warm_start_finite=bool(
                             getattr(cfg, "validate_warm_start_finite", False)
                         ),

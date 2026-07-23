@@ -329,6 +329,7 @@ class VLARecurrent(nn.Module):
                 num_iter: int = None, convergence_strategy: str = None,
                 warm_start_state: torch.Tensor = None,
                 enable_warm_start: bool = False,
+                warm_start_min_iter: int = 2,
                 validate_warm_start_finite: bool = False,
                 kl_thresh: float = 0.001, cos_thresh: float = 0.999,
                 max_iter: int = 32, profile_coda_cost: bool = False,
@@ -373,6 +374,13 @@ class VLARecurrent(nn.Module):
             "next_warm_start_state": None,
             "warm_start": warm_start_metadata,
         }
+        cached_state_used = bool(warm_start_metadata.get("state_used", False))
+        warm_start_min_iter_configured = int(warm_start_min_iter)
+        effective_min_iter = (
+            max(2, warm_start_min_iter_configured)
+            if cached_state_used
+            else 2
+        )
         self.last_recurrence_debug = None
         self._last_get_output_timing = None
 
@@ -427,6 +435,8 @@ class VLARecurrent(nn.Module):
             adaptive_stop = False
             stop_reason = None
             curr_output = None
+            min_iter_gate_block_count = 0
+            first_threshold_satisfied_k = None
 
             run_one_iteration_ms_list = []
             # Output timing lists include the final return-path call unless the
@@ -544,15 +554,25 @@ class VLARecurrent(nn.Module):
                                                 cos_sim = cos_sim_tensor.item()
                                             final_kl = 1 - cos_sim
                                             if cos_sim > cos_thresh:
-                                                with rdvla_range("RDVLA/action_head/stop_reason_update"):
-                                                    adaptive_stop = True
-                                                    stop_reason = "cosine_similarity"
+                                                if first_threshold_satisfied_k is None:
+                                                    first_threshold_satisfied_k = actual_iter
+                                                if actual_iter >= effective_min_iter:
+                                                    with rdvla_range("RDVLA/action_head/stop_reason_update"):
+                                                        adaptive_stop = True
+                                                        stop_reason = "cosine_similarity"
+                                                else:
+                                                    min_iter_gate_block_count += 1
                                         elif convergence_strategy == "kl_divergence":
                                             final_kl = action_mse
                                             if action_mse < kl_thresh:
-                                                with rdvla_range("RDVLA/action_head/stop_reason_update"):
-                                                    adaptive_stop = True
-                                                    stop_reason = "kl_divergence"
+                                                if first_threshold_satisfied_k is None:
+                                                    first_threshold_satisfied_k = actual_iter
+                                                if actual_iter >= effective_min_iter:
+                                                    with rdvla_range("RDVLA/action_head/stop_reason_update"):
+                                                        adaptive_stop = True
+                                                        stop_reason = "kl_divergence"
+                                                else:
+                                                    min_iter_gate_block_count += 1
 
                                 prev_output = curr_output.detach()
                                 if profile_coda_cost:
@@ -619,6 +639,11 @@ class VLARecurrent(nn.Module):
                 "stop_reason": stop_reason,
                 "profiling_enabled": bool(profile_coda_cost),
                 "use_cached_final_output": bool(use_cached_final_output),
+                "warm_start_min_iter_configured": warm_start_min_iter_configured,
+                "effective_min_iter": int(effective_min_iter),
+                "warm_start_state_used": cached_state_used,
+                "min_iter_gate_block_count": int(min_iter_gate_block_count),
+                "first_threshold_satisfied_k": first_threshold_satisfied_k,
             }
 
             if profile_coda_cost:
@@ -742,6 +767,11 @@ class VLARecurrent(nn.Module):
                 "final_mse": final_conv_score,
                 "final_conv_score": final_conv_score,
                 "stop_reason": None,
+                "warm_start_min_iter_configured": warm_start_min_iter_configured,
+                "effective_min_iter": int(effective_min_iter),
+                "warm_start_state_used": cached_state_used,
+                "min_iter_gate_block_count": 0,
+                "first_threshold_satisfied_k": None,
             }
 
             with rdvla_range("RDVLA/action_head/final_get_output"):
@@ -788,6 +818,7 @@ class ActionHeadRecurrent(nn.Module):
                        phase="Inference", num_iter=None, convergence_strategy=None,
                        kl_thresh=0.001, cos_thresh=0.999, max_iter=32,
                        warm_start_state=None, enable_warm_start: bool = False,
+                       warm_start_min_iter: int = 2,
                        validate_warm_start_finite: bool = False,
                        profile_coda_cost=False, use_cached_final_output=False,
                        use_latent_precheck=False, latent_precheck_thresh=0.12,
@@ -806,6 +837,7 @@ class ActionHeadRecurrent(nn.Module):
                                  cos_thresh=cos_thresh, max_iter=max_iter,
                                  warm_start_state=warm_start_state,
                                  enable_warm_start=enable_warm_start,
+                                 warm_start_min_iter=warm_start_min_iter,
                                  validate_warm_start_finite=validate_warm_start_finite,
                                  profile_coda_cost=profile_coda_cost,
                                  use_cached_final_output=use_cached_final_output,
