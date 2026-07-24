@@ -74,6 +74,23 @@ class RecurrentConfigInternal:
         return self.weight_std / math.sqrt(self.mean_recurrence * len(self.recurrent_vlm_layers))
 
 
+def select_warm_start_candidate(states, actual_iter, source):
+    if not states:
+        return None, None, None
+
+    if source == "s1":
+        source_index = 0
+    elif source == "midpoint":
+        source_index = max(0, actual_iter // 2 - 1)
+    elif source == "final":
+        source_index = actual_iter - 1
+    else:
+        raise ValueError(f"Unsupported warm_start_source: {source}")
+
+    source_index = min(source_index, len(states) - 1)
+    return states[source_index], source_index, source_index + 1
+
+
 class RecurrentLayer(nn.Module):
     """Recurrent layer: self-attention -> cross-attention (with gating) -> SwiGLU FFN."""
 
@@ -266,6 +283,24 @@ class VLARecurrent(nn.Module):
         metadata["reset_reason"] = reset_reason
         return self.init_state(B, device, dtype), metadata
 
+    def _store_warm_start_candidate(self, states, actual_iter: int, source: str):
+        selected_state, source_index, source_iteration = select_warm_start_candidate(
+            states, actual_iter, source
+        )
+        if selected_state is None:
+            return
+
+        self.last_inference_metadata["next_warm_start_state"] = selected_state.detach().clone()
+        self.last_inference_metadata["warm_start"].update(
+            {
+                "source": source,
+                "source_index": source_index,
+                "source_iteration": source_iteration,
+                "source_K": actual_iter,
+                "candidate_state_count": len(states),
+            }
+        )
+
     def sample_iterations(self) -> int:
         r_mean = self.cfg.mean_recurrence
         tau = torch.normal(mean=math.log(r_mean) - 0.125, std=0.5, size=(1,))
@@ -329,6 +364,7 @@ class VLARecurrent(nn.Module):
                 num_iter: int = None, convergence_strategy: str = None,
                 warm_start_state: torch.Tensor = None,
                 enable_warm_start: bool = False,
+                warm_start_source: str = "s1",
                 warm_start_min_iter: int = 2,
                 validate_warm_start_finite: bool = False,
                 kl_thresh: float = 0.001, cos_thresh: float = 0.999,
@@ -351,8 +387,8 @@ class VLARecurrent(nn.Module):
                         x = layer(x, h_a[:, self.prelude_vlm_layers[i]], h_t[:, self.prelude_vlm_layers[i]], p)
         prelude_out = x
 
-        capture_s1 = bool(enable_warm_start and not self.training)
-        if capture_s1:
+        capture_warm_start_candidates = bool(enable_warm_start and not self.training)
+        if capture_warm_start_candidates:
             state, warm_start_metadata = self._select_initial_state(
                 warm_start_state,
                 B,
@@ -369,7 +405,16 @@ class VLARecurrent(nn.Module):
                 "reset": False,
                 "reset_reason": None,
             }
-        s1_state = None
+        warm_start_metadata.update(
+            {
+                "source": None,
+                "source_index": None,
+                "source_iteration": None,
+                "source_K": None,
+                "candidate_state_count": None,
+            }
+        )
+        warm_start_candidate_states = [] if capture_warm_start_candidates else None
         self.last_inference_metadata = {
             "next_warm_start_state": None,
             "warm_start": warm_start_metadata,
@@ -461,8 +506,8 @@ class VLARecurrent(nn.Module):
                         if profile_coda_cost:
                             run_one_iteration_end = self._sync_time()
                             run_one_iteration_ms_list.append((run_one_iteration_end - run_one_iteration_start) * 1000.0)
-                        if capture_s1 and it == 0:
-                            s1_state = state.detach().clone()
+                        if capture_warm_start_candidates:
+                            warm_start_candidate_states.append(state.detach())
 
                         actual_iter = it + 1
                         with rdvla_range("RDVLA/action_head/latent_precheck_total"):
@@ -670,7 +715,9 @@ class VLARecurrent(nn.Module):
                     ),
                 })
 
-            self.last_inference_metadata["next_warm_start_state"] = s1_state
+            self._store_warm_start_candidate(
+                warm_start_candidate_states, actual_iter, warm_start_source
+            )
             return final_output, actual_iter, final_kl
 
         # 여기까지가 metric 추가한 adaptive branch
@@ -721,8 +768,8 @@ class VLARecurrent(nn.Module):
                 with torch.no_grad():
                     for it in range(total):
                         state = self._run_one_iteration(state, prelude_out, h_a, h_t, p)
-                        if capture_s1 and it == 0:
-                            s1_state = state.detach().clone()
+                        if capture_warm_start_candidates:
+                            warm_start_candidate_states.append(state.detach())
                         with rdvla_range("RDVLA/action_head/get_output_each_iter"):
                             curr_output = self._get_output(state, h_a, h_t, p)
                         actual_iter = it + 1
@@ -776,7 +823,9 @@ class VLARecurrent(nn.Module):
 
             with rdvla_range("RDVLA/action_head/final_get_output"):
                 final_output = curr_output
-            self.last_inference_metadata["next_warm_start_state"] = s1_state
+            self._store_warm_start_candidate(
+                warm_start_candidate_states, actual_iter, warm_start_source
+            )
             return final_output, actual_iter, final_conv_score
 
         # Training-time fixed branch: 기존 코드 유지
@@ -818,6 +867,7 @@ class ActionHeadRecurrent(nn.Module):
                        phase="Inference", num_iter=None, convergence_strategy=None,
                        kl_thresh=0.001, cos_thresh=0.999, max_iter=32,
                        warm_start_state=None, enable_warm_start: bool = False,
+                       warm_start_source: str = "s1",
                        warm_start_min_iter: int = 2,
                        validate_warm_start_finite: bool = False,
                        profile_coda_cost=False, use_cached_final_output=False,
@@ -837,6 +887,7 @@ class ActionHeadRecurrent(nn.Module):
                                  cos_thresh=cos_thresh, max_iter=max_iter,
                                  warm_start_state=warm_start_state,
                                  enable_warm_start=enable_warm_start,
+                                 warm_start_source=warm_start_source,
                                  warm_start_min_iter=warm_start_min_iter,
                                  validate_warm_start_finite=validate_warm_start_finite,
                                  profile_coda_cost=profile_coda_cost,

@@ -197,7 +197,12 @@ def validate_config(cfg: GenerateConfig) -> None:
         assert cfg.center_crop, "Expecting `center_crop==True` because model was trained with image augmentations!"
 
     assert not (cfg.load_in_8bit and cfg.load_in_4bit), "Cannot use both 8-bit and 4-bit quantization!"
-    assert cfg.warm_start_source == "s1", f"Unsupported warm_start_source: {cfg.warm_start_source}"
+    supported_warm_start_sources = {"s1", "midpoint", "final"}
+    if cfg.warm_start_source not in supported_warm_start_sources:
+        raise ValueError(
+            f"Unsupported warm_start_source: {cfg.warm_start_source}. "
+            f"Expected one of {sorted(supported_warm_start_sources)}"
+        )
     if cfg.use_warm_start:
         assert cfg.use_recurrent, "Warm-start requires recurrent inference"
     if cfg.warm_start_min_iter < 2:
@@ -900,10 +905,13 @@ def run_episode(
                 )
                 warm_start_state_provided = bool(warm_start_metadata.get("state_provided", False))
                 warm_start_used = bool(warm_start_metadata.get("state_used", False))
-                warm_start_source = warm_start_metadata.get(
-                    "source", getattr(cfg, "warm_start_source", "s1")
+                warm_start_source = warm_start_metadata.get("source")
+                warm_start_source_index = warm_start_metadata.get("source_index")
+                warm_start_source_iteration = warm_start_metadata.get("source_iteration")
+                warm_start_source_K = warm_start_metadata.get("source_K")
+                warm_start_candidate_state_count = warm_start_metadata.get(
+                    "candidate_state_count"
                 )
-                warm_start_source_iteration = warm_start_metadata.get("source_iteration", 1)
                 initial_state_origin = warm_start_metadata.get("initial_state_origin", "random")
                 warm_start_reset = bool(warm_start_metadata.get("reset", False))
                 warm_start_reset_reason = warm_start_metadata.get("reset_reason")
@@ -1013,7 +1021,12 @@ def run_episode(
                     "warm_start_used": warm_start_used,
                     "warm_start_state_provided": warm_start_state_provided,
                     "warm_start_source": warm_start_source,
-                    "warm_start_source_iteration": warm_start_source_iteration,
+                    "warm_start_source_index": _as_int(warm_start_source_index),
+                    "warm_start_source_iteration": _as_int(warm_start_source_iteration),
+                    "warm_start_source_K": _as_int(warm_start_source_K),
+                    "warm_start_candidate_state_count": _as_int(
+                        warm_start_candidate_state_count
+                    ),
                     "warm_start_cache_age": int(cache_age_for_prediction),
                     "warm_start_reset": warm_start_reset,
                     "warm_start_reset_reason": warm_start_reset_reason,

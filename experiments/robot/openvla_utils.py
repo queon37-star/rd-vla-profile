@@ -429,6 +429,7 @@ def get_vla_action(
                         max_iter=getattr(cfg, "recurrence_max_iter", 32),
                         warm_start_state=effective_warm_start_state,
                         enable_warm_start=bool(getattr(cfg, "use_warm_start", False)),
+                        warm_start_source=getattr(cfg, "warm_start_source", "s1"),
                         warm_start_min_iter=getattr(cfg, "warm_start_min_iter", 2),
                         validate_warm_start_finite=bool(
                             getattr(cfg, "validate_warm_start_finite", False)
@@ -453,8 +454,11 @@ def get_vla_action(
             "next_warm_start_state": action_head_inference_metadata.get("next_warm_start_state"),
             "warm_start": {
                 "enabled": bool(getattr(cfg, "use_warm_start", False)),
-                "source": getattr(cfg, "warm_start_source", "s1"),
-                "source_iteration": 1,
+                "source": warm_start_metadata.get("source"),
+                "source_index": warm_start_metadata.get("source_index"),
+                "source_iteration": warm_start_metadata.get("source_iteration"),
+                "source_K": warm_start_metadata.get("source_K"),
+                "candidate_state_count": warm_start_metadata.get("candidate_state_count"),
                 "state_provided": bool(
                     warm_start_metadata.get("state_provided", effective_warm_start_state is not None)
                 ),
