@@ -12,6 +12,7 @@ from prismatic.models.origin_aware_scheduler import (
     run_origin_aware_adaptive,
 )
 from prismatic.models.numerical_retry import run_cold_full_coda_retry
+from prismatic.models.shadow_trace import build_shadow_trace_record, run_shadow_tail
 from prismatic.vla.constants import ACTION_DIM, NUM_ACTIONS_CHUNK
 from prismatic.utils.rdvla_profiler import rdvla_range
 from dataclasses import dataclass
@@ -400,6 +401,7 @@ class VLARecurrent(nn.Module):
                 latent_precheck_max_skip_iters: int = 0,
                 latent_precheck_confirmation_mode: str = "next_iter",
                 nonfinite_policy: str = "legacy",
+                shadow_full_depth: bool = False,
                 **kwargs) -> torch.Tensor:
         requested_recurrence_strategy = convergence_strategy
         canonical_recurrence_strategy = canonicalize_recurrence_strategy(convergence_strategy)
@@ -416,9 +418,12 @@ class VLARecurrent(nn.Module):
             use_warm_start=enable_warm_start,
             min_iter=latent_precheck_min_iter,
             nonfinite_policy=nonfinite_policy,
+            shadow_full_depth=shadow_full_depth,
         )
         if latent_precheck_mode == "origin_aware" and self.training:
             raise ValueError("latent_precheck_mode='origin_aware' is inference-only")
+        if shadow_full_depth and self.training:
+            raise ValueError("shadow_full_depth is inference-only")
 
         B = h_a.size(0)
         device, dtype = h_a.device, h_a.dtype
@@ -583,6 +588,8 @@ class VLARecurrent(nn.Module):
             curr_output = None
             min_iter_gate_block_count = 0
             first_threshold_satisfied_k = None
+            shadow_trace_records = []
+            shadow_error = None
 
             run_one_iteration_ms_list = []
             # Output timing lists include the final return-path call unless the
@@ -601,6 +608,7 @@ class VLARecurrent(nn.Module):
             with rdvla_range("RDVLA/action_head/recurrent_loop_total"):
                 with torch.no_grad():
                     for it in range(max_iter):
+                        shadow_previous_state = state.detach().clone() if shadow_full_depth else None
                         if profile_coda_cost:
                             run_one_iteration_start = self._sync_time()
                         state = self._run_one_iteration(state, prelude_out, h_a, h_t, p)
@@ -658,6 +666,7 @@ class VLARecurrent(nn.Module):
                             should_call_coda = True
 
                         action_mse = None
+                        action_l2 = None
                         with rdvla_range("RDVLA/action_head/coda_stop_check_total"):
                             if should_call_coda:
                                 with rdvla_range("RDVLA/action_head/coda_stop_get_output"):
@@ -723,6 +732,31 @@ class VLARecurrent(nn.Module):
                                                 else:
                                                     min_iter_gate_block_count += 1
 
+                                if shadow_full_depth:
+                                    shadow_trace_records.append(
+                                        build_shadow_trace_record(
+                                            iteration=actual_iter,
+                                            phase="production",
+                                            previous_state=shadow_previous_state,
+                                            current_state=state,
+                                            previous_output=prev_output,
+                                            current_output=curr_output,
+                                        )
+                                    )
+                                    shadow_record = shadow_trace_records[-1]
+                                    if not shadow_record["state_finite"]:
+                                        shadow_error = {
+                                            "iteration": int(actual_iter),
+                                            "stage": "production_state",
+                                            "reason": "non_finite",
+                                        }
+                                    elif not shadow_record["output_finite"]:
+                                        shadow_error = {
+                                            "iteration": int(actual_iter),
+                                            "stage": "production_output",
+                                            "reason": "non_finite",
+                                        }
+
                                 prev_output = curr_output.detach()
                                 if profile_coda_cost:
                                     convergence_check_end = self._sync_time()
@@ -751,6 +785,26 @@ class VLARecurrent(nn.Module):
                     final_output = self._get_output(state, h_a, h_t, p, profile=profile_coda_cost)
                     if profile_coda_cost:
                         append_get_output_timing()
+
+            # Freeze every production-visible value before diagnostic recurrence.
+            self._store_warm_start_candidate(
+                warm_start_candidate_states, actual_iter, warm_start_source
+            )
+            if shadow_full_depth:
+                final_output = final_output.detach().clone()
+                production_snapshot = {
+                    "K_t": int(actual_iter),
+                    "terminal_iteration": int(actual_iter),
+                    "stop_reason": stop_reason,
+                    "midpoint_source_iteration": self.last_inference_metadata[
+                        "warm_start"
+                    ].get("source_iteration"),
+                    "cached_final_output_reused": bool(
+                        use_cached_final_output and curr_output is not None
+                    ),
+                }
+            else:
+                production_snapshot = None
 
             self.last_recurrence_debug = {
                 "strategy": convergence_strategy,
@@ -804,6 +858,13 @@ class VLARecurrent(nn.Module):
                 "warm_start_state_used": cached_state_used,
                 "min_iter_gate_block_count": int(min_iter_gate_block_count),
                 "first_threshold_satisfied_k": first_threshold_satisfied_k,
+                "shadow_full_depth_enabled": bool(shadow_full_depth),
+                "shadow_trace": shadow_trace_records,
+                "shadow_trace_complete": False if shadow_full_depth else None,
+                "shadow_tail_start_iteration": None,
+                "shadow_tail_iteration_count": 0 if shadow_full_depth else None,
+                "shadow_error": shadow_error,
+                "shadow_production_snapshot": production_snapshot,
             }
 
             if profile_coda_cost:
@@ -830,9 +891,35 @@ class VLARecurrent(nn.Module):
                     ),
                 })
 
-            self._store_warm_start_candidate(
-                warm_start_candidate_states, actual_iter, warm_start_source
-            )
+            if shadow_full_depth and shadow_error is None:
+                shadow_start_output = (
+                    curr_output if curr_output is not None else final_output
+                )
+                shadow_result = run_shadow_tail(
+                    self,
+                    state=state,
+                    current_output=shadow_start_output,
+                    actual_iter=actual_iter,
+                    max_iter=max_iter,
+                    prelude_out=prelude_out,
+                    h_a=h_a,
+                    h_t=h_t,
+                    p=p,
+                )
+                shadow_trace_records.extend(shadow_result["records"])
+                self.last_recurrence_debug.update(
+                    {
+                        "shadow_trace": shadow_trace_records,
+                        "shadow_trace_complete": shadow_result["completed"],
+                        "shadow_tail_start_iteration": shadow_result[
+                            "tail_start_iteration"
+                        ],
+                        "shadow_tail_iteration_count": shadow_result[
+                            "tail_iteration_count"
+                        ],
+                        "shadow_error": shadow_result["error"],
+                    }
+                )
             return final_output, actual_iter, final_kl
 
         # 여기까지가 metric 추가한 adaptive branch
@@ -1002,6 +1089,7 @@ class ActionHeadRecurrent(nn.Module):
                        latent_precheck_max_skip_iters=0,
                        latent_precheck_confirmation_mode="next_iter",
                        nonfinite_policy="legacy",
+                       shadow_full_depth=False,
                        **kwargs):
         canonicalize_recurrence_strategy(convergence_strategy)
         validate_latent_precheck_configuration(
@@ -1017,6 +1105,7 @@ class ActionHeadRecurrent(nn.Module):
             use_warm_start=enable_warm_start,
             min_iter=latent_precheck_min_iter,
             nonfinite_policy=nonfinite_policy,
+            shadow_full_depth=shadow_full_depth,
         )
         with rdvla_range("RDVLA/action_head/wrapper_total"):
             B = actions_hidden_states.shape[0]
@@ -1046,4 +1135,5 @@ class ActionHeadRecurrent(nn.Module):
                                  latent_precheck_warm_thresh=latent_precheck_warm_thresh,
                                  latent_precheck_max_skip_iters=latent_precheck_max_skip_iters,
                                  latent_precheck_confirmation_mode=latent_precheck_confirmation_mode,
-                                 nonfinite_policy=nonfinite_policy)
+                                 nonfinite_policy=nonfinite_policy,
+                                 shadow_full_depth=shadow_full_depth)

@@ -814,6 +814,7 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
         latent_precheck_max_skip_iters=0,
         latent_precheck_confirmation_mode="next_iter",
         nonfinite_policy="legacy",
+        shadow_full_depth=False,
     ):
         """Run L1 regression-based continuous action prediction or discrete action tokens prediction."""
 
@@ -898,6 +899,7 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
                     latent_precheck_max_skip_iters=latent_precheck_max_skip_iters,
                     latent_precheck_confirmation_mode=latent_precheck_confirmation_mode,
                     nonfinite_policy=nonfinite_policy,
+                    shadow_full_depth=shadow_full_depth,
                 )
             # Handle convergence-based return (output, num_iters, final_kl) vs fixed return (output)
             actual_iters = None
@@ -961,6 +963,7 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
         latent_precheck_max_skip_iters: int = 0,
         latent_precheck_confirmation_mode: str = "next_iter",
         nonfinite_policy: str = "legacy",
+        shadow_full_depth: bool = False,
         **kwargs: str,
     ) -> np.ndarray:
 
@@ -1036,6 +1039,7 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
             latent_precheck_max_skip_iters=latent_precheck_max_skip_iters,
             latent_precheck_confirmation_mode=latent_precheck_confirmation_mode,
             nonfinite_policy=nonfinite_policy,
+            shadow_full_depth=shadow_full_depth,
             )
 
         # Unnormalize predicted actions

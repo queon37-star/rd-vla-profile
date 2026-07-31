@@ -1,0 +1,134 @@
+"""Diagnostic full-depth trace collection for clean midpoint warm-start runs."""
+
+from typing import Any, Dict, Optional
+
+import torch
+
+from prismatic.utils.rdvla_profiler import rdvla_range
+
+
+def _is_finite(tensor: torch.Tensor) -> bool:
+    return bool(torch.isfinite(tensor).all().item())
+
+
+def _metric_pair(
+    previous: Optional[torch.Tensor],
+    current: torch.Tensor,
+) -> tuple[Optional[float], Optional[float]]:
+    if previous is None or not _is_finite(previous) or not _is_finite(current):
+        return None, None
+    difference = current.float() - previous.float()
+    return (
+        float(torch.mean(difference ** 2).item()),
+        float(torch.norm(difference.flatten()).item()),
+    )
+
+
+def build_shadow_trace_record(
+    *,
+    iteration: int,
+    phase: str,
+    previous_state: Optional[torch.Tensor],
+    current_state: torch.Tensor,
+    previous_output: Optional[torch.Tensor],
+    current_output: torch.Tensor,
+) -> Dict[str, Any]:
+    """Build a JSON-safe record without retaining GPU tensors."""
+    state_finite = _is_finite(current_state)
+    output_finite = _is_finite(current_output)
+    latent_mse, latent_l2 = _metric_pair(previous_state, current_state)
+    action_mse, action_l2 = _metric_pair(previous_output, current_output)
+    return {
+        "k": int(iteration),
+        "phase": phase,
+        "state_finite": state_finite,
+        "output_finite": output_finite,
+        "latent_mse": latent_mse,
+        "latent_l2": latent_l2,
+        "action_mse": action_mse,
+        "action_l2": action_l2,
+    }
+
+
+def run_shadow_tail(
+    model,
+    *,
+    state: torch.Tensor,
+    current_output: torch.Tensor,
+    actual_iter: int,
+    max_iter: int,
+    prelude_out: torch.Tensor,
+    h_a: torch.Tensor,
+    h_t: torch.Tensor,
+    p: torch.Tensor,
+) -> Dict[str, Any]:
+    """Run a detached diagnostic tail that cannot change production state."""
+    records = []
+    error = None
+    tail_state = state.detach().clone()
+    tail_output = current_output.detach().clone()
+
+    with torch.no_grad():
+        for iteration in range(actual_iter + 1, max_iter + 1):
+            previous_state = tail_state
+            previous_output = tail_output
+            try:
+                with rdvla_range("RDVLA/action_head/shadow/recurrent_one_iteration"):
+                    candidate_state = model._run_one_iteration(
+                        previous_state, prelude_out, h_a, h_t, p
+                    )
+                if not _is_finite(candidate_state):
+                    error = {
+                        "iteration": int(iteration),
+                        "stage": "recurrent_state",
+                        "reason": "non_finite",
+                    }
+                    break
+
+                with rdvla_range("RDVLA/action_head/shadow/get_output"):
+                    candidate_output = model._get_output(
+                        candidate_state, h_a, h_t, p, profile=False
+                    )
+                if not _is_finite(candidate_output):
+                    error = {
+                        "iteration": int(iteration),
+                        "stage": "coda_output",
+                        "reason": "non_finite",
+                    }
+                    break
+
+                record = build_shadow_trace_record(
+                    iteration=iteration,
+                    phase="shadow_tail",
+                    previous_state=previous_state,
+                    current_state=candidate_state,
+                    previous_output=previous_output,
+                    current_output=candidate_output,
+                )
+                if record["latent_mse"] is None or record["action_mse"] is None:
+                    error = {
+                        "iteration": int(iteration),
+                        "stage": "trace_metric",
+                        "reason": "non_finite",
+                    }
+                    break
+                records.append(record)
+                tail_state = candidate_state.detach().clone()
+                tail_output = candidate_output.detach().clone()
+            except Exception as exc:  # Shadow diagnostics must not replace a valid production result.
+                error = {
+                    "iteration": int(iteration),
+                    "stage": "shadow_tail",
+                    "reason": "exception",
+                    "exception_type": type(exc).__name__,
+                    "message": str(exc),
+                }
+                break
+
+    return {
+        "records": records,
+        "completed": error is None and actual_iter + len(records) == max_iter,
+        "error": error,
+        "tail_iteration_count": len(records),
+        "tail_start_iteration": actual_iter + 1 if actual_iter < max_iter else None,
+    }

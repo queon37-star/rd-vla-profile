@@ -169,6 +169,7 @@ class GenerateConfig:
     latent_precheck_max_skip_iters: int = 0
     latent_precheck_confirmation_mode: str = "next_iter"
     nonfinite_policy: str = "legacy"
+    shadow_full_depth: bool = False
 
     # Fixed execution: always use first N actions
     num_exec_actions: int = 5
@@ -222,6 +223,7 @@ def validate_config(cfg: GenerateConfig) -> None:
         use_warm_start=cfg.use_warm_start,
         min_iter=cfg.latent_precheck_min_iter,
         nonfinite_policy=cfg.nonfinite_policy,
+        shadow_full_depth=cfg.shadow_full_depth,
     )
     supported_warm_start_sources = {"s1", "midpoint", "final"}
     if cfg.warm_start_source not in supported_warm_start_sources:
@@ -520,6 +522,12 @@ def _build_timing_summary_record(timing_record, result):
         "get_output_attempt_count_intent_to_treat": recurrence_debug.get(
             "get_output_attempt_count_intent_to_treat"
         ),
+        "shadow_full_depth_enabled": recurrence_debug.get("shadow_full_depth_enabled", False),
+        "shadow_trace_complete": recurrence_debug.get("shadow_trace_complete"),
+        "shadow_tail_start_iteration": recurrence_debug.get("shadow_tail_start_iteration"),
+        "shadow_tail_iteration_count": recurrence_debug.get("shadow_tail_iteration_count"),
+        "shadow_error": recurrence_debug.get("shadow_error"),
+        "shadow_production_snapshot": recurrence_debug.get("shadow_production_snapshot"),
         "used_latent_precheck": bool(recurrence_debug.get("use_latent_precheck", False)),
         "used_coda_stop": bool(recurrence_debug.get("adaptive_stop", False)),
         "timings_ms": timings,
@@ -1143,6 +1151,13 @@ def run_episode(
                     "get_output_attempt_count_intent_to_treat": debug.get(
                         "get_output_attempt_count_intent_to_treat"
                     ),
+                    "shadow_full_depth_enabled": debug.get("shadow_full_depth_enabled", False),
+                    "shadow_trace_complete": debug.get("shadow_trace_complete"),
+                    "shadow_tail_start_iteration": debug.get("shadow_tail_start_iteration"),
+                    "shadow_tail_iteration_count": debug.get("shadow_tail_iteration_count"),
+                    "shadow_error": debug.get("shadow_error"),
+                    "shadow_production_snapshot": debug.get("shadow_production_snapshot"),
+                    "shadow_trace": debug.get("shadow_trace", []),
                     "first_converged_k_1e_4": debug.get("first_converged_k_1e_4", None),
                     "first_converged_k_5e_4": debug.get("first_converged_k_5e_4", None),
                     "warm_start_enabled": warm_start_enabled,

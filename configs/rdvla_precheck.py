@@ -43,6 +43,7 @@ def validate_latent_precheck_configuration(
     use_warm_start: bool = False,
     min_iter: int = 2,
     nonfinite_policy: str = "legacy",
+    shadow_full_depth: bool = False,
 ) -> str:
     """Validate mode combinations and fail closed for unfinished schedulers."""
     if mode not in SUPPORTED_LATENT_PRECHECK_MODES:
@@ -51,6 +52,8 @@ def validate_latent_precheck_configuration(
         raise ValueError(f"Unsupported latent_precheck_trace_level: {trace_level}")
     if nonfinite_policy not in SUPPORTED_NONFINITE_POLICIES:
         raise ValueError(f"Unsupported nonfinite_policy: {nonfinite_policy}")
+    if not isinstance(shadow_full_depth, bool):
+        raise ValueError("shadow_full_depth must be a boolean")
 
     if mode == "off":
         if use_latent_precheck:
@@ -93,5 +96,19 @@ def validate_latent_precheck_configuration(
             )
     elif nonfinite_policy != "legacy":
         raise ValueError("nonfinite_policy='cold_retry_once' requires latent_precheck_mode='origin_aware'")
+
+    if shadow_full_depth:
+        if mode != "off" or use_latent_precheck or trace_level != "off":
+            raise ValueError(
+                "shadow_full_depth requires clean latent_precheck_mode='off'"
+            )
+        if not use_warm_start or warm_start_source != "midpoint":
+            raise ValueError(
+                "shadow_full_depth requires midpoint warm-start"
+            )
+        if canonicalize_recurrence_strategy(recurrence_strategy) != "adjacent_action_mse":
+            raise ValueError(
+                "shadow_full_depth requires adjacent action-MSE recurrence"
+            )
 
     return mode

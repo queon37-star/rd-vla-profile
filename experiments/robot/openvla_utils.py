@@ -446,6 +446,7 @@ def get_vla_action(
                         latent_precheck_max_skip_iters=getattr(cfg, "latent_precheck_max_skip_iters", 0),
                         latent_precheck_confirmation_mode=getattr(cfg, "latent_precheck_confirmation_mode", "next_iter"),
                         nonfinite_policy=getattr(cfg, "nonfinite_policy", "legacy"),
+                        shadow_full_depth=getattr(cfg, "shadow_full_depth", False),
                     )
                     recurrence_debug = getattr(getattr(action_head, "model", None), "last_recurrence_debug", None)
                     action_head_inference_metadata = (
