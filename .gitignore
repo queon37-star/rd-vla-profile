@@ -148,3 +148,8 @@ beaker/
 scripts.sh
 
 benchmark_results/
+
+# Local experiment process and Windows transfer artifacts
+*.pid
+*:Zone.Identifier
+/NUL/
