@@ -191,6 +191,24 @@ def test_parser_fails_closed_on_invalid_shadow_traces(mutation, message):
         parse_shadow_prediction(record)
 
 
+def test_parser_rejects_smoke_and_noncalibration_protocol_records():
+    smoke = _shadow_record()
+    smoke["evaluation_protocol_phase"] = "smoke"
+    smoke["smoke_excluded_from_fitting"] = True
+    with pytest.raises(ShadowTraceValidationError, match="smoke records are excluded"):
+        parse_shadow_prediction(smoke)
+
+    screening = _shadow_record()
+    screening["evaluation_protocol_phase"] = "screening"
+    with pytest.raises(ShadowTraceValidationError, match="offline calibration requires"):
+        parse_shadow_prediction(screening)
+
+    calibration = _shadow_record()
+    calibration["evaluation_protocol_phase"] = "calibration"
+    calibration["smoke_excluded_from_fitting"] = False
+    assert parse_shadow_prediction(calibration).baseline_k == calibration["K_t"]
+
+
 def test_quantile_pool_uses_only_eligible_actual_warm_transitions():
     warm = parse_shadow_prediction(
         _shadow_record(

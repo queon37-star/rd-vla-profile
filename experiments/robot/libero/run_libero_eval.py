@@ -1,7 +1,6 @@
 import json
 import logging
 import os
-import random
 import shutil
 import sys
 import time
@@ -16,12 +15,18 @@ import torch
 import draccus
 import numpy as np
 import tqdm
-from libero.libero import benchmark
+from libero.libero import benchmark, get_libero_path
 
 import wandb
 from configs.rdvla_precheck import (
     canonicalize_recurrence_strategy,
     validate_latent_precheck_configuration,
+)
+from experiments.robot.libero.evaluation_protocol import (
+    load_protocol_manifest,
+    reset_episode_environment,
+    resolve_phase_trials,
+    validate_protocol_configuration,
 )
 
 sys.path.append("../..")
@@ -108,6 +113,8 @@ class GenerateConfig:
     num_trials_per_task: int = 50                    # Number of rollouts per task
     task_id: Optional[int] = None                    # If set, only run this specific task ID
     initial_states_path: str = "DEFAULT"             # "DEFAULT", or path to initial states JSON file
+    evaluation_protocol_phase: str = "legacy"        # legacy | smoke | calibration | screening | final
+    initial_state_manifest_path: str = ""             # Frozen official-state manifest for non-legacy phases
     env_img_res: int = 256                           # Resolution for environment images (not policy input resolution)
 
     #################################################################################################################
@@ -237,6 +244,22 @@ def validate_config(cfg: GenerateConfig) -> None:
         raise ValueError("warm_start_min_iter must be at least 2")
     if cfg.episode_seed_stride < 1:
         raise ValueError("episode_seed_stride must be at least 1")
+    validate_protocol_configuration(
+        phase=cfg.evaluation_protocol_phase,
+        task_suite_name=cfg.task_suite_name,
+        num_trials_per_task=cfg.num_trials_per_task,
+        initial_states_path=cfg.initial_states_path,
+        manifest_path=cfg.initial_state_manifest_path,
+        reset_rng_each_episode=cfg.reset_rng_each_episode,
+    )
+    if cfg.evaluation_protocol_phase != "legacy":
+        protocol_manifest, _ = load_protocol_manifest(
+            cfg.initial_state_manifest_path, require_source_file_hashes=True
+        )
+        if protocol_manifest["task_suite_name"] != cfg.task_suite_name:
+            raise ValueError(
+                "Initial-state protocol manifest task_suite_name does not match the runner configuration"
+            )
 
     # Validate task suite
     assert cfg.task_suite_name in [suite.value for suite in TaskSuite], f"Invalid task suite: {cfg.task_suite_name}"
@@ -851,26 +874,43 @@ def run_episode(
     global_iters=None,
     task_id=None,
     episode_idx=None,
+    episode_protocol=None,
     profile_state=None,
     timing_state=None,
 ):
     """Run a single episode in the environment."""
-    episode_seed = None
-    if getattr(cfg, "reset_rng_each_episode", False):
+    episode_protocol = dict(episode_protocol or {})
+    evaluation_protocol_phase = episode_protocol.get("phase", "legacy")
+    paired_rng = bool(episode_protocol.get("paired_rng", False))
+    episode_seed = episode_protocol.get("episode_seed")
+    episode_seed_source = "paired_protocol" if episode_seed is not None else None
+    if episode_seed is None and getattr(cfg, "reset_rng_each_episode", False):
         episode_id_for_seed = int(episode_idx) if episode_idx is not None else 0
         episode_seed = int(cfg.seed) + episode_id_for_seed * int(cfg.episode_seed_stride)
-        random.seed(episode_seed)
-        np.random.seed(episode_seed)
-        torch.manual_seed(episode_seed)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(episode_seed)
+        episode_seed_source = "legacy_stride"
 
-    env.reset()
+    obs, environment_seed_applied = reset_episode_environment(
+        env,
+        initial_state,
+        episode_seed=episode_seed,
+        torch_module=torch,
+        seed_environment=paired_rng,
+    )
 
-    if initial_state is not None:
-        obs = env.set_init_state(initial_state)
-    else:
-        obs = env.get_observation()
+    protocol_log_metadata = {
+        "evaluation_protocol_phase": evaluation_protocol_phase,
+        "initial_state_partition": episode_protocol.get("partition"),
+        "paired_trial_id": episode_protocol.get("paired_trial_id"),
+        "initial_state_id": episode_protocol.get("initial_state_id"),
+        "initial_states_sha256": episode_protocol.get("initial_states_sha256"),
+        "initial_states_file": episode_protocol.get("initial_states_file"),
+        "initial_states_file_sha256": episode_protocol.get("initial_states_file_sha256"),
+        "initial_state_manifest_sha256": episode_protocol.get("manifest_sha256"),
+        "paired_rng": paired_rng,
+        "episode_seed_source": episode_seed_source,
+        "environment_seed_applied": environment_seed_applied,
+        "smoke_excluded_from_fitting": bool(episode_protocol.get("smoke_excluded_from_fitting", False)),
+    }
 
     t = 0
     replay_images = []
@@ -942,6 +982,7 @@ def run_episode(
                     "timestep": int(t),
                     "action_prediction_index": prediction_step,
                     "prediction_step": prediction_step,
+                    **protocol_log_metadata,
                 }
                 try:
                     actions, actual_iters, final_kl, inference_metadata = run_action_with_optional_profiles(
@@ -969,9 +1010,11 @@ def run_episode(
                             "task_id": task_id,
                             "task_name": task_description,
                             "episode_id": episode_idx,
+                            "episode_seed": episode_seed,
                             "timestep": int(t),
                             "action_prediction_index": prediction_step,
                             "prediction_step": prediction_step,
+                            **protocol_log_metadata,
                             "recurrent_iteration_count": None,
                             "final_mse": None,
                             "adaptive_stop": False,
@@ -1082,6 +1125,7 @@ def run_episode(
                     "prediction_step": prediction_step,
                     "reset_rng_each_episode": bool(getattr(cfg, "reset_rng_each_episode", False)),
                     "episode_seed": episode_seed,
+                    **protocol_log_metadata,
                     "method": debug.get("strategy", recurrence_strategy),
                     "recurrence_strategy": debug.get("strategy", recurrence_strategy),
                     "requested_recurrence_strategy": debug.get("requested_recurrence_strategy", recurrence_strategy),
@@ -1323,6 +1367,35 @@ def run_task(
     task = task_suite.get_task(task_id)
 
     initial_states, all_initial_states = load_initial_states(cfg, task_suite, task_id, log_file)
+    evaluation_protocol_phase = getattr(cfg, "evaluation_protocol_phase", "legacy")
+    protocol_trials = None
+    manifest_sha256 = None
+    protocol_task_entry = None
+    if evaluation_protocol_phase != "legacy":
+        protocol_manifest, manifest_sha256 = load_protocol_manifest(
+            cfg.initial_state_manifest_path, require_source_file_hashes=True
+        )
+        initial_state_file_path = (
+            Path(get_libero_path("init_states")) / task.problem_folder / task.init_states_file
+        )
+        protocol_trials = resolve_phase_trials(
+            manifest=protocol_manifest,
+            phase=evaluation_protocol_phase,
+            task_id=task_id,
+            initial_states=initial_states,
+            base_seed=cfg.seed,
+            initial_state_file_path=str(initial_state_file_path),
+        )
+        if len(protocol_trials) != cfg.num_trials_per_task:
+            raise RuntimeError(
+                f"Resolved {len(protocol_trials)} protocol trials, expected {cfg.num_trials_per_task}"
+            )
+        protocol_task_entry = protocol_manifest["tasks"][str(task_id)]
+        log_message(
+            f"Evaluation protocol {evaluation_protocol_phase}: manifest={manifest_sha256}, "
+            f"state_ids={[trial.initial_state_id for trial in protocol_trials]}",
+            log_file,
+        )
     env, task_description = get_libero_env(task, cfg.model_family, resolution=cfg.env_img_res)
 
     task_episodes, task_successes = 0, 0
@@ -1331,8 +1404,22 @@ def run_task(
     for episode_idx in tqdm.tqdm(range(cfg.num_trials_per_task)):
         log_message(f"\nTask: {task_description}", log_file)
 
-        if cfg.initial_states_path == "DEFAULT":
-            initial_state = initial_states[episode_idx]
+        episode_protocol = None
+        initial_state_id = episode_idx
+        if protocol_trials is not None:
+            trial = protocol_trials[episode_idx]
+            initial_state_id = trial.initial_state_id
+            initial_state = initial_states[initial_state_id]
+            episode_protocol = {
+                **trial.to_dict(),
+                "paired_rng": True,
+                "manifest_sha256": manifest_sha256,
+                "initial_states_sha256": protocol_task_entry["initial_states_sha256"],
+                "initial_states_file": protocol_task_entry.get("initial_states_file"),
+                "initial_states_file_sha256": protocol_task_entry.get("initial_states_file_sha256"),
+            }
+        elif cfg.initial_states_path == "DEFAULT":
+            initial_state = initial_states[initial_state_id]
         else:
             initial_states_task_key = task_description.replace(" ", "_")
             episode_key = f"demo_{episode_idx}"
@@ -1357,6 +1444,7 @@ def run_task(
             global_iters=all_iters,
             task_id=task_id,
             episode_idx=episode_idx,
+            episode_protocol=episode_protocol,
             profile_state=profile_state,
             timing_state=timing_state,
         )
@@ -1378,6 +1466,14 @@ def run_task(
 
         task_episode_stats.append({
             "episode": episode_idx,
+            "evaluation_protocol_phase": evaluation_protocol_phase,
+            "paired_trial_id": None if episode_protocol is None else episode_protocol["paired_trial_id"],
+            "initial_state_id": initial_state_id,
+            "episode_seed": None if episode_protocol is None else episode_protocol["episode_seed"],
+            "initial_state_manifest_sha256": manifest_sha256,
+            "smoke_excluded_from_fitting": bool(
+                episode_protocol is not None and episode_protocol["smoke_excluded_from_fitting"]
+            ),
             "success": success,
             "num_predictions": len(episode_iters),
             "avg_iters": float(np.mean(episode_iters)) if episode_iters else None,
@@ -1480,6 +1576,23 @@ def eval_libero(cfg: GenerateConfig) -> float:
 
     total_episodes, total_successes = 0, 0
     full_results = {"config": str(cfg), "tasks": {}}
+    if cfg.evaluation_protocol_phase != "legacy":
+        protocol_manifest, manifest_sha256 = load_protocol_manifest(
+            cfg.initial_state_manifest_path, require_source_file_hashes=True
+        )
+        full_results["evaluation_protocol"] = {
+            "phase": cfg.evaluation_protocol_phase,
+            "manifest_path": cfg.initial_state_manifest_path,
+            "manifest_sha256": manifest_sha256,
+            "task_suite_name": protocol_manifest["task_suite_name"],
+            "num_trials_per_task": cfg.num_trials_per_task,
+            "paired_rng": True,
+        }
+        log_message(
+            f"Frozen evaluation protocol: phase={cfg.evaluation_protocol_phase}, "
+            f"manifest_sha256={manifest_sha256}",
+            log_file,
+        )
 
     if cfg.task_id is not None:
         task_ids = [cfg.task_id]

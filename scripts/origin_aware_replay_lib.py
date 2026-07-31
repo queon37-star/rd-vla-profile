@@ -194,6 +194,13 @@ def _positive_int(value: Any, field: str, *, minimum: int = 1) -> int:
 
 def parse_shadow_prediction(record: Mapping[str, Any]) -> ShadowPrediction:
     """Validate and normalize one runner step record for exact replay."""
+    protocol_phase = record.get("evaluation_protocol_phase")
+    if protocol_phase == "smoke" or record.get("smoke_excluded_from_fitting") is True:
+        raise ShadowTraceValidationError("smoke records are excluded from calibration fitting")
+    if protocol_phase not in (None, "calibration"):
+        raise ShadowTraceValidationError(
+            f"offline calibration requires evaluation_protocol_phase='calibration', got {protocol_phase!r}"
+        )
     if record.get("shadow_full_depth_enabled") is not True:
         raise ShadowTraceValidationError("shadow_full_depth_enabled must be true")
     if record.get("shadow_trace_complete") is not True:
