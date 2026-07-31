@@ -437,6 +437,8 @@ def get_vla_action(
                         profile_coda_cost=getattr(cfg, "profile_coda_cost", False),
                         use_cached_final_output=getattr(cfg, "use_cached_final_output", False),
                         use_latent_precheck=getattr(cfg, "use_latent_precheck", False),
+                        latent_precheck_mode=getattr(cfg, "latent_precheck_mode", "legacy"),
+                        latent_precheck_trace_level=getattr(cfg, "latent_precheck_trace_level", "off"),
                         latent_precheck_thresh=getattr(cfg, "latent_precheck_thresh", 0.12),
                         latent_precheck_min_iter=getattr(cfg, "latent_precheck_min_iter", 2),
                         latent_precheck_force_interval=getattr(cfg, "latent_precheck_force_interval", 0),

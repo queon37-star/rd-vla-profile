@@ -3,6 +3,10 @@ import time
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from configs.rdvla_precheck import (
+    canonicalize_recurrence_strategy,
+    validate_latent_precheck_configuration,
+)
 from prismatic.vla.constants import ACTION_DIM, NUM_ACTIONS_CHUNK
 from prismatic.utils.rdvla_profiler import rdvla_range
 from dataclasses import dataclass
@@ -371,9 +375,18 @@ class VLARecurrent(nn.Module):
                 max_iter: int = 32, profile_coda_cost: bool = False,
                 use_cached_final_output: bool = False,
                 use_latent_precheck: bool = False,
-        latent_precheck_thresh: float = 0.12,
-        latent_precheck_min_iter: int = 2,
-        latent_precheck_force_interval: int = 0, **kwargs) -> torch.Tensor:
+                latent_precheck_thresh: float = 0.12,
+                latent_precheck_min_iter: int = 2,
+                latent_precheck_force_interval: int = 0,
+                latent_precheck_mode: str = "legacy",
+                latent_precheck_trace_level: str = "off", **kwargs) -> torch.Tensor:
+        requested_recurrence_strategy = convergence_strategy
+        canonical_recurrence_strategy = canonicalize_recurrence_strategy(convergence_strategy)
+        latent_precheck_mode = validate_latent_precheck_configuration(
+            latent_precheck_mode,
+            latent_precheck_trace_level,
+            use_latent_precheck,
+        )
         B = h_a.size(0)
         device, dtype = h_a.device, h_a.dtype
 
@@ -461,7 +474,7 @@ class VLARecurrent(nn.Module):
 
         # 아래는 측정용 metric 추가를 위해 수정한 adaptive branch
 
-        if convergence_strategy in ("kl_divergence", "cosine_similarity") and not self.training:
+        if canonical_recurrence_strategy in ("adjacent_action_mse", "cosine_similarity") and not self.training:
             prev_state = None
             prev_output = None
             actual_iter = 0
@@ -510,48 +523,51 @@ class VLARecurrent(nn.Module):
                             warm_start_candidate_states.append(state.detach())
 
                         actual_iter = it + 1
-                        with rdvla_range("RDVLA/action_head/latent_precheck_total"):
-                            latent_mse = None
-                            latent_l2 = None
-                            if prev_state is not None:
-                                with rdvla_range("RDVLA/action_head/latent_precheck/mse_compute"):
-                                    latent_diff = state.float() - prev_state.float()
-                                    latent_mse_tensor = torch.mean(latent_diff ** 2)
-                                    latent_l2_tensor = torch.norm(latent_diff.flatten())
-                                with rdvla_range("RDVLA/action_head/latent_precheck/item_sync"):
-                                    latent_mse = latent_mse_tensor.item()
-                                    latent_l2 = latent_l2_tensor.item()
-                                latent_mse_list.append(latent_mse)
-                                latent_l2_list.append(latent_l2)
+                        latent_mse = None
+                        latent_l2 = None
+                        if latent_precheck_mode == "legacy":
+                            with rdvla_range("RDVLA/action_head/latent_precheck_total"):
+                                if prev_state is not None:
+                                    with rdvla_range("RDVLA/action_head/latent_precheck/mse_compute"):
+                                        latent_diff = state.float() - prev_state.float()
+                                        latent_mse_tensor = torch.mean(latent_diff ** 2)
+                                        latent_l2_tensor = torch.norm(latent_diff.flatten())
+                                    with rdvla_range("RDVLA/action_head/latent_precheck/item_sync"):
+                                        latent_mse = latent_mse_tensor.item()
+                                        latent_l2 = latent_l2_tensor.item()
+                                    latent_mse_list.append(latent_mse)
+                                    latent_l2_list.append(latent_l2)
 
-                            if not use_latent_precheck:
-                                should_call_coda = True
-                                precheck_reason = "disabled"
-                            elif actual_iter == 1:
-                                should_call_coda = True
-                                precheck_reason = "first_iter"
-                            elif actual_iter == max_iter:
-                                should_call_coda = True
-                                precheck_reason = "max_iter"
-                            elif latent_precheck_force_interval > 0 and actual_iter % latent_precheck_force_interval == 0:
-                                should_call_coda = True
-                                precheck_reason = "force_interval"
-                            elif (
-                                latent_mse is not None
-                                and actual_iter >= latent_precheck_min_iter
-                                and latent_mse <= latent_precheck_thresh
-                            ):
-                                should_call_coda = True
-                                precheck_reason = "latent_below_thresh"
+                                if not use_latent_precheck:
+                                    should_call_coda = True
+                                    precheck_reason = "disabled"
+                                elif actual_iter == 1:
+                                    should_call_coda = True
+                                    precheck_reason = "first_iter"
+                                elif actual_iter == max_iter:
+                                    should_call_coda = True
+                                    precheck_reason = "max_iter"
+                                elif latent_precheck_force_interval > 0 and actual_iter % latent_precheck_force_interval == 0:
+                                    should_call_coda = True
+                                    precheck_reason = "force_interval"
+                                elif (
+                                    latent_mse is not None
+                                    and actual_iter >= latent_precheck_min_iter
+                                    and latent_mse <= latent_precheck_thresh
+                                ):
+                                    should_call_coda = True
+                                    precheck_reason = "latent_below_thresh"
+                                else:
+                                    should_call_coda = False
+                                    precheck_reason = "skip_latent_above_thresh"
+
+                            latent_precheck_coda_call_mask.append(bool(should_call_coda))
+                            if should_call_coda:
+                                latent_precheck_called_iters.append(int(actual_iter))
                             else:
-                                should_call_coda = False
-                                precheck_reason = "skip_latent_above_thresh"
-
-                        latent_precheck_coda_call_mask.append(bool(should_call_coda))
-                        if should_call_coda:
-                            latent_precheck_called_iters.append(int(actual_iter))
+                                latent_precheck_skipped_iters.append(int(actual_iter))
                         else:
-                            latent_precheck_skipped_iters.append(int(actual_iter))
+                            should_call_coda = True
 
                         action_mse = None
                         with rdvla_range("RDVLA/action_head/coda_stop_check_total"):
@@ -591,7 +607,7 @@ class VLARecurrent(nn.Module):
                                         if first_converged_k_5e_4 is None and action_mse < 5e-4:
                                             first_converged_k_5e_4 = actual_iter
 
-                                        if convergence_strategy == "cosine_similarity":
+                                        if canonical_recurrence_strategy == "cosine_similarity":
                                             cos_sim_tensor = F.cosine_similarity(
                                                 prev_output.flatten(), curr_output.flatten(), dim=0
                                             )
@@ -607,7 +623,7 @@ class VLARecurrent(nn.Module):
                                                         stop_reason = "cosine_similarity"
                                                 else:
                                                     min_iter_gate_block_count += 1
-                                        elif convergence_strategy == "kl_divergence":
+                                        elif canonical_recurrence_strategy == "adjacent_action_mse":
                                             final_kl = action_mse
                                             if action_mse < kl_thresh:
                                                 if first_threshold_satisfied_k is None:
@@ -615,7 +631,7 @@ class VLARecurrent(nn.Module):
                                                 if actual_iter >= effective_min_iter:
                                                     with rdvla_range("RDVLA/action_head/stop_reason_update"):
                                                         adaptive_stop = True
-                                                        stop_reason = "kl_divergence"
+                                                        stop_reason = requested_recurrence_strategy
                                                 else:
                                                     min_iter_gate_block_count += 1
 
@@ -624,14 +640,15 @@ class VLARecurrent(nn.Module):
                                     convergence_check_end = self._sync_time()
                                     convergence_check_ms_list.append((convergence_check_end - convergence_check_start) * 1000.0)
 
-                        latent_precheck_decisions.append({
-                            "k": int(actual_iter),
-                            "latent_mse": float(latent_mse) if latent_mse is not None else None,
-                            "call_coda": bool(should_call_coda),
-                            "reason": precheck_reason,
-                            "action_mse": float(action_mse) if action_mse is not None else None,
-                        })
-                        prev_state = state.detach()
+                        if latent_precheck_mode == "legacy":
+                            latent_precheck_decisions.append({
+                                "k": int(actual_iter),
+                                "latent_mse": float(latent_mse) if latent_mse is not None else None,
+                                "call_coda": bool(should_call_coda),
+                                "reason": precheck_reason,
+                                "action_mse": float(action_mse) if action_mse is not None else None,
+                            })
+                            prev_state = state.detach()
                         if adaptive_stop:
                             break
 
@@ -649,7 +666,11 @@ class VLARecurrent(nn.Module):
 
             self.last_recurrence_debug = {
                 "strategy": convergence_strategy,
-                "threshold": float(kl_thresh) if convergence_strategy == "kl_divergence" else float(cos_thresh),
+                "requested_recurrence_strategy": requested_recurrence_strategy,
+                "canonical_recurrence_strategy": canonical_recurrence_strategy,
+                "canonical_metric_name": canonical_recurrence_strategy,
+                "action_mse_threshold": float(kl_thresh) if canonical_recurrence_strategy == "adjacent_action_mse" else None,
+                "threshold": float(kl_thresh) if canonical_recurrence_strategy == "adjacent_action_mse" else float(cos_thresh),
                 "fixed_K": None,
                 "K_t": int(actual_iter),
                 "max_iter": int(max_iter),
@@ -664,17 +685,22 @@ class VLARecurrent(nn.Module):
                 "latent_action_mse_pairs": latent_action_mse_pairs,
                 "latent_action_pair_count": len(latent_action_mse_pairs),
                 "use_latent_precheck": bool(use_latent_precheck),
+                "latent_precheck_mode": latent_precheck_mode,
+                "latent_precheck_trace_level_requested": latent_precheck_trace_level,
+                "latent_precheck_trace_level_applied": None if latent_precheck_mode == "legacy" else latent_precheck_trace_level,
+                "latent_precheck_trace_collected": latent_precheck_mode == "legacy",
                 "latent_precheck_thresh": float(latent_precheck_thresh),
                 "latent_precheck_min_iter": int(latent_precheck_min_iter),
                 "latent_precheck_force_interval": int(latent_precheck_force_interval),
                 "latent_precheck_coda_call_mask": latent_precheck_coda_call_mask,
                 "latent_precheck_skipped_iters": latent_precheck_skipped_iters,
                 "latent_precheck_called_iters": latent_precheck_called_iters,
-                "latent_precheck_skip_count": len(latent_precheck_skipped_iters),
-                "latent_precheck_call_count": len(latent_precheck_called_iters),
+                "latent_precheck_skip_count": len(latent_precheck_skipped_iters) if latent_precheck_mode == "legacy" else None,
+                "latent_precheck_call_count": len(latent_precheck_called_iters) if latent_precheck_mode == "legacy" else None,
                 "latent_precheck_skip_ratio": (
                     len(latent_precheck_skipped_iters) / len(latent_precheck_coda_call_mask)
-                    if latent_precheck_coda_call_mask else 0.0
+                    if latent_precheck_coda_call_mask
+                    else (0.0 if latent_precheck_mode == "legacy" else None)
                 ),
                 "latent_precheck_decisions": latent_precheck_decisions,
                 "first_converged_k_1e_4": first_converged_k_1e_4,
@@ -682,6 +708,7 @@ class VLARecurrent(nn.Module):
                 "final_mse": conv_score_list[-1] if conv_score_list else None,
                 "final_conv_score": final_kl,
                 "stop_reason": stop_reason,
+                "canonical_stop_reason": canonical_recurrence_strategy if adaptive_stop else stop_reason,
                 "profiling_enabled": bool(profile_coda_cost),
                 "use_cached_final_output": bool(use_cached_final_output),
                 "warm_start_min_iter_configured": warm_start_min_iter_configured,
@@ -799,6 +826,14 @@ class VLARecurrent(nn.Module):
 
             self.last_recurrence_debug = {
                 "strategy": "fixed",
+                "requested_recurrence_strategy": requested_recurrence_strategy or "fixed",
+                "canonical_recurrence_strategy": canonical_recurrence_strategy or "fixed",
+                "canonical_metric_name": "fixed",
+                "action_mse_threshold": None,
+                "latent_precheck_mode": latent_precheck_mode,
+                "latent_precheck_trace_level_requested": latent_precheck_trace_level,
+                "latent_precheck_trace_level_applied": None if latent_precheck_mode == "legacy" else latent_precheck_trace_level,
+                "latent_precheck_trace_collected": False,
                 "threshold": None,
                 "fixed_K": int(total),
                 "K_t": int(total),
@@ -814,6 +849,7 @@ class VLARecurrent(nn.Module):
                 "final_mse": final_conv_score,
                 "final_conv_score": final_conv_score,
                 "stop_reason": None,
+                "canonical_stop_reason": None,
                 "warm_start_min_iter_configured": warm_start_min_iter_configured,
                 "effective_min_iter": int(effective_min_iter),
                 "warm_start_state_used": cached_state_used,
@@ -872,7 +908,15 @@ class ActionHeadRecurrent(nn.Module):
                        validate_warm_start_finite: bool = False,
                        profile_coda_cost=False, use_cached_final_output=False,
                        use_latent_precheck=False, latent_precheck_thresh=0.12,
-                       latent_precheck_min_iter=2, latent_precheck_force_interval=0, **kwargs):
+                       latent_precheck_min_iter=2, latent_precheck_force_interval=0,
+                       latent_precheck_mode="legacy", latent_precheck_trace_level="off",
+                       **kwargs):
+        canonicalize_recurrence_strategy(convergence_strategy)
+        validate_latent_precheck_configuration(
+            latent_precheck_mode,
+            latent_precheck_trace_level,
+            use_latent_precheck,
+        )
         with rdvla_range("RDVLA/action_head/wrapper_total"):
             B = actions_hidden_states.shape[0]
             proprio = proprio.reshape(B, -1).to(torch.bfloat16)
@@ -893,6 +937,8 @@ class ActionHeadRecurrent(nn.Module):
                                  profile_coda_cost=profile_coda_cost,
                                  use_cached_final_output=use_cached_final_output,
                                  use_latent_precheck=use_latent_precheck,
+                                 latent_precheck_mode=latent_precheck_mode,
+                                 latent_precheck_trace_level=latent_precheck_trace_level,
                                  latent_precheck_thresh=latent_precheck_thresh,
                                  latent_precheck_min_iter=latent_precheck_min_iter,
                                  latent_precheck_force_interval=latent_precheck_force_interval)

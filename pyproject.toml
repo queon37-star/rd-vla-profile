@@ -70,6 +70,7 @@ dev = [
     "gpustat",
     "ipython",
     "pre-commit",
+    "pytest>=7",
     "ruff>=0.2.2",
 ]
 sagemaker = [

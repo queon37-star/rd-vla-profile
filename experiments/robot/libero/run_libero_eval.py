@@ -19,6 +19,10 @@ import tqdm
 from libero.libero import benchmark
 
 import wandb
+from configs.rdvla_precheck import (
+    canonicalize_recurrence_strategy,
+    validate_latent_precheck_configuration,
+)
 
 sys.path.append("../..")
 from experiments.robot.libero.libero_utils import (
@@ -125,7 +129,7 @@ class GenerateConfig:
 
     use_recurrent: bool = False
 
-    # Recurrence strategy: "fixed", "kl_divergence", or "cosine_similarity"
+    # "kl_divergence" is a legacy alias for adjacent action-output MSE.
     recurrence_strategy: str = "fixed"
     recurrent_num_iter: int = 12
     recurrence_kl_thresh: float = 0.001
@@ -155,6 +159,8 @@ class GenerateConfig:
 
     # Optional latent-state pre-check before running Coda in adaptive recurrence.
     use_latent_precheck: bool = False
+    latent_precheck_mode: str = "legacy"
+    latent_precheck_trace_level: str = "off"
     latent_precheck_thresh: float = 0.12
     latent_precheck_min_iter: int = 2
     latent_precheck_force_interval: int = 0
@@ -197,6 +203,12 @@ def validate_config(cfg: GenerateConfig) -> None:
         assert cfg.center_crop, "Expecting `center_crop==True` because model was trained with image augmentations!"
 
     assert not (cfg.load_in_8bit and cfg.load_in_4bit), "Cannot use both 8-bit and 4-bit quantization!"
+    canonicalize_recurrence_strategy(cfg.recurrence_strategy)
+    validate_latent_precheck_configuration(
+        cfg.latent_precheck_mode,
+        cfg.latent_precheck_trace_level,
+        cfg.use_latent_precheck,
+    )
     supported_warm_start_sources = {"s1", "midpoint", "final"}
     if cfg.warm_start_source not in supported_warm_start_sources:
         raise ValueError(
@@ -467,6 +479,11 @@ def _build_timing_summary_record(timing_record, result):
         "final_mse": _as_float(final_mse),
         "final_kl": _as_float(final_kl),
         "stop_reason": recurrence_debug.get("stop_reason"),
+        "canonical_stop_reason": recurrence_debug.get("canonical_stop_reason"),
+        "canonical_recurrence_strategy": recurrence_debug.get("canonical_recurrence_strategy"),
+        "latent_precheck_mode": recurrence_debug.get("latent_precheck_mode", "legacy"),
+        "latent_precheck_trace_level_requested": recurrence_debug.get("latent_precheck_trace_level_requested", "off"),
+        "latent_precheck_trace_collected": recurrence_debug.get("latent_precheck_trace_collected"),
         "used_latent_precheck": bool(recurrence_debug.get("use_latent_precheck", False)),
         "used_coda_stop": bool(recurrence_debug.get("adaptive_stop", False)),
         "timings_ms": timings,
@@ -987,6 +1004,10 @@ def run_episode(
                     "episode_seed": episode_seed,
                     "method": debug.get("strategy", recurrence_strategy),
                     "recurrence_strategy": debug.get("strategy", recurrence_strategy),
+                    "requested_recurrence_strategy": debug.get("requested_recurrence_strategy", recurrence_strategy),
+                    "canonical_recurrence_strategy": debug.get("canonical_recurrence_strategy"),
+                    "canonical_metric_name": debug.get("canonical_metric_name"),
+                    "action_mse_threshold": debug.get("action_mse_threshold"),
                     "threshold": threshold,
                     "fixed_K": fixed_k,
                     "K_t": recurrent_iteration_count,
@@ -1005,6 +1026,10 @@ def run_episode(
                     "latent_action_mse_pairs": debug.get("latent_action_mse_pairs", []),
                     "latent_action_pair_count": debug.get("latent_action_pair_count", 0),
                     "use_latent_precheck": bool(debug.get("use_latent_precheck", False)),
+                    "latent_precheck_mode": debug.get("latent_precheck_mode", getattr(cfg, "latent_precheck_mode", "legacy")),
+                    "latent_precheck_trace_level_requested": debug.get("latent_precheck_trace_level_requested", getattr(cfg, "latent_precheck_trace_level", "off")),
+                    "latent_precheck_trace_level_applied": debug.get("latent_precheck_trace_level_applied"),
+                    "latent_precheck_trace_collected": debug.get("latent_precheck_trace_collected"),
                     "latent_precheck_thresh": debug.get("latent_precheck_thresh"),
                     "latent_precheck_min_iter": debug.get("latent_precheck_min_iter"),
                     "latent_precheck_force_interval": debug.get("latent_precheck_force_interval"),
