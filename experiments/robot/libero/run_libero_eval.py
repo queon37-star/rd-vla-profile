@@ -48,6 +48,7 @@ from experiments.robot.robot_utils import (
     normalize_gripper_action,
     set_seed_everywhere,
 )
+from prismatic.models.numerical_retry import NumericalInferenceAbort
 from prismatic.vla.constants import NUM_ACTIONS_CHUNK
 from prismatic.utils.rdvla_profiler import RDVLAProfiler
 
@@ -167,6 +168,7 @@ class GenerateConfig:
     latent_precheck_warm_thresh: Optional[float] = None
     latent_precheck_max_skip_iters: int = 0
     latent_precheck_confirmation_mode: str = "next_iter"
+    nonfinite_policy: str = "legacy"
 
     # Fixed execution: always use first N actions
     num_exec_actions: int = 5
@@ -219,6 +221,7 @@ def validate_config(cfg: GenerateConfig) -> None:
         recurrence_strategy=cfg.recurrence_strategy,
         use_warm_start=cfg.use_warm_start,
         min_iter=cfg.latent_precheck_min_iter,
+        nonfinite_policy=cfg.nonfinite_policy,
     )
     supported_warm_start_sources = {"s1", "midpoint", "final"}
     if cfg.warm_start_source not in supported_warm_start_sources:
@@ -506,6 +509,17 @@ def _build_timing_summary_record(timing_record, result):
         "returned_cached_final_output": recurrence_debug.get("returned_cached_final_output"),
         "max_iteration_convergence_evaluable": recurrence_debug.get("max_iteration_convergence_evaluable"),
         "final_convergence_evaluable": recurrence_debug.get("final_convergence_evaluable"),
+        "execution_path": recurrence_debug.get("execution_path"),
+        "nonfinite_policy": recurrence_debug.get("nonfinite_policy"),
+        "numerical_retry_attempted": recurrence_debug.get("numerical_retry_attempted"),
+        "numerical_retry_succeeded": recurrence_debug.get("numerical_retry_succeeded"),
+        "first_attempt_origin": recurrence_debug.get("first_attempt_origin"),
+        "first_attempt_failure": recurrence_debug.get("first_attempt_failure"),
+        "first_attempt_coda_attempt_count": recurrence_debug.get("first_attempt_coda_attempt_count"),
+        "retry_coda_call_count": recurrence_debug.get("retry_coda_call_count"),
+        "get_output_attempt_count_intent_to_treat": recurrence_debug.get(
+            "get_output_attempt_count_intent_to_treat"
+        ),
         "used_latent_precheck": bool(recurrence_debug.get("use_latent_precheck", False)),
         "used_coda_stop": bool(recurrence_debug.get("adaptive_stop", False)),
         "timings_ms": timings,
@@ -921,14 +935,49 @@ def run_episode(
                     "action_prediction_index": prediction_step,
                     "prediction_step": prediction_step,
                 }
-                actions, actual_iters, final_kl, inference_metadata = run_action_with_optional_profiles(
-                    cfg,
-                    profile_state,
-                    timing_state,
-                    log_file,
-                    predict_action_once,
-                    timing_metadata,
-                )
+                try:
+                    actions, actual_iters, final_kl, inference_metadata = run_action_with_optional_profiles(
+                        cfg,
+                        profile_state,
+                        timing_state,
+                        log_file,
+                        predict_action_once,
+                        timing_metadata,
+                    )
+                except NumericalInferenceAbort as numerical_abort:
+                    if torch.cuda.is_available():
+                        torch.cuda.synchronize()
+                    action_latency_ms = (time.perf_counter() - action_start) * 1000.0
+                    episode_action_latencies_ms.append(action_latency_ms)
+                    abort_debug = (
+                        getattr(getattr(action_head, "model", None), "last_recurrence_debug", None)
+                        or {}
+                    )
+                    warm_start_state = None
+                    warm_start_cache_age = 0
+                    episode_step_logs.append(
+                        {
+                            "schema_version": 1,
+                            "task_id": task_id,
+                            "task_name": task_description,
+                            "episode_id": episode_idx,
+                            "timestep": int(t),
+                            "action_prediction_index": prediction_step,
+                            "prediction_step": prediction_step,
+                            "recurrent_iteration_count": None,
+                            "final_mse": None,
+                            "adaptive_stop": False,
+                            "execution_path": "numerical_abort",
+                            "nonfinite_policy": getattr(cfg, "nonfinite_policy", "legacy"),
+                            "numerical_retry_attempted": True,
+                            "numerical_retry_succeeded": False,
+                            "numerical_abort": numerical_abort.to_dict(),
+                            "first_attempt_origin": abort_debug.get("first_attempt_origin"),
+                            "latency_ms": action_latency_ms,
+                            "success": None,
+                        }
+                    )
+                    raise
                 inference_metadata = inference_metadata or {}
                 if isinstance(inference_metadata, dict):
                     recurrence_debug = inference_metadata.get("recurrence_debug", inference_metadata)
@@ -1080,6 +1129,20 @@ def run_episode(
                     "returned_cached_final_output": debug.get("returned_cached_final_output"),
                     "cached_final_matches_returned": debug.get("cached_final_matches_returned"),
                     "max_iteration_convergence_evaluable": debug.get("max_iteration_convergence_evaluable"),
+                    "execution_path": debug.get("execution_path"),
+                    "nonfinite_policy": debug.get(
+                        "nonfinite_policy", getattr(cfg, "nonfinite_policy", "legacy")
+                    ),
+                    "numerical_retry_attempted": debug.get("numerical_retry_attempted", False),
+                    "numerical_retry_succeeded": debug.get("numerical_retry_succeeded"),
+                    "numerical_retry_count": debug.get("numerical_retry_count", 0),
+                    "first_attempt_origin": debug.get("first_attempt_origin"),
+                    "first_attempt_failure": debug.get("first_attempt_failure"),
+                    "first_attempt_coda_attempt_count": debug.get("first_attempt_coda_attempt_count", 0),
+                    "retry_coda_call_count": debug.get("retry_coda_call_count", 0),
+                    "get_output_attempt_count_intent_to_treat": debug.get(
+                        "get_output_attempt_count_intent_to_treat"
+                    ),
                     "first_converged_k_1e_4": debug.get("first_converged_k_1e_4", None),
                     "first_converged_k_5e_4": debug.get("first_converged_k_5e_4", None),
                     "warm_start_enabled": warm_start_enabled,
@@ -1096,6 +1159,12 @@ def run_episode(
                     "warm_start_reset": warm_start_reset,
                     "warm_start_reset_reason": warm_start_reset_reason,
                     "initial_state_origin": initial_state_origin,
+                    "warm_start_first_attempt_used": warm_start_metadata.get(
+                        "first_attempt_state_used"
+                    ),
+                    "warm_start_first_attempt_origin": warm_start_metadata.get(
+                        "first_attempt_initial_state_origin"
+                    ),
                     "warm_start_min_iter": _as_int(
                         debug.get("warm_start_min_iter_configured", getattr(cfg, "warm_start_min_iter", 2))
                     ),

@@ -14,6 +14,7 @@ SUPPORTED_RECURRENCE_STRATEGIES = {
 SUPPORTED_LATENT_PRECHECK_MODES = {"legacy", "off", "origin_aware"}
 SUPPORTED_LATENT_PRECHECK_TRACE_LEVELS = {"off", "summary", "full"}
 SUPPORTED_ORIGIN_AWARE_CONFIRMATION_MODES = {"next_iter", "backfill_pair"}
+SUPPORTED_NONFINITE_POLICIES = {"legacy", "cold_retry_once"}
 ORIGIN_AWARE_COLD_THRESHOLD = 0.2
 
 
@@ -41,12 +42,15 @@ def validate_latent_precheck_configuration(
     recurrence_strategy: Optional[str] = None,
     use_warm_start: bool = False,
     min_iter: int = 2,
+    nonfinite_policy: str = "legacy",
 ) -> str:
     """Validate mode combinations and fail closed for unfinished schedulers."""
     if mode not in SUPPORTED_LATENT_PRECHECK_MODES:
         raise ValueError(f"Unsupported latent_precheck_mode: {mode}")
     if trace_level not in SUPPORTED_LATENT_PRECHECK_TRACE_LEVELS:
         raise ValueError(f"Unsupported latent_precheck_trace_level: {trace_level}")
+    if nonfinite_policy not in SUPPORTED_NONFINITE_POLICIES:
+        raise ValueError(f"Unsupported nonfinite_policy: {nonfinite_policy}")
 
     if mode == "off":
         if use_latent_precheck:
@@ -82,5 +86,12 @@ def validate_latent_precheck_configuration(
             )
         if isinstance(min_iter, bool) or not isinstance(min_iter, int) or min_iter < 2:
             raise ValueError("latent_precheck_min_iter must be an integer >= 2")
+        if nonfinite_policy != "cold_retry_once":
+            raise ValueError(
+                "latent_precheck_mode='origin_aware' requires "
+                "nonfinite_policy='cold_retry_once'"
+            )
+    elif nonfinite_policy != "legacy":
+        raise ValueError("nonfinite_policy='cold_retry_once' requires latent_precheck_mode='origin_aware'")
 
     return mode

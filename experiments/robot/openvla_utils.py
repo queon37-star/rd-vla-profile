@@ -445,6 +445,7 @@ def get_vla_action(
                         latent_precheck_warm_thresh=getattr(cfg, "latent_precheck_warm_thresh", None),
                         latent_precheck_max_skip_iters=getattr(cfg, "latent_precheck_max_skip_iters", 0),
                         latent_precheck_confirmation_mode=getattr(cfg, "latent_precheck_confirmation_mode", "next_iter"),
+                        nonfinite_policy=getattr(cfg, "nonfinite_policy", "legacy"),
                     )
                     recurrence_debug = getattr(getattr(action_head, "model", None), "last_recurrence_debug", None)
                     action_head_inference_metadata = (
@@ -471,6 +472,10 @@ def get_vla_action(
                 "initial_state_origin": warm_start_metadata.get("initial_state_origin", "random"),
                 "reset": bool(warm_start_metadata.get("reset", False)),
                 "reset_reason": warm_start_metadata.get("reset_reason"),
+                "first_attempt_state_used": warm_start_metadata.get("first_attempt_state_used"),
+                "first_attempt_initial_state_origin": warm_start_metadata.get(
+                    "first_attempt_initial_state_origin"
+                ),
             },
         }
         return actions, actual_iters, final_kl, inference_metadata

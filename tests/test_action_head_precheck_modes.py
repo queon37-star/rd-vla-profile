@@ -175,6 +175,7 @@ def test_origin_aware_training_mode_rejects_before_state_initialization(tiny_rec
             latent_precheck_trace_level="off",
             latent_precheck_warm_thresh=0.1,
             latent_precheck_max_skip_iters=1,
+            nonfinite_policy="cold_retry_once",
         )
 
     initialization.assert_not_called()
@@ -201,6 +202,7 @@ def test_new_precheck_controls_follow_legacy_positional_parameters(callable_obj)
         "latent_precheck_warm_thresh",
         "latent_precheck_max_skip_iters",
         "latent_precheck_confirmation_mode",
+        "nonfinite_policy",
     ]
 
     assert [name for name in parameters if name in expected_order] == expected_order

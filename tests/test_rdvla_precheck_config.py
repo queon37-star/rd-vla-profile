@@ -65,6 +65,17 @@ def test_unknown_precheck_settings_are_rejected(mode, trace_level, message):
         validate_latent_precheck_configuration(mode, trace_level, False)
 
 
+def test_nonfinite_policy_rejects_unknown_and_non_origin_aware_use():
+    with pytest.raises(ValueError, match="Unsupported nonfinite_policy"):
+        validate_latent_precheck_configuration(
+            "legacy", "off", False, nonfinite_policy="typo"
+        )
+    with pytest.raises(ValueError, match="requires latent_precheck_mode='origin_aware'"):
+        validate_latent_precheck_configuration(
+            "off", "off", False, nonfinite_policy="cold_retry_once"
+        )
+
+
 def _validate_origin_aware(*, use_latent_precheck=True, **overrides):
     scheduler = {
         "origin_aware_implemented": True,
@@ -75,6 +86,7 @@ def _validate_origin_aware(*, use_latent_precheck=True, **overrides):
         "recurrence_strategy": "kl_divergence",
         "use_warm_start": True,
         "min_iter": 2,
+        "nonfinite_policy": "cold_retry_once",
     }
     scheduler.update(overrides)
     return validate_latent_precheck_configuration(
@@ -114,6 +126,7 @@ def test_origin_aware_configuration_accepts_frozen_scheduler_contract(
         ({"confirmation_mode": "unknown"}, "Unsupported latent_precheck_confirmation_mode"),
         ({"recurrence_strategy": "cosine_similarity"}, "requires recurrence_strategy"),
         ({"min_iter": 1}, "integer >= 2"),
+        ({"nonfinite_policy": "legacy"}, "requires nonfinite_policy='cold_retry_once'"),
     ],
 )
 def test_origin_aware_configuration_rejects_invalid_scheduler_contract(overrides, message):

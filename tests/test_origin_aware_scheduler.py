@@ -4,7 +4,7 @@ import pytest
 import torch
 
 from prismatic.models.action_heads import RecurrentConfigInternal, VLARecurrent
-from prismatic.models.origin_aware_scheduler import NonFiniteOriginAwareInferenceError
+from prismatic.models.numerical_retry import NumericalInferenceAbort
 
 
 @pytest.fixture
@@ -76,6 +76,7 @@ def _run_origin_aware(
         latent_precheck_min_iter=2,
         latent_precheck_max_skip_iters=max_skip_iters,
         latent_precheck_confirmation_mode=confirmation_mode,
+        nonfinite_policy="cold_retry_once",
     )
 
 
@@ -210,7 +211,80 @@ def test_confirmation_can_stop_only_on_the_adjacent_refreshed_pair(scheduler_mod
     torch.testing.assert_close(result[0], torch.full_like(result[0], 20.0))
 
 
-def test_nonfinite_recurrent_state_is_never_decoded(scheduler_model):
+def test_nonfinite_warm_attempt_retries_once_from_cold_and_invalidates_cache(
+    scheduler_model,
+):
+    def run_one_iteration(self, state, *args):
+        next_state = state + 1
+        if float(next_state.flatten()[0].item()) >= 10:
+            next_state.fill_(float("inf"))
+        return next_state
+
+    scheduler_model._run_one_iteration = types.MethodType(
+        run_one_iteration,
+        scheduler_model,
+    )
+
+    warm_state = torch.full((1, 2, 4), 10.0)
+    result = _run_origin_aware(
+        scheduler_model,
+        warm_state=warm_state,
+        max_iter=4,
+    )
+    debug = scheduler_model.last_recurrence_debug
+    warm_metadata = scheduler_model.last_inference_metadata["warm_start"]
+
+    assert result[1] == 4
+    assert torch.isfinite(result[0]).all()
+    assert scheduler_model.decoded_state_values == [1, 2, 3, 4]
+    assert debug["execution_path"] == "cold_retry_full_coda"
+    assert debug["numerical_retry_attempted"] is True
+    assert debug["numerical_retry_succeeded"] is True
+    assert debug["first_attempt_origin"] == "ACTUAL_WARM"
+    assert debug["first_attempt_failure"]["stage"] == "recurrent_state"
+    assert debug["first_attempt_active_threshold"] == pytest.approx(0.05)
+    assert debug["latent_precheck_warm_thresh"] == pytest.approx(0.05)
+    assert debug["latent_precheck_active_threshold"] is None
+    assert debug["latent_precheck_origin"] == "COLD"
+    assert debug["retry_coda_call_count"] == 4
+    assert debug["get_output_attempt_count_intent_to_treat"] == 4
+    assert scheduler_model.last_inference_metadata["next_warm_start_state"] is None
+    assert warm_metadata["state_used"] is False
+    assert warm_metadata["first_attempt_state_used"] is True
+    assert warm_metadata["reset"] is True
+    assert warm_metadata["reset_reason"] == "numerical_retry:recurrent_state"
+    torch.testing.assert_close(result[0], torch.full_like(result[0], 4.0))
+
+
+def test_nonfinite_coda_output_is_counted_before_cold_retry(scheduler_model):
+    original_get_output = scheduler_model._get_output
+    call_count = 0
+
+    def get_output(self, state, *args, profile=False):
+        nonlocal call_count
+        call_count += 1
+        output = original_get_output(state, *args, profile=profile)
+        if call_count == 1:
+            output.fill_(float("inf"))
+        return output
+
+    scheduler_model._get_output = types.MethodType(get_output, scheduler_model)
+    result = _run_origin_aware(scheduler_model, max_iter=3)
+    debug = scheduler_model.last_recurrence_debug
+
+    assert torch.isfinite(result[0]).all()
+    assert result[1] == 3
+    assert scheduler_model.decoded_state_values == [1, 1, 2, 3]
+    assert debug["first_attempt_origin"] == "COLD"
+    assert debug["first_attempt_failure"]["stage"] == "coda_output"
+    assert debug["first_attempt_coda_attempt_count"] == 1
+    assert debug["retry_coda_call_count"] == 3
+    assert debug["get_output_attempt_count_intent_to_treat"] == 4
+    assert debug["coda_reason_counts"] == {"cold_fallback": 3}
+    torch.testing.assert_close(result[0], torch.full_like(result[0], 3.0))
+
+
+def test_nonfinite_recurrent_state_in_retry_raises_typed_abort(scheduler_model):
     def run_one_iteration(self, state, *args):
         next_state = state + 1
         if float(next_state.flatten()[0].item()) >= 3:
@@ -222,10 +296,16 @@ def test_nonfinite_recurrent_state_is_never_decoded(scheduler_model):
         scheduler_model,
     )
 
-    with pytest.raises(NonFiniteOriginAwareInferenceError, match="iteration 3"):
+    with pytest.raises(NumericalInferenceAbort, match="cold retry both failed"):
         _run_origin_aware(scheduler_model, max_iter=5)
 
-    assert scheduler_model.decoded_state_values == [1, 2]
+    debug = scheduler_model.last_recurrence_debug
+    assert scheduler_model.decoded_state_values == [1, 2, 1, 2]
+    assert debug["execution_path"] == "numerical_abort"
+    assert debug["numerical_retry_attempted"] is True
+    assert debug["numerical_retry_succeeded"] is False
+    assert debug["numerical_abort"]["type"] == "NumericalInferenceAbort"
+    assert debug["numerical_abort"]["retry_failure"]["stage"] == "cold_retry_recurrent_state"
 
 
 def test_trace_off_keeps_scheduler_summary_without_iteration_trace(scheduler_model):

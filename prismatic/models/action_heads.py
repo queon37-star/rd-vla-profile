@@ -8,8 +8,10 @@ from configs.rdvla_precheck import (
     validate_latent_precheck_configuration,
 )
 from prismatic.models.origin_aware_scheduler import (
+    NonFiniteOriginAwareInferenceError,
     run_origin_aware_adaptive,
 )
+from prismatic.models.numerical_retry import run_cold_full_coda_retry
 from prismatic.vla.constants import ACTION_DIM, NUM_ACTIONS_CHUNK
 from prismatic.utils.rdvla_profiler import rdvla_range
 from dataclasses import dataclass
@@ -397,6 +399,7 @@ class VLARecurrent(nn.Module):
                 latent_precheck_warm_thresh: float = None,
                 latent_precheck_max_skip_iters: int = 0,
                 latent_precheck_confirmation_mode: str = "next_iter",
+                nonfinite_policy: str = "legacy",
                 **kwargs) -> torch.Tensor:
         requested_recurrence_strategy = convergence_strategy
         canonical_recurrence_strategy = canonicalize_recurrence_strategy(convergence_strategy)
@@ -412,6 +415,7 @@ class VLARecurrent(nn.Module):
             recurrence_strategy=convergence_strategy,
             use_warm_start=enable_warm_start,
             min_iter=latent_precheck_min_iter,
+            nonfinite_policy=nonfinite_policy,
         )
         if latent_precheck_mode == "origin_aware" and self.training:
             raise ValueError("latent_precheck_mode='origin_aware' is inference-only")
@@ -511,30 +515,52 @@ class VLARecurrent(nn.Module):
             and not self.training
         ):
             actual_origin = "ACTUAL_WARM" if cached_state_used else "COLD"
-            return run_origin_aware_adaptive(
-                self,
-                state,
-                prelude_out,
-                h_a,
-                h_t,
-                p,
-                max_iter=max_iter,
-                action_mse_threshold=kl_thresh,
-                effective_min_iter=effective_min_iter,
-                warm_start_min_iter_configured=warm_start_min_iter_configured,
-                warm_threshold=float(latent_precheck_warm_thresh),
-                latent_precheck_min_iter=latent_precheck_min_iter,
-                max_skip_iters=latent_precheck_max_skip_iters,
-                confirmation_mode=latent_precheck_confirmation_mode,
-                trace_level=latent_precheck_trace_level,
-                actual_origin=actual_origin,
-                requested_recurrence_strategy=requested_recurrence_strategy,
-                profile_coda_cost=profile_coda_cost,
-                use_cached_final_output_requested=use_cached_final_output,
-                capture_warm_start_candidates=capture_warm_start_candidates,
-                warm_start_candidate_states=warm_start_candidate_states,
-                warm_start_source=warm_start_source,
-            )
+            first_warm_metadata = dict(warm_start_metadata)
+            try:
+                return run_origin_aware_adaptive(
+                    self,
+                    state,
+                    prelude_out,
+                    h_a,
+                    h_t,
+                    p,
+                    max_iter=max_iter,
+                    action_mse_threshold=kl_thresh,
+                    effective_min_iter=effective_min_iter,
+                    warm_start_min_iter_configured=warm_start_min_iter_configured,
+                    warm_threshold=float(latent_precheck_warm_thresh),
+                    latent_precheck_min_iter=latent_precheck_min_iter,
+                    max_skip_iters=latent_precheck_max_skip_iters,
+                    confirmation_mode=latent_precheck_confirmation_mode,
+                    trace_level=latent_precheck_trace_level,
+                    actual_origin=actual_origin,
+                    requested_recurrence_strategy=requested_recurrence_strategy,
+                    profile_coda_cost=profile_coda_cost,
+                    use_cached_final_output_requested=use_cached_final_output,
+                    capture_warm_start_candidates=capture_warm_start_candidates,
+                    warm_start_candidate_states=warm_start_candidate_states,
+                    warm_start_source=warm_start_source,
+                )
+            except NonFiniteOriginAwareInferenceError as first_error:
+                return run_cold_full_coda_retry(
+                    self,
+                    prelude_out,
+                    h_a,
+                    h_t,
+                    p,
+                    max_iter=max_iter,
+                    action_mse_threshold=kl_thresh,
+                    requested_recurrence_strategy=requested_recurrence_strategy,
+                    profile_coda_cost=profile_coda_cost,
+                    trace_level=latent_precheck_trace_level,
+                    warm_threshold=float(latent_precheck_warm_thresh),
+                    latent_precheck_min_iter=latent_precheck_min_iter,
+                    max_skip_iters=latent_precheck_max_skip_iters,
+                    confirmation_mode=latent_precheck_confirmation_mode,
+                    first_error=first_error,
+                    first_attempt_origin=actual_origin,
+                    first_warm_metadata=first_warm_metadata,
+                )
 
         if canonical_recurrence_strategy in ("adjacent_action_mse", "cosine_similarity") and not self.training:
             prev_state = None
@@ -975,6 +1001,7 @@ class ActionHeadRecurrent(nn.Module):
                        latent_precheck_warm_thresh=None,
                        latent_precheck_max_skip_iters=0,
                        latent_precheck_confirmation_mode="next_iter",
+                       nonfinite_policy="legacy",
                        **kwargs):
         canonicalize_recurrence_strategy(convergence_strategy)
         validate_latent_precheck_configuration(
@@ -989,6 +1016,7 @@ class ActionHeadRecurrent(nn.Module):
             recurrence_strategy=convergence_strategy,
             use_warm_start=enable_warm_start,
             min_iter=latent_precheck_min_iter,
+            nonfinite_policy=nonfinite_policy,
         )
         with rdvla_range("RDVLA/action_head/wrapper_total"):
             B = actions_hidden_states.shape[0]
@@ -1017,4 +1045,5 @@ class ActionHeadRecurrent(nn.Module):
                                  latent_precheck_force_interval=latent_precheck_force_interval,
                                  latent_precheck_warm_thresh=latent_precheck_warm_thresh,
                                  latent_precheck_max_skip_iters=latent_precheck_max_skip_iters,
-                                 latent_precheck_confirmation_mode=latent_precheck_confirmation_mode)
+                                 latent_precheck_confirmation_mode=latent_precheck_confirmation_mode,
+                                 nonfinite_policy=nonfinite_policy)

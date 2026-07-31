@@ -12,6 +12,22 @@ from prismatic.utils.rdvla_profiler import rdvla_range
 class NonFiniteOriginAwareInferenceError(RuntimeError):
     """Raised before a non-finite state or action can leave the action head."""
 
+    def __init__(self, message, *, stage, iteration, details=None):
+        super().__init__(message)
+        self.stage = stage
+        self.iteration = int(iteration)
+        self.details = dict(details or {})
+
+    def to_dict(self):
+        return {
+            "type": type(self).__name__,
+            "message": str(self),
+            "stage": self.stage,
+            "iteration": self.iteration,
+            **self.details,
+        }
+
+
 
 def _is_finite_tensor(tensor: torch.Tensor) -> bool:
     return bool(torch.isfinite(tensor).all().item())
@@ -114,7 +130,13 @@ def run_origin_aware_adaptive(
             output_is_finite = _is_finite_tensor(output)
         if not output_is_finite:
             raise NonFiniteOriginAwareInferenceError(
-                f"non-finite Coda output at iteration {state_iter}"
+                f"non-finite Coda output at iteration {state_iter}",
+                stage="coda_output",
+                iteration=state_iter,
+                details={
+                    "coda_call_count_before_failure": int(coda_call_count),
+                    "coda_attempt_count": int(coda_call_count + 1),
+                },
             )
 
         coda_call_count += 1
@@ -163,7 +185,12 @@ def run_origin_aware_adaptive(
             action_l2 = action_l2_tensor.item()
         if not math.isfinite(action_mse) or not math.isfinite(action_l2):
             raise NonFiniteOriginAwareInferenceError(
-                f"non-finite action convergence metric at iteration {right_iter}"
+                f"non-finite action convergence metric at iteration {right_iter}",
+                stage="action_convergence_metric",
+                iteration=right_iter,
+                details={
+                    "coda_call_count_before_failure": int(coda_call_count),
+                },
             )
         if profile_coda_cost:
             convergence_check_ms_list.append(
@@ -250,7 +277,12 @@ def run_origin_aware_adaptive(
                     state_is_finite = _is_finite_tensor(state)
                 if not state_is_finite:
                     raise NonFiniteOriginAwareInferenceError(
-                        f"non-finite recurrent state at iteration {it + 1}"
+                        f"non-finite recurrent state at iteration {it + 1}",
+                        stage="recurrent_state",
+                        iteration=it + 1,
+                        details={
+                            "coda_call_count_before_failure": int(coda_call_count),
+                        },
                     )
                 if capture_warm_start_candidates:
                     warm_start_candidate_states.append(state.detach())
@@ -350,7 +382,12 @@ def run_origin_aware_adaptive(
                         latent_l2 is not None and not math.isfinite(latent_l2)
                     ):
                         raise NonFiniteOriginAwareInferenceError(
-                            f"non-finite latent gate metric at iteration {actual_iter}"
+                            f"non-finite latent gate metric at iteration {actual_iter}",
+                            stage="latent_gate_metric",
+                            iteration=actual_iter,
+                            details={
+                                "coda_call_count_before_failure": int(coda_call_count),
+                            },
                         )
                     latent_metric_count += 1
                     if collect_full_trace:
@@ -480,6 +517,11 @@ def run_origin_aware_adaptive(
         "latent_action_pair_count": len(latent_action_mse_pairs),
         "use_latent_precheck": True,
         "latent_precheck_mode": "origin_aware",
+        "configured_use_latent_precheck": True,
+        "execution_path": "origin_aware",
+        "nonfinite_policy": "cold_retry_once",
+        "numerical_retry_attempted": False,
+        "numerical_retry_succeeded": None,
         "latent_precheck_trace_level_requested": trace_level,
         "latent_precheck_trace_level_applied": trace_level,
         "latent_precheck_trace_collected": trace_level != "off",
