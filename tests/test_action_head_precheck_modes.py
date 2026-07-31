@@ -137,12 +137,12 @@ def test_legacy_alias_and_canonical_strategy_share_internal_behavior(tiny_recurr
     assert canonical_debug["canonical_recurrence_strategy"] == "adjacent_action_mse"
 
 
-def test_unimplemented_origin_aware_mode_rejects_before_recurrence(tiny_recurrent):
+def test_invalid_origin_aware_configuration_rejects_before_recurrence(tiny_recurrent):
     recurrence = Mock(side_effect=AssertionError("recurrence must not run"))
     tiny_recurrent._run_one_iteration = recurrence
     rng_before = torch.random.get_rng_state().clone()
 
-    with pytest.raises(NotImplementedError, match="not implemented yet"):
+    with pytest.raises(ValueError, match="requires use_latent_precheck=True"):
         tiny_recurrent(
             *_inputs(),
             convergence_strategy="kl_divergence",
@@ -154,6 +154,30 @@ def test_unimplemented_origin_aware_mode_rejects_before_recurrence(tiny_recurren
 
     recurrence.assert_not_called()
     assert torch.equal(torch.random.get_rng_state(), rng_before)
+
+
+def test_origin_aware_training_mode_rejects_before_state_initialization(tiny_recurrent):
+    initialization = Mock(
+        side_effect=AssertionError("state initialization must not run")
+    )
+    tiny_recurrent.init_state = initialization
+    tiny_recurrent.train()
+
+    with pytest.raises(ValueError, match="inference-only"):
+        tiny_recurrent(
+            *_inputs(),
+            convergence_strategy="kl_divergence",
+            max_iter=3,
+            enable_warm_start=True,
+            warm_start_source="midpoint",
+            use_latent_precheck=True,
+            latent_precheck_mode="origin_aware",
+            latent_precheck_trace_level="off",
+            latent_precheck_warm_thresh=0.1,
+            latent_precheck_max_skip_iters=1,
+        )
+
+    initialization.assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -174,6 +198,9 @@ def test_new_precheck_controls_follow_legacy_positional_parameters(callable_obj)
         "latent_precheck_force_interval",
         "latent_precheck_mode",
         "latent_precheck_trace_level",
+        "latent_precheck_warm_thresh",
+        "latent_precheck_max_skip_iters",
+        "latent_precheck_confirmation_mode",
     ]
 
     assert [name for name in parameters if name in expected_order] == expected_order

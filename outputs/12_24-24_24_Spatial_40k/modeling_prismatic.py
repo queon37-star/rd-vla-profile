@@ -810,6 +810,9 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
         latent_precheck_force_interval=0,
         latent_precheck_mode="legacy",
         latent_precheck_trace_level="off",
+        latent_precheck_warm_thresh=None,
+        latent_precheck_max_skip_iters=0,
+        latent_precheck_confirmation_mode="next_iter",
     ):
         """Run L1 regression-based continuous action prediction or discrete action tokens prediction."""
 
@@ -890,6 +893,9 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
                     latent_precheck_thresh=latent_precheck_thresh,
                     latent_precheck_min_iter=latent_precheck_min_iter,
                     latent_precheck_force_interval=latent_precheck_force_interval,
+                    latent_precheck_warm_thresh=latent_precheck_warm_thresh,
+                    latent_precheck_max_skip_iters=latent_precheck_max_skip_iters,
+                    latent_precheck_confirmation_mode=latent_precheck_confirmation_mode,
                 )
             # Handle convergence-based return (output, num_iters, final_kl) vs fixed return (output)
             actual_iters = None
@@ -949,6 +955,9 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
         latent_precheck_force_interval: int = 0,
         latent_precheck_mode: str = "legacy",
         latent_precheck_trace_level: str = "off",
+        latent_precheck_warm_thresh: float = None,
+        latent_precheck_max_skip_iters: int = 0,
+        latent_precheck_confirmation_mode: str = "next_iter",
         **kwargs: str,
     ) -> np.ndarray:
 
@@ -1020,6 +1029,9 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
             latent_precheck_thresh=latent_precheck_thresh,
             latent_precheck_min_iter=latent_precheck_min_iter,
             latent_precheck_force_interval=latent_precheck_force_interval,
+            latent_precheck_warm_thresh=latent_precheck_warm_thresh,
+            latent_precheck_max_skip_iters=latent_precheck_max_skip_iters,
+            latent_precheck_confirmation_mode=latent_precheck_confirmation_mode,
             )
 
         # Unnormalize predicted actions

@@ -442,6 +442,9 @@ def get_vla_action(
                         latent_precheck_thresh=getattr(cfg, "latent_precheck_thresh", 0.12),
                         latent_precheck_min_iter=getattr(cfg, "latent_precheck_min_iter", 2),
                         latent_precheck_force_interval=getattr(cfg, "latent_precheck_force_interval", 0),
+                        latent_precheck_warm_thresh=getattr(cfg, "latent_precheck_warm_thresh", None),
+                        latent_precheck_max_skip_iters=getattr(cfg, "latent_precheck_max_skip_iters", 0),
+                        latent_precheck_confirmation_mode=getattr(cfg, "latent_precheck_confirmation_mode", "next_iter"),
                     )
                     recurrence_debug = getattr(getattr(action_head, "model", None), "last_recurrence_debug", None)
                     action_head_inference_metadata = (

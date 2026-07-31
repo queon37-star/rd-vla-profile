@@ -63,3 +63,64 @@ def test_origin_aware_mode_fails_closed_until_scheduler_is_implemented():
 def test_unknown_precheck_settings_are_rejected(mode, trace_level, message):
     with pytest.raises(ValueError, match=message):
         validate_latent_precheck_configuration(mode, trace_level, False)
+
+
+def _validate_origin_aware(*, use_latent_precheck=True, **overrides):
+    scheduler = {
+        "origin_aware_implemented": True,
+        "warm_threshold": 0.1,
+        "max_skip_iters": 2,
+        "confirmation_mode": "next_iter",
+        "warm_start_source": "midpoint",
+        "recurrence_strategy": "kl_divergence",
+        "use_warm_start": True,
+        "min_iter": 2,
+    }
+    scheduler.update(overrides)
+    return validate_latent_precheck_configuration(
+        "origin_aware",
+        "full",
+        use_latent_precheck,
+        **scheduler,
+    )
+
+
+@pytest.mark.parametrize("strategy", ["kl_divergence", "adjacent_action_mse"])
+@pytest.mark.parametrize("confirmation_mode", ["next_iter", "backfill_pair"])
+def test_origin_aware_configuration_accepts_frozen_scheduler_contract(
+    strategy, confirmation_mode
+):
+    assert (
+        _validate_origin_aware(
+            recurrence_strategy=strategy,
+            confirmation_mode=confirmation_mode,
+        )
+        == "origin_aware"
+    )
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"use_latent_precheck": False}, "requires use_latent_precheck=True"),
+        ({"use_warm_start": False}, "requires use_warm_start=True"),
+        ({"warm_start_source": "final"}, "requires warm_start_source='midpoint'"),
+        ({"warm_threshold": None}, "finite non-negative"),
+        ({"warm_threshold": float("nan")}, "finite non-negative"),
+        ({"warm_threshold": -0.1}, "finite non-negative"),
+        ({"warm_threshold": True}, "finite non-negative"),
+        ({"max_skip_iters": 0}, "integer >= 1"),
+        ({"max_skip_iters": True}, "integer >= 1"),
+        ({"confirmation_mode": "unknown"}, "Unsupported latent_precheck_confirmation_mode"),
+        ({"recurrence_strategy": "cosine_similarity"}, "requires recurrence_strategy"),
+        ({"min_iter": 1}, "integer >= 2"),
+    ],
+)
+def test_origin_aware_configuration_rejects_invalid_scheduler_contract(overrides, message):
+    overrides = dict(overrides)
+    use_latent_precheck = overrides.pop("use_latent_precheck", True)
+    with pytest.raises(ValueError, match=message):
+        _validate_origin_aware(
+            use_latent_precheck=use_latent_precheck,
+            **overrides,
+        )

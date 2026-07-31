@@ -164,6 +164,9 @@ class GenerateConfig:
     latent_precheck_thresh: float = 0.12
     latent_precheck_min_iter: int = 2
     latent_precheck_force_interval: int = 0
+    latent_precheck_warm_thresh: Optional[float] = None
+    latent_precheck_max_skip_iters: int = 0
+    latent_precheck_confirmation_mode: str = "next_iter"
 
     # Fixed execution: always use first N actions
     num_exec_actions: int = 5
@@ -208,6 +211,14 @@ def validate_config(cfg: GenerateConfig) -> None:
         cfg.latent_precheck_mode,
         cfg.latent_precheck_trace_level,
         cfg.use_latent_precheck,
+        origin_aware_implemented=True,
+        warm_threshold=cfg.latent_precheck_warm_thresh,
+        max_skip_iters=cfg.latent_precheck_max_skip_iters,
+        confirmation_mode=cfg.latent_precheck_confirmation_mode,
+        warm_start_source=cfg.warm_start_source,
+        recurrence_strategy=cfg.recurrence_strategy,
+        use_warm_start=cfg.use_warm_start,
+        min_iter=cfg.latent_precheck_min_iter,
     )
     supported_warm_start_sources = {"s1", "midpoint", "final"}
     if cfg.warm_start_source not in supported_warm_start_sources:
@@ -484,6 +495,17 @@ def _build_timing_summary_record(timing_record, result):
         "latent_precheck_mode": recurrence_debug.get("latent_precheck_mode", "legacy"),
         "latent_precheck_trace_level_requested": recurrence_debug.get("latent_precheck_trace_level_requested", "off"),
         "latent_precheck_trace_collected": recurrence_debug.get("latent_precheck_trace_collected"),
+        "latent_precheck_origin": recurrence_debug.get("latent_precheck_origin"),
+        "latent_precheck_active_threshold": recurrence_debug.get("latent_precheck_active_threshold"),
+        "latent_precheck_max_skip_iters": recurrence_debug.get("latent_precheck_max_skip_iters"),
+        "latent_precheck_confirmation_mode": recurrence_debug.get("latent_precheck_confirmation_mode"),
+        "latent_precheck_call_count": recurrence_debug.get("latent_precheck_call_count"),
+        "coda_reason_counts": recurrence_debug.get("coda_reason_counts", {}),
+        "adjacent_comparison_pair_count": recurrence_debug.get("adjacent_comparison_pair_count"),
+        "final_state_coda_executed": recurrence_debug.get("final_state_coda_executed"),
+        "returned_cached_final_output": recurrence_debug.get("returned_cached_final_output"),
+        "max_iteration_convergence_evaluable": recurrence_debug.get("max_iteration_convergence_evaluable"),
+        "final_convergence_evaluable": recurrence_debug.get("final_convergence_evaluable"),
         "used_latent_precheck": bool(recurrence_debug.get("use_latent_precheck", False)),
         "used_coda_stop": bool(recurrence_debug.get("adaptive_stop", False)),
         "timings_ms": timings,
@@ -989,7 +1011,8 @@ def run_episode(
                 iteration_mse = debug.get("iteration_mse", debug.get("conv_score_list", []))
                 recurrent_iteration_count = _as_int(debug.get("K_t", actual_iters))
                 final_mse = debug.get("final_mse")
-                if final_mse is None and iteration_mse:
+                final_convergence_evaluable = debug.get("final_convergence_evaluable")
+                if final_mse is None and iteration_mse and final_convergence_evaluable is not False:
                     final_mse = iteration_mse[-1]
 
                 step_record = {
@@ -1018,6 +1041,7 @@ def run_episode(
                     "iteration_mse": iteration_mse,
                     "iteration_metric_values": debug.get("iteration_metric_values", iteration_mse),
                     "final_mse": _as_float(final_mse),
+                    "final_convergence_evaluable": final_convergence_evaluable,
                     "final_conv_score": debug.get("final_conv_score", final_kl),
                     "conv_score_list": debug.get("conv_score_list", []),
                     "action_delta_list": debug.get("action_delta_list", []),
@@ -1040,6 +1064,22 @@ def run_episode(
                     "latent_precheck_call_count": debug.get("latent_precheck_call_count", 0),
                     "latent_precheck_skip_ratio": debug.get("latent_precheck_skip_ratio", 0.0),
                     "latent_precheck_decisions": debug.get("latent_precheck_decisions", []),
+                    "latent_precheck_warm_thresh": debug.get("latent_precheck_warm_thresh"),
+                    "latent_precheck_cold_thresh": debug.get("latent_precheck_cold_thresh"),
+                    "latent_precheck_active_threshold": debug.get("latent_precheck_active_threshold"),
+                    "latent_precheck_origin": debug.get("latent_precheck_origin"),
+                    "latent_precheck_max_skip_iters": debug.get("latent_precheck_max_skip_iters"),
+                    "latent_precheck_confirmation_mode": debug.get("latent_precheck_confirmation_mode"),
+                    "latent_metric_count": debug.get("latent_metric_count"),
+                    "coda_reason_counts": debug.get("coda_reason_counts", {}),
+                    "coda_call_records": debug.get("coda_call_records", []),
+                    "adjacent_comparison_pairs": debug.get("adjacent_comparison_pairs", []),
+                    "adjacent_comparison_pair_count": debug.get("adjacent_comparison_pair_count", 0),
+                    "origin_aware_scheduler_state": debug.get("origin_aware_scheduler_state"),
+                    "final_state_coda_executed": debug.get("final_state_coda_executed"),
+                    "returned_cached_final_output": debug.get("returned_cached_final_output"),
+                    "cached_final_matches_returned": debug.get("cached_final_matches_returned"),
+                    "max_iteration_convergence_evaluable": debug.get("max_iteration_convergence_evaluable"),
                     "first_converged_k_1e_4": debug.get("first_converged_k_1e_4", None),
                     "first_converged_k_5e_4": debug.get("first_converged_k_5e_4", None),
                     "warm_start_enabled": warm_start_enabled,
