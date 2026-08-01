@@ -1,0 +1,117 @@
+{
+  "schema_version": 1,
+  "name": "origin-aware-gpu-microbenchmark-seed7-result-v1",
+  "status": "rejected_retain_clean_midpoint_warm_only",
+  "source": {
+    "formal_report": "benchmark_results/origin_aware_gpu_microbenchmark/20260801_seed7_b9523c8/report.json",
+    "formal_report_sha256": "a1b11106db3cf16607e4c331cc317a532e894a91216acc43d30947b9ee39e4b3",
+    "code_git_commit": "b9523c84aa197ca9b62bc1985bc41e2bf87e4e7b",
+    "protocol_manifest_sha256": "e3fa4609f93d5a7bdadf27701f8ba8eda9a6f1b9df0b07603246b593e3eb23e4",
+    "shortlist_manifest_sha256": "29bbe209472d402a1214e404b401cd480f0ea7a882c2d57032e7e2c6f2983ba6"
+  },
+  "environment": {
+    "device": "cuda:0",
+    "device_name": "NVIDIA GeForce RTX 4070 Ti",
+    "device_total_memory": 12878086144,
+    "torch_version": "2.2.0+cu121",
+    "cuda_runtime_version": "12.1",
+    "cudnn_deterministic": true,
+    "cudnn_benchmark": false
+  },
+  "workloads": {
+    "total": 200,
+    "actual_warm": 100,
+    "cold": 100,
+    "conditions": 7,
+    "measurement_repeats": 5,
+    "measurement_count": 7000,
+    "schedule_mismatch_count": 0
+  },
+  "primary": {
+    "scope": "actual_warm",
+    "clean_warm_only_latency_ms": 15.522496649999997,
+    "minimum_improvement_gate": 0.05,
+    "simultaneous_one_sided_confidence": 0.95,
+    "candidates": [
+      {
+        "rank": 1,
+        "warm_threshold": 0.075,
+        "max_skip_iters": 3,
+        "confirmation_mode": "next_iter",
+        "latency_ms": 19.297759149999997,
+        "improvement_vs_baseline": -0.24321232499670087,
+        "simultaneous_one_sided_lower_bound": -0.28327184492774915,
+        "promotion_gate_passed": false
+      },
+      {
+        "rank": 2,
+        "warm_threshold": 0.075,
+        "max_skip_iters": 2,
+        "confirmation_mode": "next_iter",
+        "latency_ms": 19.26085602,
+        "improvement_vs_baseline": -0.24083492844561194,
+        "simultaneous_one_sided_lower_bound": -0.2808944483766602,
+        "promotion_gate_passed": false
+      },
+      {
+        "rank": 3,
+        "warm_threshold": 0.08,
+        "max_skip_iters": 3,
+        "confirmation_mode": "next_iter",
+        "latency_ms": 18.797201010000002,
+        "improvement_vs_baseline": -0.21096505503191754,
+        "simultaneous_one_sided_lower_bound": -0.2510245749629658,
+        "promotion_gate_passed": false
+      },
+      {
+        "rank": 4,
+        "warm_threshold": 0.08,
+        "max_skip_iters": 2,
+        "confirmation_mode": "next_iter",
+        "latency_ms": 18.852385239999997,
+        "improvement_vs_baseline": -0.21452016805556862,
+        "simultaneous_one_sided_lower_bound": -0.2545796879866169,
+        "promotion_gate_passed": false
+      },
+      {
+        "rank": 5,
+        "warm_threshold": 0.075,
+        "max_skip_iters": 1,
+        "confirmation_mode": "next_iter",
+        "latency_ms": 19.28003809,
+        "improvement_vs_baseline": -0.24207068777173846,
+        "simultaneous_one_sided_lower_bound": -0.28213020770278674,
+        "promotion_gate_passed": false
+      },
+      {
+        "rank": 6,
+        "warm_threshold": 0.08,
+        "max_skip_iters": 1,
+        "confirmation_mode": "next_iter",
+        "latency_ms": 18.67894966,
+        "improvement_vs_baseline": -0.20334699250845079,
+        "simultaneous_one_sided_lower_bound": -0.24340651243949907,
+        "promotion_gate_passed": false
+      }
+    ]
+  },
+  "supplementary": {
+    "all_sampled_clean_latency_ms": 19.83031274,
+    "all_sampled_candidate_improvement_range": [
+      -0.12004756058123567,
+      -0.07774822113067681
+    ],
+    "cold_clean_latency_ms": 24.138128830000003,
+    "cold_candidate_improvement_range": [
+      -0.04157819800649376,
+      0.010205658928037153
+    ]
+  },
+  "decision": {
+    "online_screening_allowed": false,
+    "screening_candidates": [],
+    "selected_policy": "clean_midpoint_warm_only",
+    "reason": "All six origin-aware candidates increased primary actual-warm action-head latency, and every simultaneous lower bound was below the 5% promotion gate.",
+    "next_engineering_target": "Eliminate per-iteration host synchronization and redundant finite checks before reconsidering an origin-aware gate."
+  }
+}

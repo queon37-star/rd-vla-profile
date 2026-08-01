@@ -54,3 +54,17 @@ The runner refuses to overwrite an existing report and records the code
 commit, protocol and shortlist hashes, source OOF/calibration hashes,
 checkpoint hashes, GPU environment, raw synchronized measurements, schedule
 mismatches, and promotion decision.
+
+## Seed-7 formal result
+
+The RTX 4070 Ti formal run measured 200 workloads, seven conditions, and five
+repeats (7,000 synchronized calls) with zero schedule mismatches. Clean
+midpoint warm-only took 15.5225 ms on the primary actual-warm scope. Every
+origin-aware candidate was slower: the least-slow candidate took 18.6789 ms,
+or 20.33% longer, and its simultaneous lower bound was -24.34%. No candidate
+passes the required +5% bound, so online screening is disabled and clean
+midpoint warm-only remains selected.
+
+The result indicates that fewer Coda calls do not compensate for the current
+per-iteration host synchronization and finite-check overhead. Further work
+should target that overhead before testing another scheduler threshold.

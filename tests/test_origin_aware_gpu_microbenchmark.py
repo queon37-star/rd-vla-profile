@@ -10,6 +10,7 @@ from scripts.origin_aware_gpu_microbenchmark_lib import (
     balanced_condition_order,
     build_benchmark_summary,
     conditions_from_shortlist,
+    sha256_file,
     load_json_object,
     validate_protocol_manifest,
 )
@@ -138,3 +139,38 @@ def test_missing_repeat_is_rejected():
             required_task_ids=(0, 1),
             episodes_per_task=2,
         )
+
+
+def test_committed_formal_result_rejects_all_candidates_with_zero_mismatches():
+    result_path = (
+        REPO_ROOT
+        / "experiments/robot/libero/manifests/origin_aware_gpu_microbenchmark_seed7_result_v1.json"
+    )
+    result = load_json_object(result_path)
+    protocol_path = (
+        REPO_ROOT
+        / "experiments/robot/libero/manifests/origin_aware_gpu_microbenchmark_v1.json"
+    )
+
+    assert result["status"] == "rejected_retain_clean_midpoint_warm_only"
+    assert result["source"]["formal_report"].endswith(
+        "/20260801_seed7_b9523c8/report.json"
+    )
+    assert len(result["source"]["formal_report_sha256"]) == 64
+    assert result["source"]["protocol_manifest_sha256"] == sha256_file(
+        protocol_path
+    )
+    assert result["source"]["shortlist_manifest_sha256"] == sha256_file(
+        SHORTLIST_PATH
+    )
+    assert result["workloads"]["measurement_count"] == 7000
+    assert result["workloads"]["schedule_mismatch_count"] == 0
+
+    candidates = result["primary"]["candidates"]
+    assert len(candidates) == 6
+    assert all(candidate["improvement_vs_baseline"] < 0 for candidate in candidates)
+    assert all(
+        candidate["simultaneous_one_sided_lower_bound"] < 0
+        for candidate in candidates
+    )
+    assert not any(candidate["promotion_gate_passed"] for candidate in candidates)
