@@ -6,6 +6,12 @@ RD-VLA introduces a weight-tied recurrent transformer core that performs iterati
 
 **Paper:** [arXiv:2602.07845](https://arxiv.org/abs/2602.07845)
 
+## Research Handoff
+
+For the full motivation, implementation history, formal measurements, rejected alternatives, and reproduction notes for the Coda pre-check work, see [Coda Pre-check 연구 인수인계](docs/coda_precheck_handoff.md).
+
+The retained policy is **clean midpoint warm-start with cached final output**. The origin-aware latent pre-check and learned scalar convergence probe are preserved as fail-closed negative results and are not integrated into the online inference path.
+
 ## Results
 
 ### LIBERO Benchmark
