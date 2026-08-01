@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "name": "origin-aware-saved-workload-gpu-schedule-microbenchmark-v1",
+  "scope": "baseline-conditioned action-head schedule replay; no environment or VLM inference",
+  "device": "cuda:0",
+  "seed": 20260801,
+  "warmup_rounds_per_origin": 2,
+  "measurement_repeats": 5,
+  "condition_order": "deterministic balanced cyclic complete blocks with alternating direction",
+  "timer": {
+    "kind": "cpu_wall_clock_outer_cuda_sync",
+    "start": "after workload tensors are resident on GPU and immediately after torch.cuda.synchronize",
+    "stop": "after predict_action returns and torch.cuda.synchronize completes",
+    "included": [
+      "proprio projector",
+      "action-query materialization",
+      "prelude",
+      "recurrent refinement",
+      "latent gate and host synchronization",
+      "Coda decode and backfill",
+      "adjacent action-MSE and host synchronization",
+      "cached-final return path"
+    ],
+    "excluded": [
+      "workload deserialization",
+      "CPU-to-GPU tensor transfer",
+      "VLM inference",
+      "environment stepping",
+      "post-timing validation and logging"
+    ]
+  },
+  "cold_replay": {
+    "policy": "run production cold initialization for cost, then replace its value with the captured selected initial state",
+    "primary_scope": false,
+    "reason": "preserve the captured cold trajectory while retaining equal production initialization cost in every arm"
+  },
+  "aggregation": {
+    "within_workload": "median over measurement repeats",
+    "within_episode": "mean over eligible sampled predictions",
+    "within_task": "mean over ten paired episodes",
+    "across_tasks": "equal-weight macro mean over the fixed ten tasks",
+    "primary_scope": "actual_warm",
+    "supplementary_scopes": ["all_sampled", "cold"]
+  },
+  "bootstrap": {
+    "draws": 20000,
+    "seed": 20260801,
+    "alpha": 0.05,
+    "resampling": "paired episodes within each fixed task",
+    "simultaneous_method": "centered max downward error across the frozen six candidates"
+  },
+  "promotion": {
+    "minimum_primary_action_head_improvement": 0.05,
+    "require_simultaneous_one_sided_lower_bound": true,
+    "maximum_screening_candidates": 2,
+    "require_zero_schedule_mismatches": true,
+    "interpretation": "Only candidates passing the measured simultaneous bound may enter online screening; this benchmark does not establish closed-loop performance."
+  }
+}
