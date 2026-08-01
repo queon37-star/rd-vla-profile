@@ -1,0 +1,88 @@
+{
+  "schema_version": 1,
+  "name": "origin-aware-oof-cost-sensitivity-v1",
+  "scope": "baseline-conditioned offline pruning only",
+  "planning_anchors": {
+    "recurrent_ms": 3.56,
+    "decode_ms": 1.83,
+    "source": "Values frozen in the final design review; they are planning anchors, not current-commit deployment measurements."
+  },
+  "action_compare_anchor": {
+    "median_ms": 0.166327999977511,
+    "steady_prediction_min_index": 2,
+    "sample_count": 4221,
+    "source_glob": "benchmark_results/latent_precheck_bench_profile/task*_cached_baseline/convergence/*predictions.jsonl",
+    "aggregation": "median of convergence_check_ms_list values from prediction_step >= 2"
+  },
+  "scenarios": [
+    {
+      "id": "primary_candidate_favorable",
+      "primary": true,
+      "candidate_favorable": true,
+      "description": "Uses frozen recurrent/decode anchors and the observed median comparison cost while setting candidate-only gate and finite-check costs to zero.",
+      "cost_model": {
+        "recurrent_ms": 3.56,
+        "decode_ms": 1.83,
+        "latent_gate_ms": 0.0,
+        "action_compare_ms": 0.166327999977511,
+        "finite_check_ms": 0.0
+      }
+    },
+    {
+      "id": "zero_control_overhead",
+      "primary": false,
+      "candidate_favorable": false,
+      "description": "Mechanism-only sensitivity with every control-flow operation set to zero.",
+      "cost_model": {
+        "recurrent_ms": 3.56,
+        "decode_ms": 1.83,
+        "latent_gate_ms": 0.0,
+        "action_compare_ms": 0.0,
+        "finite_check_ms": 0.0
+      }
+    },
+    {
+      "id": "high_compare_candidate_favorable",
+      "primary": false,
+      "candidate_favorable": true,
+      "description": "Stress test favorable to the candidate: comparison costs 0.5 ms while gate and finite checks remain free.",
+      "cost_model": {
+        "recurrent_ms": 3.56,
+        "decode_ms": 1.83,
+        "latent_gate_ms": 0.0,
+        "action_compare_ms": 0.5,
+        "finite_check_ms": 0.0
+      }
+    },
+    {
+      "id": "low_candidate_overhead",
+      "primary": false,
+      "candidate_favorable": false,
+      "description": "Low nonzero gate and finite-check sensitivity using the observed median comparison cost.",
+      "cost_model": {
+        "recurrent_ms": 3.56,
+        "decode_ms": 1.83,
+        "latent_gate_ms": 0.1,
+        "action_compare_ms": 0.166327999977511,
+        "finite_check_ms": 0.05
+      }
+    },
+    {
+      "id": "medium_candidate_overhead",
+      "primary": false,
+      "candidate_favorable": false,
+      "description": "Moderate synchronization sensitivity; this is diagnostic rather than a measured cost model.",
+      "cost_model": {
+        "recurrent_ms": 3.56,
+        "decode_ms": 1.83,
+        "latent_gate_ms": 0.3,
+        "action_compare_ms": 0.2,
+        "finite_check_ms": 0.1
+      }
+    }
+  ],
+  "promotion_gate": {
+    "min_action_head_improvement": 0.05,
+    "interpretation": "A linear replay estimate cannot promote a candidate online; an actual GPU schedule microbenchmark must still demonstrate at least this reduction."
+  }
+}
