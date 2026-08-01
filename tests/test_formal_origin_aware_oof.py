@@ -183,7 +183,7 @@ def test_committed_shortlist_is_distinct_and_not_online_promoted():
     assert shortlist["linear_model_5pct_gate_met"] is False
     assert shortlist["tested_candidate_favorable_best_improvement"] < 0.05
     assert shortlist["source"]["formal_report"].endswith(
-        "/20260801_seed7_d3e9dee/report.json"
+        "/20260801_seed7_e93dbb2/report.json"
     )
 
     candidates = shortlist["candidates"]
