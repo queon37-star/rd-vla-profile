@@ -508,3 +508,36 @@ def test_offline_replay_matches_online_scheduler(warm_threshold, max_skip, confi
         offline.max_iteration_convergence_evaluable
         == online["max_iteration_convergence_evaluable"]
     )
+
+
+def test_parser_prefers_native_production_mse_over_fp32_shadow_diagnostic():
+    record = _shadow_record(
+        baseline_k=3,
+        max_iter=5,
+        latent_mse=[1.0, 1.0, 0.05, 0.02, 0.01],
+        action_mse=[None, 0.002876, 0.001002643, 0.0008, 0.0004],
+    )
+    record["action_mse_threshold"] = 0.001
+    record["iteration_mse"] = [0.00286865234375, 0.00099945068359375]
+    record["action_delta_list"] = [0.40127062797546387, 0.23695529997348785]
+
+    prediction = parse_shadow_prediction(record)
+    assert prediction.trace[2].action_mse == 0.00099945068359375
+    assert prediction.trace[3].action_mse == 0.0008
+
+    result = replay_prediction(
+        prediction,
+        SchedulerConfig(
+            warm_threshold=0.08,
+            max_skip_iters=3,
+            confirmation_mode="next_iter",
+        ),
+    )
+    assert result.terminal_k == 3
+    assert result.decode_calls == 3
+    assert result.latent_gate_calls == 1
+    assert result.action_comparisons == 2
+
+
+def test_parser_rejects_incomplete_production_metric_list():
+    record = _shadow_record(baseline_k=3, max_iter=5)

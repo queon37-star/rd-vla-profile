@@ -19,6 +19,13 @@ quantile is fit on the four training folds and replayed only on the held-out
 fold. All safety metrics and latency ranks are formed from the concatenated OOF
 validation predictions, with episode then task macro aggregation.
 
+The production prefix uses the recorded native-dtype `iteration_mse` values
+that actually controlled clean-baseline stopping. Shadow diagnostics recompute
+action deltas in FP32, so a threshold-boundary value can differ slightly from
+the BF16 control-flow value. FP32 shadow action-MSE remains the only available
+metric for iterations after the baseline stopped and is therefore treated as a
+diagnostic-tail approximation until the exact GPU replay stage.
+
 Safety constraints are applied before latency ranking:
 
 - adjacent convergence capture at least 99.5%;

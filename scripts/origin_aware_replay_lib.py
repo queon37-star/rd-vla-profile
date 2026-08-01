@@ -192,6 +192,20 @@ def _positive_int(value: Any, field: str, *, minimum: int = 1) -> int:
     return int(value)
 
 
+def _optional_metric_list(record: Mapping[str, Any], field: str, expected: int):
+    value = record.get(field)
+    if value is None:
+        return None
+    if not isinstance(value, list) or len(value) != expected:
+        raise ShadowTraceValidationError(
+            f"{field} must contain {expected} production control-flow values"
+        )
+    return tuple(
+        _finite_float(item, f"{field}[{index}]")
+        for index, item in enumerate(value)
+    )
+
+
 def parse_shadow_prediction(record: Mapping[str, Any]) -> ShadowPrediction:
     """Validate and normalize one runner step record for exact replay."""
     protocol_phase = record.get("evaluation_protocol_phase")
@@ -239,6 +253,16 @@ def parse_shadow_prediction(record: Mapping[str, Any]) -> ShadowPrediction:
         record.get("latent_precheck_min_iter", 2), "latent_precheck_min_iter"
     )
 
+    # Production stopping compares the native output dtype, while shadow
+    # diagnostics recompute deltas in FP32. Prefer authoritative control-flow
+    # values on the production prefix; use FP32 only for the diagnostic tail.
+    production_action_mse = _optional_metric_list(
+        record, "iteration_mse", max(0, baseline_k - 1)
+    )
+    production_action_l2 = _optional_metric_list(
+        record, "action_delta_list", max(0, baseline_k - 1)
+    )
+
     trace = []
     for expected_k, point in enumerate(raw_trace, start=1):
         if not isinstance(point, Mapping):
@@ -262,11 +286,21 @@ def parse_shadow_prediction(record: Mapping[str, Any]) -> ShadowPrediction:
                 raise ShadowTraceValidationError("iteration 1 cannot have an adjacent action metric")
             action_mse = action_l2 = None
         else:
-            action_mse = _finite_float(
+            shadow_action_mse = _finite_float(
                 point.get("action_mse"), f"shadow_trace[{k}].action_mse"
             )
-            action_l2 = _finite_float(
+            shadow_action_l2 = _finite_float(
                 point.get("action_l2"), f"shadow_trace[{k}].action_l2"
+            )
+            action_mse = (
+                production_action_mse[k - 2]
+                if k <= baseline_k and production_action_mse is not None
+                else shadow_action_mse
+            )
+            action_l2 = (
+                production_action_l2[k - 2]
+                if k <= baseline_k and production_action_l2 is not None
+                else shadow_action_l2
             )
             if action_mse < 0 or action_l2 < 0:
                 raise ShadowTraceValidationError(
