@@ -1,4 +1,7 @@
+import hashlib
+import json
 import math
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -161,3 +164,34 @@ def test_tiny_mlp_respects_size_limit_and_is_deterministic():
     assert first["hidden_width"] <= 16
     assert first["affine_layer_count"] == 2
     assert first["parameter_count"] == len(FEATURE_NAMES) * 16 + 16 + 16 + 1
+
+
+def test_frozen_model_artifact_and_fold_normalization_are_unchanged():
+    repo_root = Path(__file__).resolve().parents[1]
+    artifact_path = (
+        repo_root
+        / "experiments/robot/libero/manifests/learned_convergence_probe_seed7_model_v1.json"
+    )
+    payload = artifact_path.read_bytes()
+    assert hashlib.sha256(payload).hexdigest() == (
+        "2cd710fde8d088955dad85f55563cfb24f7d7bdfbfa55623968d0d999173f0c5"
+    )
+
+    artifact = json.loads(payload)
+    models = artifact["oof_models_thresholds_and_normalization"]
+    assert set(models) == {
+        "latent_mse_threshold",
+        "logistic_regression",
+        "class_weighted_logistic_regression",
+        "tiny_mlp",
+    }
+    for model_name, model in models.items():
+        assert len(model["folds"]) == 5
+        for fold in model["folds"]:
+            normalization = fold["normalization"]
+            if model_name == "latent_mse_threshold":
+                assert normalization is None
+                continue
+            assert normalization is not None
+            assert len(normalization["mean"]) == len(FEATURE_NAMES)
+            assert len(normalization["scale"]) == len(FEATURE_NAMES)

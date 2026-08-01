@@ -27,6 +27,9 @@ SCHEMA_VERSION = 1
 LABEL_THRESHOLD = 0.001
 CAPTURE_TARGET = 0.995
 ORIGIN_AWARE_DECODE_REDUCTION = 0.102
+LEGACY_POLICY = "legacy_cached_action_precheck"
+FINAL_ONLY_POLICY = "final_only_coda"
+EVALUATION_POLICIES = (LEGACY_POLICY, FINAL_ONLY_POLICY)
 TARGET_DECODE_REDUCTION = 0.20
 MODEL_NAMES = (
     "latent_mse_threshold",
@@ -434,8 +437,12 @@ def _attach_scores(records: Sequence[Mapping[str, Any]], scores: np.ndarray) -> 
 
 
 def replay_scored_records(
-    records: Sequence[Mapping[str, Any]], threshold: float
+    records: Sequence[Mapping[str, Any]],
+    threshold: float,
+    *,
+    policy: str = LEGACY_POLICY,
 ) -> list[Dict[str, Any]]:
+    _require(policy in EVALUATION_POLICIES, f"unsupported evaluation policy: {policy}")
     replays = []
     for record in records:
         selected = None
@@ -445,18 +452,25 @@ def replay_scored_records(
                 break
         if selected is None:
             terminal_k = int(record["max_iter"])
-            decode_calls = terminal_k
             stopped = False
             false_convergence = False
             true_stop = False
         else:
             terminal_k = int(selected["k"])
-            # The probe predicts the unavailable current adjacent-action result and
-            # returns the previously cached action, so the current Coda decode is omitted.
-            decode_calls = terminal_k - 1
             stopped = True
             true_stop = bool(selected["label"])
             false_convergence = not true_stop
+        recurrent_calls = terminal_k
+        probe_calls = terminal_k - 1
+        if policy == FINAL_ONLY_POLICY:
+            coda_decode_calls = 1
+            final_action_source = f"Coda(S_{terminal_k})"
+        elif stopped:
+            coda_decode_calls = terminal_k - 1
+            final_action_source = f"Coda(S_{terminal_k - 1}) cached before positive probe"
+        else:
+            coda_decode_calls = terminal_k
+            final_action_source = f"Coda(S_{terminal_k})"
         reference = next(
             (int(item["k"]) for item in record["transitions"] if item["label"]), None
         )
@@ -470,8 +484,13 @@ def replay_scored_records(
                 "baseline_k": int(record["baseline_k"]),
                 "baseline_decode_calls": int(record["baseline_decode_calls"]),
                 "max_iter": int(record["max_iter"]),
+                "evaluation_policy": policy,
                 "terminal_k": terminal_k,
-                "decode_calls": decode_calls,
+                "recurrent_calls": recurrent_calls,
+                "probe_calls": probe_calls,
+                "coda_decode_calls": coda_decode_calls,
+                "decode_calls": coda_decode_calls,
+                "final_action_source": final_action_source,
                 "stopped": stopped,
                 "true_stop": true_stop,
                 "false_convergence": false_convergence,
@@ -497,8 +516,11 @@ def _aggregate_replays_flat(replays: Sequence[Mapping[str, Any]]) -> Dict[str, A
     tp = sum(item["true_stop"] for item in replays)
     fp = sum(item["false_convergence"] for item in replays)
     fn = sum(not item["captured_convergence"] for item in eligible)
-    baseline_calls = sum(item["baseline_decode_calls"] for item in replays)
-    candidate_calls = sum(item["decode_calls"] for item in replays)
+    baseline_recurrent_calls = sum(item["baseline_k"] for item in replays)
+    candidate_recurrent_calls = sum(item["recurrent_calls"] for item in replays)
+    probe_calls = sum(item["probe_calls"] for item in replays)
+    baseline_coda_calls = sum(item["baseline_decode_calls"] for item in replays)
+    candidate_coda_calls = sum(item["coda_decode_calls"] for item in replays)
     baseline_max = _mean([item["baseline_k"] == item["max_iter"] for item in replays])
     candidate_max = _mean([item["terminal_k"] == item["max_iter"] for item in replays])
     return {
@@ -515,9 +537,24 @@ def _aggregate_replays_flat(replays: Sequence[Mapping[str, Any]]) -> Dict[str, A
         "baseline_max_iter_rate": baseline_max,
         "candidate_max_iter_rate": candidate_max,
         "max_iter_rate_delta": candidate_max - baseline_max,
-        "baseline_decode_calls": baseline_calls,
-        "candidate_decode_calls": candidate_calls,
-        "relative_decode_call_reduction": (baseline_calls - candidate_calls) / baseline_calls,
+        "baseline_recurrent_calls": baseline_recurrent_calls,
+        "candidate_recurrent_calls": candidate_recurrent_calls,
+        "probe_calls": probe_calls,
+        "mean_baseline_recurrent_calls": baseline_recurrent_calls / len(replays),
+        "mean_candidate_recurrent_calls": candidate_recurrent_calls / len(replays),
+        "mean_probe_calls": probe_calls / len(replays),
+        "baseline_coda_decode_calls": baseline_coda_calls,
+        "candidate_coda_decode_calls": candidate_coda_calls,
+        "mean_baseline_coda_decode_calls": baseline_coda_calls / len(replays),
+        "mean_candidate_coda_decode_calls": candidate_coda_calls / len(replays),
+        "relative_coda_decode_call_reduction": (
+            baseline_coda_calls - candidate_coda_calls
+        ) / baseline_coda_calls,
+        "baseline_decode_calls": baseline_coda_calls,
+        "candidate_decode_calls": candidate_coda_calls,
+        "relative_decode_call_reduction": (
+            baseline_coda_calls - candidate_coda_calls
+        ) / baseline_coda_calls,
     }
 
 
@@ -538,6 +575,12 @@ def aggregate_scheduler_metrics(replays: Sequence[Mapping[str, Any]]) -> Dict[st
         "baseline_max_iter_rate",
         "candidate_max_iter_rate",
         "max_iter_rate_delta",
+        "mean_baseline_recurrent_calls",
+        "mean_candidate_recurrent_calls",
+        "mean_probe_calls",
+        "mean_baseline_coda_decode_calls",
+        "mean_candidate_coda_decode_calls",
+        "relative_coda_decode_call_reduction",
         "relative_decode_call_reduction",
     )
     result = _aggregate_replays_flat(replays)
@@ -554,8 +597,17 @@ def aggregate_scheduler_metrics(replays: Sequence[Mapping[str, Any]]) -> Dict[st
         )
     )
     result["task_metrics"] = task_metrics
+    capture_tasks = [
+        task
+        for task, metrics in task_metrics.items()
+        if metrics["convergence_capture"] is not None
+    ]
     result["worst_task"] = {
-        "convergence_capture": min(task_metrics, key=lambda task: task_metrics[task]["convergence_capture"]),
+        "convergence_capture": (
+            min(capture_tasks, key=lambda task: task_metrics[task]["convergence_capture"])
+            if capture_tasks
+            else None
+        ),
         "false_convergence_count": max(task_metrics, key=lambda task: task_metrics[task]["false_convergence_count"]),
         "p95_delta_k": max(task_metrics, key=lambda task: task_metrics[task]["p95_delta_k"]),
         "decode_call_reduction": min(task_metrics, key=lambda task: task_metrics[task]["relative_decode_call_reduction"]),
@@ -783,7 +835,7 @@ def _reliability(scored_records: Sequence[Mapping[str, Any]], model_name: str) -
     return {"available": True, "expected_calibration_error": ece, "bins": bins}
 
 
-def evaluate_oof_bundle(
+def evaluate_oof_bundle_legacy_v1(
     records: Sequence[Mapping[str, Any]],
     assignment: Mapping[str, int],
     bundle: Mapping[str, Any],
@@ -861,7 +913,7 @@ def evaluate_oof_bundle(
     }
 
 
-def compact_result_manifest(
+def compact_result_manifest_v1(
     evaluation: Mapping[str, Any],
     dataset_manifest: Mapping[str, Any],
     training_bundle: Mapping[str, Any],
@@ -929,4 +981,381 @@ def compact_result_manifest(
         "selected_model": evaluation["selected_model"],
         "online_integration_worth_investigating": evaluation["online_integration_worth_investigating"],
         "conclusion": evaluation["conclusion"],
+    }
+
+
+def _task_macro_replay_mean(replays: Sequence[Mapping[str, Any]], value_fn) -> float:
+    by_task: Dict[str, list[float]] = {}
+    for replay in replays:
+        by_task.setdefault(str(replay["task_id"]), []).append(float(value_fn(replay)))
+    return float(np.mean([np.mean(values) for values in by_task.values()]))
+
+
+def _cost_estimates(
+    replays: Sequence[Mapping[str, Any]],
+    model_complexity: Mapping[str, Any],
+    cost_anchors: Mapping[str, Any],
+) -> Dict[str, Any]:
+    recurrent_ms = float(cost_anchors["recurrent_ms"])
+    coda_ms = float(cost_anchors["coda_ms"])
+    baseline_compare_ms = float(cost_anchors["baseline_action_compare_ms"])
+    for name, value in (
+        ("recurrent_ms", recurrent_ms),
+        ("coda_ms", coda_ms),
+        ("baseline_action_compare_ms", baseline_compare_ms),
+    ):
+        _require(math.isfinite(value) and value >= 0.0, f"invalid cost anchor: {name}")
+
+    baseline_mechanism_ms = _task_macro_replay_mean(
+        replays,
+        lambda item: item["baseline_k"] * (recurrent_ms + coda_ms),
+    )
+    candidate_mechanism_ms = _task_macro_replay_mean(
+        replays,
+        lambda item: (
+            item["recurrent_calls"] * recurrent_ms
+            + item["coda_decode_calls"] * coda_ms
+        ),
+    )
+    mechanism_reduction = (
+        baseline_mechanism_ms - candidate_mechanism_ms
+    ) / baseline_mechanism_ms
+
+    baseline_known_ms = _task_macro_replay_mean(
+        replays,
+        lambda item: (
+            item["baseline_k"] * (recurrent_ms + coda_ms)
+            + max(0, item["baseline_k"] - 1) * baseline_compare_ms
+        ),
+    )
+    candidate_known_floor_ms = candidate_mechanism_ms
+    mean_probe_calls = _task_macro_replay_mean(replays, lambda item: item["probe_calls"])
+    mean_probe_flops = mean_probe_calls * float(model_complexity["approximate_flops"])
+    known_headroom_ms = baseline_known_ms - candidate_known_floor_ms
+    return {
+        "anchors": dict(cost_anchors),
+        "mechanism_only": {
+            "assumptions": "Probe latency, feature/control overhead, and synchronization cost are zero.",
+            "baseline_task_macro_mean_ms": baseline_mechanism_ms,
+            "candidate_task_macro_mean_ms": candidate_mechanism_ms,
+            "relative_latency_reduction": mechanism_reduction,
+        },
+        "conservative": {
+            "status": "incomplete_unmeasured_probe_and_synchronization_latency",
+            "baseline_known_task_macro_mean_ms": baseline_known_ms,
+            "candidate_known_cost_floor_task_macro_mean_ms": candidate_known_floor_ms,
+            "known_cost_headroom_ms_per_prediction": known_headroom_ms,
+            "max_unmeasured_overhead_ms_per_probe_call_to_break_even": (
+                known_headroom_ms / mean_probe_calls if mean_probe_calls > 0 else None
+            ),
+            "mean_probe_calls": mean_probe_calls,
+            "mean_approximate_probe_flops": mean_probe_flops,
+            "probe_parameter_count": model_complexity["parameter_count"],
+            "probe_latency_ms": None,
+            "gpu_cpu_synchronization_latency_ms": None,
+            "total_candidate_latency_ms": None,
+            "relative_latency_reduction": None,
+            "limitation": (
+                "FLOPs are recorded as operation count only and are not converted "
+                "to latency. A synchronized implementation measurement is required."
+            ),
+        },
+    }
+
+
+def _safety_gate(primary: Mapping[str, Any]) -> Dict[str, bool]:
+    return {
+        "false_convergence_zero": primary["false_convergence_count"] == 0,
+        "task_macro_convergence_capture_at_least_99_5pct": (
+            primary["task_macro_convergence_capture"] >= CAPTURE_TARGET
+        ),
+        "mean_delta_k_at_most_0_25": primary["task_macro_mean_delta_k"] <= 0.25,
+        "task_macro_p95_delta_k_at_most_1": primary["task_macro_p95_delta_k"] <= 1.0,
+        "no_max_iteration_rate_increase": primary["task_macro_max_iter_rate_delta"] <= 0.0,
+        "all_tasks_finite_and_evaluable": primary["all_tasks_finite_and_evaluable"],
+    }
+
+
+def _policy_decision(safety_passed: bool, efficiency_promising: bool) -> str:
+    if not safety_passed:
+        return (
+            "safety_failed_efficiency_promising"
+            if efficiency_promising
+            else "safety_failed_efficiency_also_unfavorable"
+        )
+    return (
+        "safety_and_efficiency_passed_online_integration_worth_investigating"
+        if efficiency_promising
+        else "safety_passed_but_efficiency_unfavorable"
+    )
+
+
+def evaluate_oof_bundle(
+    records: Sequence[Mapping[str, Any]],
+    assignment: Mapping[str, int],
+    bundle: Mapping[str, Any],
+    *,
+    cost_anchors: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """Evaluate unchanged OOF probes under legacy and intended final-only Coda policies."""
+
+    policy_reports = {
+        LEGACY_POLICY: {"role": "diagnostic_parent_policy_reproduction", "models": {}},
+        FINAL_ONLY_POLICY: {"role": "primary_intended_learned_probe_policy", "models": {}},
+    }
+    safety_fields = (
+        "false_convergence_count",
+        "false_convergence_rate",
+        "task_macro_convergence_capture",
+        "precision",
+        "recall",
+        "mean_terminal_k",
+        "task_macro_mean_delta_k",
+        "task_macro_p95_delta_k",
+        "task_macro_max_iter_rate_delta",
+    )
+    safety_invariance = {}
+    for model_name in bundle["model_order"]:
+        model_bundle = bundle["models"][model_name]
+        scored = _oof_scored_records(records, assignment, model_name, model_bundle)
+        complexity = {
+            "fold_parameter_counts": [fold["model"]["parameter_count"] for fold in model_bundle["folds"]],
+            "parameter_count": model_bundle["folds"][0]["model"]["parameter_count"],
+            "approximate_macs": model_bundle["folds"][0]["model"]["approximate_macs"],
+            "approximate_flops": model_bundle["folds"][0]["model"]["approximate_flops"],
+        }
+        reliability = _reliability(scored, model_name)
+        model_policy_metrics = {}
+        for policy in EVALUATION_POLICIES:
+            replays = []
+            for record in scored:
+                replays.extend(
+                    replay_scored_records(
+                        [record], record["decision_threshold"], policy=policy
+                    )
+                )
+            primary_replays = [item for item in replays if item["actual_origin"] == "ACTUAL_WARM"]
+            cold_replays = [item for item in replays if item["actual_origin"] == "COLD"]
+            primary = aggregate_scheduler_metrics(primary_replays)
+            cold = _aggregate_replays_flat(cold_replays)
+            safety_checks = _safety_gate(primary)
+            cost_estimates = _cost_estimates(primary_replays, complexity, cost_anchors)
+            efficiency_checks = {
+                "coda_decode_reduction_at_least_20pct": (
+                    primary["task_macro_relative_coda_decode_call_reduction"] >= TARGET_DECODE_REDUCTION
+                ),
+                "clearly_exceeds_origin_aware_10_2pct": (
+                    primary["task_macro_relative_coda_decode_call_reduction"] >= TARGET_DECODE_REDUCTION
+                    and primary["task_macro_relative_coda_decode_call_reduction"] > ORIGIN_AWARE_DECODE_REDUCTION
+                ),
+                "mechanism_only_latency_reduction_positive": (
+                    cost_estimates["mechanism_only"]["relative_latency_reduction"] > 0.0
+                ),
+                "conservative_latency_complete": False,
+            }
+            safety_passed = all(safety_checks.values())
+            efficiency_promising = all(
+                efficiency_checks[key]
+                for key in (
+                    "coda_decode_reduction_at_least_20pct",
+                    "clearly_exceeds_origin_aware_10_2pct",
+                    "mechanism_only_latency_reduction_positive",
+                )
+            )
+            model_policy_metrics[policy] = primary
+            policy_reports[policy]["models"][model_name] = {
+                "primary_actual_warm": primary,
+                "supplementary_cold": cold,
+                "reliability_actual_warm_transitions": reliability,
+                "model_complexity": complexity,
+                "cost_estimates": cost_estimates,
+                "safety_gate_checks": safety_checks,
+                "passes_safety_gate": safety_passed,
+                "efficiency_checks": efficiency_checks,
+                "efficiency_promising_before_unmeasured_overhead": efficiency_promising,
+                "passes_all_online_investigation_gates": safety_passed and efficiency_promising,
+                "decision": _policy_decision(safety_passed, efficiency_promising),
+            }
+        safety_invariance[model_name] = all(
+            model_policy_metrics[LEGACY_POLICY][field]
+            == model_policy_metrics[FINAL_ONLY_POLICY][field]
+            for field in safety_fields
+        )
+        _require(
+            safety_invariance[model_name],
+            f"{model_name}: action-generation policy changed stop/safety metrics",
+        )
+
+    final_models = policy_reports[FINAL_ONLY_POLICY]["models"]
+    selected = min(
+        final_models,
+        key=lambda name: (
+            final_models[name]["primary_actual_warm"]["false_convergence_count"],
+            -final_models[name]["primary_actual_warm"]["task_macro_convergence_capture"],
+            final_models[name]["primary_actual_warm"]["task_macro_mean_delta_k"],
+            -final_models[name]["primary_actual_warm"]["task_macro_relative_coda_decode_call_reduction"],
+        ),
+    )
+    selected_result = final_models[selected]
+    online_worth_investigating = any(
+        result["passes_all_online_investigation_gates"] for result in final_models.values()
+    )
+    return {
+        "schema_version": 2,
+        "scope": "offline scalar-only feasibility; baseline-conditioned, not closed-loop evidence",
+        "evaluation_policy": {
+            "primary": FINAL_ONLY_POLICY,
+            "diagnostic": LEGACY_POLICY,
+            "final_only_semantics": {
+                "intermediate_coda_decode_calls": 0,
+                "terminal_coda_decode_calls": 1,
+                "final_action_source": "Coda(S_terminal_k)",
+            },
+        },
+        "primary_analysis_origin": "ACTUAL_WARM",
+        "supplementary_origin": "COLD",
+        "gate": {
+            "minimum_capture": CAPTURE_TARGET,
+            "maximum_mean_delta_k": 0.25,
+            "maximum_task_macro_p95_delta_k": 1.0,
+            "maximum_max_iter_rate_increase": 0.0,
+            "false_convergence_count": 0,
+            "origin_aware_reference_decode_reduction": ORIGIN_AWARE_DECODE_REDUCTION,
+            "minimum_coda_decode_reduction": TARGET_DECODE_REDUCTION,
+        },
+        "cost_anchors": dict(cost_anchors),
+        "policies": policy_reports,
+        "safety_metrics_invariant_across_policies": safety_invariance,
+        "selected_diagnostic_model": selected,
+        "selected_model_final_only_result": selected_result,
+        "online_integration_worth_investigating": online_worth_investigating,
+        "final_decision": selected_result["decision"],
+        "conclusion": selected_result["decision"],
+    }
+
+
+def _compact_policy_model(result: Mapping[str, Any]) -> Dict[str, Any]:
+    primary = result["primary_actual_warm"]
+    cold = result["supplementary_cold"]
+    worst_task_ids = {
+        task_id for task_id in primary["worst_task"].values()
+        if task_id is not None
+    }
+    return {
+        "prediction_count": primary["prediction_count"],
+        "mean_terminal_k": primary["mean_terminal_k"],
+        "task_macro_mean_terminal_k": primary["task_macro_mean_terminal_k"],
+        "mean_delta_k": primary["mean_delta_k"],
+        "task_macro_mean_delta_k": primary["task_macro_mean_delta_k"],
+        "p95_delta_k": primary["p95_delta_k"],
+        "task_macro_p95_delta_k": primary["task_macro_p95_delta_k"],
+        "false_convergence_count": primary["false_convergence_count"],
+        "false_convergence_rate": primary["false_convergence_rate"],
+        "task_macro_convergence_capture": primary["task_macro_convergence_capture"],
+        "precision": primary["precision"],
+        "recall": primary["recall"],
+        "max_iter_rate_delta": primary["max_iter_rate_delta"],
+        "task_macro_max_iter_rate_delta": primary["task_macro_max_iter_rate_delta"],
+        "total_recurrent_calls": primary["candidate_recurrent_calls"],
+        "task_macro_mean_recurrent_calls": primary["task_macro_mean_candidate_recurrent_calls"],
+        "total_probe_calls": primary["probe_calls"],
+        "task_macro_mean_probe_calls": primary["task_macro_mean_probe_calls"],
+        "baseline_coda_decode_calls": primary["baseline_coda_decode_calls"],
+        "candidate_coda_decode_calls": primary["candidate_coda_decode_calls"],
+        "coda_decode_call_reduction": primary["relative_coda_decode_call_reduction"],
+        "task_macro_coda_decode_reduction": primary["task_macro_relative_coda_decode_call_reduction"],
+        "worst_task_ids": primary["worst_task"],
+        "worst_task_metrics": {
+            task_id: primary["task_metrics"][task_id]
+            for task_id in sorted(worst_task_ids, key=int)
+        },
+        "model_complexity": result["model_complexity"],
+        "safety_gate_checks": result["safety_gate_checks"],
+        "passes_safety_gate": result["passes_safety_gate"],
+        "efficiency_checks": result["efficiency_checks"],
+        "cost_estimates": result["cost_estimates"],
+        "decision": result["decision"],
+        "supplementary_cold": {
+            "prediction_count": cold["prediction_count"],
+            "false_convergence_count": cold["false_convergence_count"],
+            "convergence_capture": cold["convergence_capture"],
+            "candidate_coda_decode_calls": cold["candidate_coda_decode_calls"],
+            "relative_coda_decode_call_reduction": cold["relative_coda_decode_call_reduction"],
+        },
+    }
+
+
+def compact_result_manifest(
+    evaluation: Mapping[str, Any],
+    dataset_manifest: Mapping[str, Any],
+    training_bundle: Mapping[str, Any],
+    *,
+    evaluator_source_git_commit: str,
+    parent_result_manifest_path: Path,
+    parent_result_manifest_sha256: str,
+    model_artifact_path: Path,
+    model_artifact_sha256: str,
+    fold_manifest_path: Path,
+    training_bundle_sha256: str,
+) -> Dict[str, Any]:
+    policies = {}
+    for policy, policy_report in evaluation["policies"].items():
+        policies[policy] = {
+            "role": policy_report["role"],
+            "models": {
+                name: _compact_policy_model(result)
+                for name, result in policy_report["models"].items()
+            },
+        }
+    return {
+        "schema_version": 2,
+        "study": "learned-convergence-probe-final-only-coda-correction",
+        "source_git_commit": evaluator_source_git_commit,
+        "dataset_source_git_commit": dataset_manifest["source_git_commit"],
+        "calibration_validation_sha256": dataset_manifest["calibration_validation_sha256"],
+        "trace_files": dataset_manifest["trace_files"],
+        "trace_set_sha256": dataset_manifest["trace_set_sha256"],
+        "parent_result_manifest": {
+            "path": str(parent_result_manifest_path),
+            "sha256": parent_result_manifest_sha256,
+        },
+        "dataset_sha256": dataset_manifest["dataset_sha256"],
+        "model_artifact": {
+            "path": str(model_artifact_path),
+            "sha256": model_artifact_sha256,
+            "reused_without_retraining": True,
+            "contains_all_oof_normalization_parameters": True,
+        },
+        "fold_manifest": {
+            "path": str(fold_manifest_path),
+            "sha256": sha256_file(fold_manifest_path),
+        },
+        "training_bundle_sha256": training_bundle_sha256,
+        "feature_schema": training_bundle["feature_schema"],
+        "feature_schema_unchanged": training_bundle["feature_schema"],
+        "random_seed": training_bundle["random_seed"],
+        "dependency_versions": dataset_manifest["dependency_versions"],
+        "normalization_parameters": {
+            "stored_in_reused_model_artifact": True,
+            "model_artifact_sha256": model_artifact_sha256,
+        },
+        "leakage_audit": training_bundle["leakage_audit"],
+        "evaluation_policy": evaluation["evaluation_policy"],
+        "cost_anchors": evaluation["cost_anchors"],
+        "legacy_policy_results": policies[LEGACY_POLICY],
+        "final_only_coda_results": policies[FINAL_ONLY_POLICY],
+        "primary_analysis_origin": evaluation["primary_analysis_origin"],
+        "supplementary_origin": evaluation["supplementary_origin"],
+        "gate": evaluation["gate"],
+        "safety_metrics_invariant_across_policies": evaluation["safety_metrics_invariant_across_policies"],
+        "selected_diagnostic_model": evaluation["selected_diagnostic_model"],
+        "final_decision": evaluation["final_decision"],
+        "online_integration_worth_investigating": evaluation["online_integration_worth_investigating"],
+        "limitations": [
+            "Final-only Coda latency has not been measured as an integrated GPU schedule.",
+            "Probe FLOPs are not converted to latency.",
+            "GPU-CPU synchronization and probe control overhead are unknown.",
+            "Shadow-tail action MSE remains diagnostic FP32 after the production prefix.",
+            "Offline baseline-conditioned results do not establish closed-loop success.",
+        ],
     }
