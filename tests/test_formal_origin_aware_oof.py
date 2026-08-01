@@ -1,4 +1,6 @@
 import copy
+import json
+from pathlib import Path
 
 import pytest
 
@@ -160,3 +162,52 @@ def test_formal_oof_rejects_insufficient_distinct_configs(monkeypatch):
         run_formal_cost_sensitivity_oof(
             _predictions(), _folds(), _cost_manifest(), top_n=2
         )
+
+
+def test_committed_shortlist_is_distinct_and_not_online_promoted():
+    repo_root = Path(__file__).resolve().parents[1]
+    cost_path = (
+        repo_root
+        / "experiments/robot/libero/manifests/origin_aware_oof_cost_sensitivity_v1.json"
+    )
+    shortlist_path = (
+        repo_root
+        / "experiments/robot/libero/manifests/origin_aware_oof_seed7_shortlist_v1.json"
+    )
+    cost_manifest = json.loads(cost_path.read_text(encoding="utf-8"))
+    shortlist = json.loads(shortlist_path.read_text(encoding="utf-8"))
+    validate_cost_sensitivity_manifest(cost_manifest)
+
+    assert shortlist["status"] == "gpu_schedule_microbenchmark_required"
+    assert shortlist["online_screening_allowed"] is False
+    assert shortlist["linear_model_5pct_gate_met"] is False
+    assert shortlist["tested_candidate_favorable_best_improvement"] < 0.05
+    assert shortlist["source"]["formal_report"].endswith(
+        "/20260801_seed7_d3e9dee/report.json"
+    )
+
+    candidates = shortlist["candidates"]
+    expected_configs = [
+        (0.075, 3, "next_iter"),
+        (0.075, 2, "next_iter"),
+        (0.08, 3, "next_iter"),
+        (0.08, 2, "next_iter"),
+        (0.075, 1, "next_iter"),
+        (0.08, 1, "next_iter"),
+    ]
+    actual_configs = [
+        (
+            candidate["warm_threshold"],
+            candidate["max_skip_iters"],
+            candidate["confirmation_mode"],
+        )
+        for candidate in candidates
+    ]
+    assert [candidate["rank"] for candidate in candidates] == list(range(1, 7))
+    assert actual_configs == expected_configs
+    assert len(set(actual_configs)) == len(actual_configs)
+    for candidate in candidates:
+        assert float.fromhex(candidate["warm_threshold_hex"]) == (
+            candidate["warm_threshold"]
+        )
+        assert candidate["cold_threshold"] == 0.2
