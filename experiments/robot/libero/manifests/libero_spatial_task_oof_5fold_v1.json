@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "name": "libero-spatial-origin-aware-task-oof-5fold-v1",
+  "assignment_algorithm": "task-id-symmetric-pairs-v1",
+  "source_initial_state_manifest_sha256": "0e3c6609b719d6b0a05f79efd769dff67141b52d00b42d9e0bea904ecf493144",
+  "folds": [
+    {
+      "fold_id": 0,
+      "validation_task_ids": [0, 9]
+    },
+    {
+      "fold_id": 1,
+      "validation_task_ids": [1, 8]
+    },
+    {
+      "fold_id": 2,
+      "validation_task_ids": [2, 7]
+    },
+    {
+      "fold_id": 3,
+      "validation_task_ids": [3, 6]
+    },
+    {
+      "fold_id": 4,
+      "validation_task_ids": [4, 5]
+    }
+  ]
+}

@@ -7,6 +7,7 @@ from configs.rdvla_precheck import (
     canonicalize_recurrence_strategy,
     validate_latent_precheck_configuration,
 )
+from prismatic.models.action_head_workload import build_action_head_workload
 from prismatic.models.origin_aware_scheduler import (
     NonFiniteOriginAwareInferenceError,
     run_origin_aware_adaptive,
@@ -402,6 +403,7 @@ class VLARecurrent(nn.Module):
                 latent_precheck_confirmation_mode: str = "next_iter",
                 nonfinite_policy: str = "legacy",
                 shadow_full_depth: bool = False,
+                capture_action_head_workload: bool = False,
                 **kwargs) -> torch.Tensor:
         requested_recurrence_strategy = convergence_strategy
         canonical_recurrence_strategy = canonicalize_recurrence_strategy(convergence_strategy)
@@ -471,6 +473,10 @@ class VLARecurrent(nn.Module):
             "next_warm_start_state": None,
             "warm_start": warm_start_metadata,
         }
+        if capture_action_head_workload:
+            self.last_inference_metadata["_workload_selected_initial_state"] = (
+                state.detach().clone()
+            )
         cached_state_used = bool(warm_start_metadata.get("state_used", False))
         warm_start_min_iter_configured = int(warm_start_min_iter)
         effective_min_iter = (
@@ -1090,6 +1096,7 @@ class ActionHeadRecurrent(nn.Module):
                        latent_precheck_confirmation_mode="next_iter",
                        nonfinite_policy="legacy",
                        shadow_full_depth=False,
+                       capture_action_head_workload=False,
                        **kwargs):
         canonicalize_recurrence_strategy(convergence_strategy)
         validate_latent_precheck_configuration(
@@ -1109,14 +1116,14 @@ class ActionHeadRecurrent(nn.Module):
         )
         with rdvla_range("RDVLA/action_head/wrapper_total"):
             B = actions_hidden_states.shape[0]
-            proprio = proprio.reshape(B, -1).to(torch.bfloat16)
+            proprio_input = proprio.reshape(B, -1).to(torch.bfloat16)
             with rdvla_range("RDVLA/action_head/proprio_projector"):
-                proprio_features = proprio_projector(proprio).unsqueeze(1)
+                proprio_features = proprio_projector(proprio_input).unsqueeze(1)
             with rdvla_range("RDVLA/action_head/split_h_t_h_a"):
                 h_t = actions_hidden_states[:, :, :self.num_task_tokens, :]
                 h_a = actions_hidden_states[:, :, self.num_task_tokens:, :]
             with rdvla_range("RDVLA/action_head/vla_recurrent_total"):
-                return self.model(h_a, h_t, proprio_features, num_iter=num_iter,
+                result = self.model(h_a, h_t, proprio_features, num_iter=num_iter,
                                  convergence_strategy=convergence_strategy, kl_thresh=kl_thresh,
                                  cos_thresh=cos_thresh, max_iter=max_iter,
                                  warm_start_state=warm_start_state,
@@ -1136,4 +1143,22 @@ class ActionHeadRecurrent(nn.Module):
                                  latent_precheck_max_skip_iters=latent_precheck_max_skip_iters,
                                  latent_precheck_confirmation_mode=latent_precheck_confirmation_mode,
                                  nonfinite_policy=nonfinite_policy,
-                                 shadow_full_depth=shadow_full_depth)
+                                 shadow_full_depth=shadow_full_depth,
+                                 capture_action_head_workload=capture_action_head_workload)
+            if capture_action_head_workload:
+                metadata = self.model.last_inference_metadata
+                selected_initial_state = metadata.pop("_workload_selected_initial_state")
+                actual_origin = (
+                    "ACTUAL_WARM"
+                    if metadata["warm_start"].get("state_used") is True
+                    else "COLD"
+                )
+                metadata["action_head_workload"] = build_action_head_workload(
+                    actions_hidden_states=actions_hidden_states,
+                    proprio_input=proprio_input,
+                    proprio_features=proprio_features,
+                    incoming_warm_start_state=warm_start_state,
+                    selected_initial_state=selected_initial_state,
+                    actual_origin=actual_origin,
+                )
+            return result

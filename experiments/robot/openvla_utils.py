@@ -343,6 +343,7 @@ def get_vla_action(
     proprio_projector: Optional[torch.nn.Module] = None,
     use_film: bool = False, use_minivlm: bool = False,
     warm_start_state=None,
+    capture_action_head_workload: bool = False,
 ) -> List[np.ndarray]:
     effective_warm_start_state = (
         warm_start_state if getattr(cfg, "use_warm_start", False) else None
@@ -447,6 +448,7 @@ def get_vla_action(
                         latent_precheck_confirmation_mode=getattr(cfg, "latent_precheck_confirmation_mode", "next_iter"),
                         nonfinite_policy=getattr(cfg, "nonfinite_policy", "legacy"),
                         shadow_full_depth=getattr(cfg, "shadow_full_depth", False),
+                        capture_action_head_workload=capture_action_head_workload,
                     )
                     recurrence_debug = getattr(getattr(action_head, "model", None), "last_recurrence_debug", None)
                     action_head_inference_metadata = (
@@ -459,6 +461,7 @@ def get_vla_action(
         inference_metadata = {
             "recurrence_debug": recurrence_debug,
             "next_warm_start_state": action_head_inference_metadata.get("next_warm_start_state"),
+            "action_head_workload": action_head_inference_metadata.get("action_head_workload"),
             "warm_start": {
                 "enabled": bool(getattr(cfg, "use_warm_start", False)),
                 "source": warm_start_metadata.get("source"),

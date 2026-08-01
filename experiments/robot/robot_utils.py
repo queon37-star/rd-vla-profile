@@ -106,6 +106,7 @@ def get_action(
     use_film: bool = False,
     use_minivlm: bool = False,
     warm_start_state=None,
+    capture_action_head_workload: bool = False,
 ) -> Union[List[np.ndarray], np.ndarray]:
     """Query the model to get action predictions."""
     with torch.no_grad():
@@ -136,6 +137,7 @@ def get_action(
                 use_film=use_film,
                 use_minivlm=use_minivlm,
                 warm_start_state=warm_start_state,
+                capture_action_head_workload=capture_action_head_workload,
             )
         else:
             raise ValueError(f"Unsupported model family: {cfg.model_family}")

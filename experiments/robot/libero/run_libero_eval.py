@@ -8,7 +8,7 @@ from collections import deque
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Mapping, Optional, Union
 
 import cv2
 import torch
@@ -52,6 +52,11 @@ from experiments.robot.robot_utils import (
     invert_gripper_action,
     normalize_gripper_action,
     set_seed_everywhere,
+)
+from prismatic.models.action_head_workload import (
+    ACTION_HEAD_WORKLOAD_SCHEMA_VERSION,
+    ACTION_HEAD_WORKLOAD_TENSORS,
+    save_action_head_workload,
 )
 from prismatic.models.numerical_retry import NumericalInferenceAbort
 from prismatic.vla.constants import NUM_ACTIONS_CHUNK
@@ -177,6 +182,8 @@ class GenerateConfig:
     latent_precheck_confirmation_mode: str = "next_iter"
     nonfinite_policy: str = "legacy"
     shadow_full_depth: bool = False
+    calibration_workload_dir: str = ""
+    calibration_workload_predictions_per_episode: int = 0
 
     # Fixed execution: always use first N actions
     num_exec_actions: int = 5
@@ -267,6 +274,27 @@ def validate_config(cfg: GenerateConfig) -> None:
     if cfg.profile_pytorch:
         assert cfg.profile_steps >= 0, "profile_steps must be non-negative!"
         assert cfg.profile_trace_path, "profile_trace_path must be non-empty when profile_pytorch is enabled!"
+
+    workload_count = cfg.calibration_workload_predictions_per_episode
+    if isinstance(workload_count, bool) or not isinstance(workload_count, int) or workload_count < 0:
+        raise ValueError("calibration_workload_predictions_per_episode must be an integer >= 0")
+    if workload_count > 0:
+        if cfg.evaluation_protocol_phase != "calibration":
+            raise ValueError("action-head workload capture is calibration-only")
+        if not cfg.calibration_workload_dir:
+            raise ValueError(
+                "calibration_workload_dir is required when action-head workload capture is enabled"
+            )
+        if not cfg.shadow_full_depth:
+            raise ValueError("action-head workload capture requires shadow_full_depth=True")
+        if cfg.latent_precheck_mode != "off" or cfg.use_latent_precheck:
+            raise ValueError("action-head workload capture requires clean pre-check off mode")
+        if not cfg.use_warm_start or cfg.warm_start_source != "midpoint":
+            raise ValueError("action-head workload capture requires midpoint warm-start")
+    elif cfg.calibration_workload_dir:
+        raise ValueError(
+            "calibration_workload_dir requires calibration_workload_predictions_per_episode > 0"
+        )
 
     if cfg.profile_timing_summary:
         assert cfg.profile_timing_steps >= 0, "profile_timing_steps must be non-negative!"
@@ -599,6 +627,57 @@ def run_action_with_optional_profiles(
         append_jsonl(getattr(cfg, "profile_timing_summary_path", None), [timing_summary])
 
     return result
+
+
+def save_prediction_action_head_workload(
+    cfg,
+    workload,
+    *,
+    capture_requested: bool,
+    identity: Mapping[str, Any],
+):
+    fields = {
+        "action_head_workload_requested": bool(capture_requested),
+        "action_head_workload_captured": False,
+        "action_head_workload_file": None,
+        "action_head_workload_sha256": None,
+        "action_head_workload_schema_version": None,
+        "action_head_workload_tensor_fields": [],
+        "action_head_workload_capture_in_action_latency": bool(capture_requested),
+    }
+    if not capture_requested:
+        if workload is not None:
+            raise RuntimeError("action-head workload was produced without a capture request")
+        return fields
+    if not isinstance(workload, Mapping):
+        raise RuntimeError("requested action-head workload metadata is missing")
+
+    output_dir = Path(cfg.calibration_workload_dir)
+    filename = (
+        f"task{int(identity['task_id'])}_trial{int(identity['paired_trial_id'])}_"
+        f"pred{int(identity['prediction_step'])}.pt"
+    )
+    output_path = output_dir / filename
+    digest = save_action_head_workload(output_path, workload, identity=identity)
+    step_log_file = get_step_log_file(cfg)
+    if not step_log_file:
+        raise RuntimeError("action-head workload capture requires a step log file")
+    step_log_dir = Path(step_log_file).resolve().parent
+    resolved_output = output_path.resolve()
+    try:
+        recorded_path = str(resolved_output.relative_to(step_log_dir))
+    except ValueError:
+        recorded_path = str(resolved_output)
+    fields.update(
+        {
+            "action_head_workload_captured": True,
+            "action_head_workload_file": recorded_path,
+            "action_head_workload_sha256": digest,
+            "action_head_workload_schema_version": ACTION_HEAD_WORKLOAD_SCHEMA_VERSION,
+            "action_head_workload_tensor_fields": list(ACTION_HEAD_WORKLOAD_TENSORS),
+        }
+    )
+    return fields
 
 
 def append_jsonl(path, records):
@@ -962,6 +1041,13 @@ def run_episode(
                 # )
 
                 # recurrence debug metric 전달을 위해 수정한 호출 코드
+                workload_capture_limit = int(
+                    getattr(cfg, "calibration_workload_predictions_per_episode", 0)
+                )
+                capture_action_head_workload = (
+                    cfg.evaluation_protocol_phase == "calibration"
+                    and prediction_step < workload_capture_limit
+                )
                 def predict_action_once():
                     return get_action(
                         cfg,
@@ -974,6 +1060,7 @@ def run_episode(
                         use_film=cfg.use_film,
                         use_minivlm=cfg.use_minivlm,
                         warm_start_state=warm_start_state,
+                        capture_action_head_workload=capture_action_head_workload,
                     )
 
                 timing_metadata = {
@@ -1034,10 +1121,12 @@ def run_episode(
                     recurrence_debug = inference_metadata.get("recurrence_debug", inference_metadata)
                     warm_start_metadata = dict(inference_metadata.get("warm_start") or {})
                     next_warm_start_state = inference_metadata.get("next_warm_start_state")
+                    action_head_workload = inference_metadata.get("action_head_workload")
                 else:
                     recurrence_debug = {}
                     warm_start_metadata = {}
                     next_warm_start_state = None
+                    action_head_workload = None
 
                 warm_start_enabled = bool(
                     warm_start_metadata.get("enabled", getattr(cfg, "use_warm_start", False))
@@ -1238,6 +1327,22 @@ def run_episode(
                     "rollout_min_iteration": None,
                     "success": None,
                 }
+                workload_identity = {
+                    "task_id": int(task_id),
+                    "episode_id": int(episode_idx),
+                    "paired_trial_id": int(protocol_log_metadata["paired_trial_id"]),
+                    "prediction_step": int(prediction_step),
+                    "initial_state_id": int(protocol_log_metadata["initial_state_id"]),
+                    "episode_seed": int(episode_seed),
+                }
+                step_record.update(
+                    save_prediction_action_head_workload(
+                        cfg,
+                        action_head_workload,
+                        capture_requested=capture_action_head_workload,
+                        identity=workload_identity,
+                    )
+                )
                 step_record["profiling_enabled"] = bool(debug.get("profiling_enabled", False))
                 step_record["use_cached_final_output"] = bool(
                     debug.get("use_cached_final_output", getattr(cfg, "use_cached_final_output", False))
@@ -1587,6 +1692,10 @@ def eval_libero(cfg: GenerateConfig) -> float:
             "task_suite_name": protocol_manifest["task_suite_name"],
             "num_trials_per_task": cfg.num_trials_per_task,
             "paired_rng": True,
+            "action_head_workload_schema_version": ACTION_HEAD_WORKLOAD_SCHEMA_VERSION,
+            "calibration_workload_predictions_per_episode": int(
+                cfg.calibration_workload_predictions_per_episode
+            ),
         }
         log_message(
             f"Frozen evaluation protocol: phase={cfg.evaluation_protocol_phase}, "
