@@ -6,6 +6,11 @@ import pytest
 import torch
 
 from configs.rdvla_precheck import validate_latent_precheck_configuration
+from experiments.robot.libero.latent_metric_trace import (
+    build_action_head_workload_identity,
+    build_latent_metric_trace_records,
+    require_prediction_id,
+)
 from prismatic.extern.hf.modeling_prismatic import OpenVLAForActionPrediction
 from prismatic.models.action_heads import (
     ActionHeadRecurrent,
@@ -136,6 +141,78 @@ def test_shadow_full_depth_preserves_production_result_and_midpoint_cache():
         "midpoint_source_iteration": 1,
         "cached_final_output_reused": True,
     }
+
+
+def test_first_prediction_trace_has_canonical_id_and_preserves_production():
+    baseline_model = _tiny_shadow_model()
+    trace_model = _tiny_shadow_model()
+    baseline, baseline_debug, baseline_metadata = _run(
+        baseline_model, shadow_full_depth=False
+    )
+    traced, trace_debug, trace_metadata = _run(
+        trace_model, shadow_full_depth=True
+    )
+
+    prediction_id = require_prediction_id(0)
+    trace_records = build_latent_metric_trace_records(
+        trace_debug,
+        task_id=3,
+        episode_id=0,
+        prediction_id=prediction_id,
+        actual_origin="ACTUAL_WARM",
+    )
+
+    assert prediction_id == 0
+    assert trace_records
+    assert {
+        (record["task_id"], record["episode_id"], record["prediction_id"])
+        for record in trace_records
+    } == {(3, 0, 0)}
+    assert trace_debug["canonical_recurrence_strategy"] == "adjacent_action_mse"
+    assert trace_debug["shadow_full_depth_enabled"] is True
+    assert trace_debug["latent_metric_trace_enabled"] is True
+    torch.testing.assert_close(traced[0], baseline[0], rtol=0, atol=0)
+    assert traced[1:] == baseline[1:]
+    assert trace_debug["K_t"] == baseline_debug["K_t"]
+    assert trace_debug["stop_reason"] == baseline_debug["stop_reason"]
+    torch.testing.assert_close(
+        trace_metadata["next_warm_start_state"],
+        baseline_metadata["next_warm_start_state"],
+        rtol=0,
+        atol=0,
+    )
+    assert trace_metadata["warm_start"] == baseline_metadata["warm_start"]
+
+    next_records = build_latent_metric_trace_records(
+        trace_debug,
+        task_id=3,
+        episode_id=0,
+        prediction_id=prediction_id + 1,
+        actual_origin="ACTUAL_WARM",
+    )
+    prediction_keys = {
+        (record["task_id"], record["episode_id"], record["prediction_id"])
+        for record in trace_records + next_records
+    }
+    assert prediction_keys == {(3, 0, 0), (3, 0, 1)}
+
+
+def test_prediction_id_does_not_silently_coerce_none_and_legacy_needs_no_protocol_identity():
+    with pytest.raises(ValueError, match="non-null monotonically increasing integer"):
+        require_prediction_id(None)
+
+    assert (
+        build_action_head_workload_identity(
+            capture_requested=False,
+            task_id=0,
+            episode_id=0,
+            paired_trial_id=None,
+            prediction_id=0,
+            initial_state_id=None,
+            episode_seed=None,
+        )
+        is None
+    )
 
 
 def test_shadow_tail_nonfinite_is_diagnostic_only():

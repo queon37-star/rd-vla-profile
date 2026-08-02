@@ -29,6 +29,11 @@ from experiments.robot.libero.evaluation_protocol import (
     resolve_phase_trials,
     validate_protocol_configuration,
 )
+from experiments.robot.libero.latent_metric_trace import (
+    build_action_head_workload_identity,
+    build_latent_metric_trace_records,
+    require_prediction_id,
+)
 
 sys.path.append("../..")
 from experiments.robot.libero.libero_utils import (
@@ -662,7 +667,7 @@ def save_prediction_action_head_workload(
     workload,
     *,
     capture_requested: bool,
-    identity: Mapping[str, Any],
+    identity: Optional[Mapping[str, Any]],
 ):
     fields = {
         "action_head_workload_requested": bool(capture_requested),
@@ -679,6 +684,8 @@ def save_prediction_action_head_workload(
         return fields
     if not isinstance(workload, Mapping):
         raise RuntimeError("requested action-head workload metadata is missing")
+    if not isinstance(identity, Mapping):
+        raise RuntimeError("requested action-head workload identity is missing")
 
     output_dir = Path(cfg.calibration_workload_dir)
     filename = (
@@ -763,44 +770,6 @@ def _as_int(value):
         return int(value)
     except (TypeError, ValueError):
         return None
-
-
-def build_latent_metric_trace_records(
-    recurrence_debug: Mapping[str, Any],
-    *,
-    task_id: int,
-    episode_id: int,
-    prediction_step: int,
-    actual_origin: str,
-) -> List[Dict[str, Any]]:
-    """Attach rollout identity and action labels to scalar full-depth traces."""
-    if not recurrence_debug.get("latent_metric_trace_enabled", False):
-        return []
-    baseline_k = _as_int(recurrence_debug.get("K_t"))
-    records = []
-    for item in recurrence_debug.get("shadow_trace", []):
-        raw_mse = item.get("raw_mse", item.get("latent_mse"))
-        action_mse = item.get("action_mse")
-        if raw_mse is None or action_mse is None:
-            continue
-        records.append(
-            {
-                "iteration_index": int(item["k"]),
-                "phase": item.get("phase"),
-                "actual_origin": actual_origin,
-                "raw_mse": float(raw_mse),
-                "relative_mse": float(item["relative_mse"]),
-                "cosine_distance": float(item["cosine_distance"]),
-                "relative_l2": float(item["relative_l2"]),
-                "adjacent_action_mse": float(action_mse),
-                "action_mse_below_0_001": bool(float(action_mse) < 0.001),
-                "baseline_stopping_iteration": baseline_k,
-                "task_id": int(task_id),
-                "episode_id": int(episode_id),
-                "prediction_id": int(prediction_step),
-            }
-        )
-    return records
 
 
 def _numeric_stats(values):
@@ -1084,6 +1053,7 @@ def run_episode(
             replay_images.append(img)
 
             if len(action_queue) == 0:
+                prediction_id = require_prediction_id(prediction_step)
                 cache_age_for_prediction = warm_start_cache_age
                 proprio_before_pred = None
                 if "state" in observation:
@@ -1112,7 +1082,7 @@ def run_episode(
                 )
                 capture_action_head_workload = (
                     cfg.evaluation_protocol_phase == "calibration"
-                    and prediction_step < workload_capture_limit
+                    and prediction_id < workload_capture_limit
                 )
                 def predict_action_once():
                     return get_action(
@@ -1133,8 +1103,8 @@ def run_episode(
                     "task_id": task_id,
                     "episode_id": episode_idx,
                     "timestep": int(t),
-                    "action_prediction_index": prediction_step,
-                    "prediction_step": prediction_step,
+                    "action_prediction_index": prediction_id,
+                    "prediction_step": prediction_id,
                     **protocol_log_metadata,
                 }
                 try:
@@ -1165,8 +1135,8 @@ def run_episode(
                             "episode_id": episode_idx,
                             "episode_seed": episode_seed,
                             "timestep": int(t),
-                            "action_prediction_index": prediction_step,
-                            "prediction_step": prediction_step,
+                            "action_prediction_index": prediction_id,
+                            "prediction_step": prediction_id,
                             **protocol_log_metadata,
                             "recurrent_iteration_count": None,
                             "final_mse": None,
@@ -1274,7 +1244,7 @@ def run_episode(
                     debug,
                     task_id=task_id,
                     episode_id=episode_idx,
-                    prediction_step=prediction_step,
+                    prediction_id=prediction_id,
                     actual_origin=actual_origin,
                 )
 
@@ -1284,8 +1254,8 @@ def run_episode(
                     "task_name": task_description,
                     "episode_id": episode_idx,
                     "timestep": int(t),
-                    "action_prediction_index": prediction_step,
-                    "prediction_step": prediction_step,
+                    "action_prediction_index": prediction_id,
+                    "prediction_step": prediction_id,
                     "reset_rng_each_episode": bool(getattr(cfg, "reset_rng_each_episode", False)),
                     "episode_seed": episode_seed,
                     **protocol_log_metadata,
@@ -1416,14 +1386,15 @@ def run_episode(
                     "rollout_min_iteration": None,
                     "success": None,
                 }
-                workload_identity = {
-                    "task_id": int(task_id),
-                    "episode_id": int(episode_idx),
-                    "paired_trial_id": int(protocol_log_metadata["paired_trial_id"]),
-                    "prediction_step": int(prediction_step),
-                    "initial_state_id": int(protocol_log_metadata["initial_state_id"]),
-                    "episode_seed": int(episode_seed),
-                }
+                workload_identity = build_action_head_workload_identity(
+                    capture_requested=capture_action_head_workload,
+                    task_id=task_id,
+                    episode_id=episode_idx,
+                    paired_trial_id=protocol_log_metadata["paired_trial_id"],
+                    prediction_id=prediction_id,
+                    initial_state_id=protocol_log_metadata["initial_state_id"],
+                    episode_seed=episode_seed,
+                )
                 step_record.update(
                     save_prediction_action_head_workload(
                         cfg,
@@ -1452,7 +1423,7 @@ def run_episode(
                     ):
                         step_record[timing_key] = debug.get(timing_key)
 
-                prediction_step += 1
+                prediction_step = prediction_id + 1
                 prev_action_vec = curr_action_vec
                 prev_proprio_vec = proprio_before_pred
 
