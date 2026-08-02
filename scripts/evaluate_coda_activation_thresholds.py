@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Evaluate iteration-conditioned raw-MSE thresholds with task-level OOF replay."""
+"""Run ACTUAL_WARM task-level OOF evaluation for raw-MSE Coda activation."""
 
 from __future__ import annotations
 
@@ -14,10 +14,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from scripts.dynamic_raw_mse_oof import (  # noqa: E402
-    DEFAULT_ALPHAS,
-    DEFAULT_MIN_NEGATIVE_SAMPLES,
-    evaluate_dynamic_raw_mse_oof,
+from scripts.coda_activation_oof import (  # noqa: E402
+    DEFAULT_BETAS,
+    DEFAULT_MIN_ACTIVATION_DUE_SAMPLES,
+    evaluate_coda_activation_oof,
     format_pareto_table,
 )
 from scripts.latent_only_metric_evaluator import (  # noqa: E402
@@ -27,6 +27,7 @@ from scripts.latent_only_metric_evaluator import (  # noqa: E402
 )
 
 
+DEFAULT_TRACE_DIR = REPO_ROOT / "benchmark_results/latent_only/calibration_cb93a8b"
 DEFAULT_FOLD_MANIFEST = (
     REPO_ROOT / "experiments/robot/libero/manifests/libero_spatial_task_oof_5fold_v1.json"
 )
@@ -34,25 +35,26 @@ DEFAULT_FOLD_MANIFEST = (
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    traces = parser.add_mutually_exclusive_group(required=True)
+    traces = parser.add_mutually_exclusive_group()
     traces.add_argument("--trace", action="append", type=Path)
     traces.add_argument(
         "--trace-dir",
         type=Path,
+        default=DEFAULT_TRACE_DIR,
         help="directory containing task*/steps.jsonl calibration traces",
     )
     parser.add_argument("--fold-manifest", type=Path, default=DEFAULT_FOLD_MANIFEST)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument(
-        "--alpha",
+        "--beta",
         action="append",
         type=float,
-        help="false-positive budget; repeat to override the default grid",
+        help="activation miss budget; repeat to override the default grid",
     )
     parser.add_argument(
-        "--min-negative-samples",
+        "--min-activation-due-samples",
         type=int,
-        default=DEFAULT_MIN_NEGATIVE_SAMPLES,
+        default=DEFAULT_MIN_ACTIVATION_DUE_SAMPLES,
     )
     parser.add_argument("--overwrite", action="store_true")
     return parser
@@ -79,11 +81,11 @@ def main(argv=None) -> int:
     fold_manifest, assignment = load_fold_assignment(
         args.fold_manifest, {item["task_id"] for item in predictions}
     )
-    result = evaluate_dynamic_raw_mse_oof(
+    result = evaluate_coda_activation_oof(
         predictions,
         assignment,
-        alphas=DEFAULT_ALPHAS if args.alpha is None else args.alpha,
-        min_negative_samples=args.min_negative_samples,
+        betas=DEFAULT_BETAS if args.beta is None else args.beta,
+        min_activation_due_samples=args.min_activation_due_samples,
     )
     result["inputs"] = {
         "trace_files": [str(path.resolve()) for path in trace_paths],
@@ -95,15 +97,27 @@ def main(argv=None) -> int:
         json.dumps(result, indent=2, sort_keys=True, allow_nan=False) + "\n",
         encoding="utf-8",
     )
-    fixed = result["fixed_raw_mse_reference"]["oof_stopping"]
+
+    baseline = result["coda_every_iteration_reference"]
     print(
-        "Fixed raw_mse reference: "
-        f"false={fixed['false_convergence_count']} "
-        f"capture={fixed['convergence_capture']:.4%} "
-        f"mean_delta_K={fixed['mean_delta_K']:.4f}"
+        "Coda every iteration: "
+        f"calls={baseline['baseline_total_coda_calls']} "
+        f"mean_calls={baseline['mean_coda_calls_per_prediction']:.4f}"
     )
-    print("Dynamic raw_mse Pareto frontier:")
+    print("Dynamic activation Pareto frontier:")
     print(format_pareto_table(result))
+    selection = result["selection"]
+    if selection["selected_schedule"] is None:
+        print(
+            "No dynamic schedule satisfies both mean delta_K <= 0.1 "
+            "and p95 delta_K <= 1; no winner selected."
+        )
+    else:
+        winner = selection["selected_schedule"]
+        print(
+            f"Selected beta={winner['beta']:.17g} with "
+            f"Coda-call reduction={winner['coda_call_reduction']:.4%}."
+        )
     print(f"Wrote: {args.output}")
     return 0
 
