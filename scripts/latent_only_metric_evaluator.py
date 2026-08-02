@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 from pathlib import Path
 from typing import Any, Dict, Iterable, Mapping, Sequence
@@ -15,6 +16,7 @@ from scripts.origin_aware_replay_lib import parse_fold_manifest, percentile
 
 ORIGINS = ("ACTUAL_WARM", "COLD")
 CAPTURE_TARGET = 0.995
+LOGGER = logging.getLogger(__name__)
 
 
 class LatentTraceValidationError(ValueError):
@@ -271,53 +273,121 @@ def select_training_threshold(
     capture_target: float = CAPTURE_TARGET,
 ) -> Dict[str, Any]:
     _require(bool(predictions), "threshold selection requires training predictions")
-    values = np.asarray(
-        [
-            item[metric_name]
-            for prediction in predictions
-            for item in prediction["transitions"]
-            if item["k"] >= min_iter
-        ],
-        dtype=np.float64,
-    )
+    event_values = []
+    event_prediction_indices = []
+    event_iterations = []
+    event_labels = []
+    convergence_eligible = np.zeros(len(predictions), dtype=bool)
+    max_iterations = np.empty(len(predictions), dtype=np.int64)
+    for prediction_index, prediction in enumerate(predictions):
+        max_iterations[prediction_index] = int(prediction["max_iter"])
+        for item in prediction["transitions"]:
+            if item["k"] < min_iter:
+                continue
+            event_values.append(float(item[metric_name]))
+            event_prediction_indices.append(prediction_index)
+            event_iterations.append(int(item["k"]))
+            event_labels.append(bool(item["label"]))
+            convergence_eligible[prediction_index] |= bool(item["label"])
+
+    values = np.asarray(event_values, dtype=np.float64)
     candidates = np.concatenate(
         ([np.nextafter(values.min(), -math.inf)], np.unique(values))
     )
-    evaluated = []
-    for threshold in candidates:
-        metrics = aggregate_replays(
-            replay_predictions(
-                predictions, metric_name, float(threshold), min_iter=min_iter
-            )
+
+    # Sweep the exact candidate set in ascending order. A prediction changes only
+    # when the newly eligible value exposes an earlier iteration than its current
+    # selection, so the selection statistics can be updated in constant time.
+    order = np.argsort(values, kind="mergesort")
+    event_prediction_indices = np.asarray(event_prediction_indices, dtype=np.int64)[order]
+    event_iterations = np.asarray(event_iterations, dtype=np.int64)[order]
+    event_labels = np.asarray(event_labels, dtype=bool)[order]
+    sorted_values = values[order]
+    selected_iterations = np.full(len(predictions), -1, dtype=np.int64)
+    selected_labels = np.zeros(len(predictions), dtype=bool)
+    false_convergence_count = 0
+    captured_convergence_count = 0
+    early_stop_count = 0
+    capture_eligible_count = int(convergence_eligible.sum())
+    prediction_count = len(predictions)
+
+    best_feasible = None
+    best_infeasible = None
+
+    def consider(threshold: float) -> None:
+        nonlocal best_feasible, best_infeasible
+        convergence_capture = (
+            None
+            if capture_eligible_count == 0
+            else captured_convergence_count / capture_eligible_count
         )
-        evaluated.append((float(threshold), metrics))
-    feasible = [
-        item
-        for item in evaluated
-        if item[1]["convergence_capture"] is not None
-        and item[1]["convergence_capture"] >= capture_target
-    ]
-    if feasible:
-        threshold, metrics = min(
-            feasible,
-            key=lambda item: (
-                item[1]["false_convergence_count"],
-                -item[1]["early_stop_rate"],
-                item[0],
-            ),
+        early_stop_rate = early_stop_count / prediction_count
+        summary = (
+            float(threshold),
+            false_convergence_count,
+            convergence_capture,
+            early_stop_rate,
         )
+        if convergence_capture is not None and convergence_capture >= capture_target:
+            key = (false_convergence_count, -early_stop_rate, float(threshold))
+            if best_feasible is None or key < best_feasible[0]:
+                best_feasible = (key, summary)
+        fallback_key = (
+            -(convergence_capture or 0.0),
+            false_convergence_count,
+            -early_stop_rate,
+            float(threshold),
+        )
+        if best_infeasible is None or fallback_key < best_infeasible[0]:
+            best_infeasible = (fallback_key, summary)
+
+    consider(float(candidates[0]))
+    event_start = 0
+    for threshold in candidates[1:]:
+        event_end = event_start + 1
+        while event_end < len(sorted_values) and sorted_values[event_end] == threshold:
+            event_end += 1
+
+        pending_updates = {}
+        for event_index in range(event_start, event_end):
+            prediction_index = int(event_prediction_indices[event_index])
+            iteration = int(event_iterations[event_index])
+            current = pending_updates.get(prediction_index)
+            if current is None or iteration < current[0]:
+                pending_updates[prediction_index] = (
+                    iteration,
+                    bool(event_labels[event_index]),
+                )
+
+        for prediction_index, (iteration, label) in pending_updates.items():
+            previous_iteration = int(selected_iterations[prediction_index])
+            if previous_iteration >= 0 and previous_iteration <= iteration:
+                continue
+            if previous_iteration >= 0:
+                previous_label = bool(selected_labels[prediction_index])
+                false_convergence_count -= int(not previous_label)
+                captured_convergence_count -= int(previous_label)
+                early_stop_count -= int(
+                    previous_iteration < max_iterations[prediction_index]
+                )
+            selected_iterations[prediction_index] = iteration
+            selected_labels[prediction_index] = label
+            false_convergence_count += int(not label)
+            captured_convergence_count += int(label)
+            early_stop_count += int(iteration < max_iterations[prediction_index])
+
+        consider(float(threshold))
+        event_start = event_end
+
+    if best_feasible is not None:
+        threshold = best_feasible[1][0]
         status = "capture_feasible"
     else:
-        threshold, metrics = min(
-            evaluated,
-            key=lambda item: (
-                -(item[1]["convergence_capture"] or 0.0),
-                item[1]["false_convergence_count"],
-                -item[1]["early_stop_rate"],
-                item[0],
-            ),
-        )
+        threshold = best_infeasible[1][0]
         status = "capture_infeasible_fail_closed"
+    metrics = aggregate_replays(
+        replay_predictions(predictions, metric_name, threshold, min_iter=min_iter)
+    )
     return {
         "threshold": threshold,
         "threshold_hex": float(threshold).hex(),
@@ -362,6 +432,14 @@ def evaluate_oof(
                     if fold_assignment[item["task_id"]] == fold_id
                 ]
                 _require(bool(train) and bool(validation), f"fold {fold_id} {origin}: empty split")
+                LOGGER.info(
+                    "evaluating metric=%s origin=%s fold=%s train=%d validation=%d",
+                    metric_name,
+                    origin,
+                    fold_id,
+                    len(train),
+                    len(validation),
+                )
                 selection = select_training_threshold(
                     train,
                     metric_name,

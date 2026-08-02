@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sys
 from pathlib import Path
 
@@ -39,6 +40,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     if args.output.exists() and not args.overwrite:
         raise FileExistsError(f"Refusing to overwrite output: {args.output}")
     predictions = parse_trace_predictions(load_jsonl_records(args.trace))
