@@ -6,6 +6,27 @@ from numbers import Integral
 from typing import Any, Dict, Mapping
 
 
+LATENT_ONLY_STOP_REASONS = frozenset({"max_iter", "latent_threshold"})
+
+
+def build_stop_reason_fields(recurrence_debug: Mapping[str, Any]) -> Dict[str, Any]:
+    """Serialize stop reasons while enforcing the latent-only logging contract."""
+    stop_reason = recurrence_debug.get("stop_reason")
+    canonical_stop_reason = recurrence_debug.get("canonical_stop_reason")
+    if recurrence_debug.get("canonical_recurrence_strategy") == "latent_only":
+        if stop_reason not in LATENT_ONLY_STOP_REASONS:
+            raise ValueError(f"invalid latent_only stop_reason: {stop_reason!r}")
+        if canonical_stop_reason not in LATENT_ONLY_STOP_REASONS:
+            raise ValueError(
+                "invalid latent_only canonical_stop_reason: "
+                f"{canonical_stop_reason!r}"
+            )
+    return {
+        "stop_reason": stop_reason,
+        "canonical_stop_reason": canonical_stop_reason,
+    }
+
+
 def require_prediction_id(prediction_step: int) -> int:
     """Return the canonical per-episode prediction counter or fail explicitly."""
     if isinstance(prediction_step, bool) or not isinstance(prediction_step, Integral):

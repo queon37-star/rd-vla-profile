@@ -1,11 +1,16 @@
 import copy
 import inspect
+import json
 import types
 from unittest.mock import patch
 
 import pytest
 import torch
 
+from experiments.robot.libero.latent_metric_trace import (
+    LATENT_ONLY_STOP_REASONS,
+    build_stop_reason_fields,
+)
 from prismatic.extern.hf.modeling_prismatic import OpenVLAForActionPrediction
 from prismatic.models.action_heads import (
     ActionHeadRecurrent,
@@ -111,6 +116,12 @@ def test_threshold_stop_calls_coda_once_after_recurrence_and_preserves_midpoint(
     assert model.test_calls == {"recurrent": 3, "output": 1}
     debug = model.last_recurrence_debug
     assert debug["stop_reason"] == "latent_threshold"
+    assert debug["canonical_stop_reason"] == "latent_threshold"
+    serialized_fields = json.loads(json.dumps(build_stop_reason_fields(debug)))
+    assert serialized_fields == {
+        "stop_reason": "latent_threshold",
+        "canonical_stop_reason": "latent_threshold",
+    }
     assert debug["coda_call_count"] == 1
     assert debug["latent_metric_call_count"] == 2
     assert debug["action_mse_threshold"] is None
@@ -139,7 +150,27 @@ def test_max_iter_fallback_still_calls_coda_exactly_once():
     assert result[1:] == (4, 1.0)
     assert model.test_calls == {"recurrent": 4, "output": 1}
     assert model.last_recurrence_debug["stop_reason"] == "max_iter"
+    assert model.last_recurrence_debug["canonical_stop_reason"] == "max_iter"
+    serialized_fields = json.loads(
+        json.dumps(build_stop_reason_fields(model.last_recurrence_debug))
+    )
+    assert serialized_fields == {
+        "stop_reason": "max_iter",
+        "canonical_stop_reason": "max_iter",
+    }
     assert model.last_recurrence_debug["coda_call_count"] == 1
+
+
+def test_latent_only_allowed_stop_reasons_are_exact_and_fail_closed():
+    assert LATENT_ONLY_STOP_REASONS == frozenset({"max_iter", "latent_threshold"})
+    with pytest.raises(ValueError, match="invalid latent_only stop_reason"):
+        build_stop_reason_fields(
+            {
+                "canonical_recurrence_strategy": "latent_only",
+                "stop_reason": "unexpected",
+                "canonical_stop_reason": "unexpected",
+            }
+        )
 
 
 def test_actual_warm_threshold_depends_on_accepted_cache_not_enabled_flag():
@@ -209,6 +240,10 @@ def test_legacy_action_mse_behavior_is_unchanged_after_latent_only_run():
     assert baseline[1:] == (2, 1.0)
     assert baseline_debug["canonical_recurrence_strategy"] == "adjacent_action_mse"
     assert baseline_debug["stop_reason"] == "adjacent_action_mse"
+    assert build_stop_reason_fields(baseline_debug) == {
+        "stop_reason": "adjacent_action_mse",
+        "canonical_stop_reason": "adjacent_action_mse",
+    }
 
 
 @pytest.mark.parametrize(

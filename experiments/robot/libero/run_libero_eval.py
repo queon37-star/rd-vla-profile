@@ -32,6 +32,7 @@ from experiments.robot.libero.evaluation_protocol import (
 from experiments.robot.libero.latent_metric_trace import (
     build_action_head_workload_identity,
     build_latent_metric_trace_records,
+    build_stop_reason_fields,
     require_prediction_id,
 )
 
@@ -1141,6 +1142,7 @@ def run_episode(
                             "recurrent_iteration_count": None,
                             "final_mse": None,
                             "adaptive_stop": False,
+                            **build_stop_reason_fields(abort_debug),
                             "execution_path": "numerical_abort",
                             "nonfinite_policy": getattr(cfg, "nonfinite_policy", "legacy"),
                             "numerical_retry_attempted": True,
@@ -1271,6 +1273,7 @@ def run_episode(
                     "recurrent_iteration_count": recurrent_iteration_count,
                     "max_recurrent_iteration": _as_int(max_recurrent_iteration),
                     "adaptive_stop": bool(debug.get("adaptive_stop", False)),
+                    **build_stop_reason_fields(debug),
                     "metric_name": debug.get("metric_name", "mse_between_action_outputs"),
                     "iteration_mse": iteration_mse,
                     "iteration_metric_values": debug.get("iteration_metric_values", iteration_mse),
