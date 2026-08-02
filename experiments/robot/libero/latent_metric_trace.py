@@ -5,6 +5,8 @@ from __future__ import annotations
 from numbers import Integral
 from typing import Any, Dict, Mapping
 
+from prismatic.models.latent_dynamics import LATENT_DYNAMICS_FIELDS
+
 
 LATENT_ONLY_STOP_REASONS = frozenset({"max_iter", "latent_threshold"})
 
@@ -106,6 +108,12 @@ def build_latent_metric_trace_records(
                 "relative_mse": float(item["relative_mse"]),
                 "cosine_distance": float(item["cosine_distance"]),
                 "relative_l2": float(item["relative_l2"]),
+                **{
+                    name: (
+                        None if item.get(name) is None else float(item[name])
+                    )
+                    for name in LATENT_DYNAMICS_FIELDS
+                },
                 "adjacent_action_mse": float(action_mse),
                 "action_mse_below_0_001": bool(float(action_mse) < 0.001),
                 "baseline_stopping_iteration": baseline_k,

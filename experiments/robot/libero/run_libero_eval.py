@@ -1290,6 +1290,12 @@ def run_episode(
                     "latent_metric_trace_enabled": debug.get(
                         "latent_metric_trace_enabled", False
                     ),
+                    "latent_dynamics_trace_enabled": debug.get(
+                        "latent_dynamics_trace_enabled", False
+                    ),
+                    "latent_dynamics_warm_anchor_available": debug.get(
+                        "latent_dynamics_warm_anchor_available", False
+                    ),
                     "latent_metric_trace_eps": debug.get("latent_metric_trace_eps"),
                     "latent_metric_trace": latent_metric_trace,
                     "final_mse": _as_float(final_mse),

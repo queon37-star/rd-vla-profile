@@ -503,6 +503,11 @@ class VLARecurrent(nn.Module):
                 state.detach().clone()
             )
         cached_state_used = bool(warm_start_metadata.get("state_used", False))
+        latent_dynamics_warm_anchor = (
+            state.detach().clone()
+            if shadow_full_depth and cached_state_used
+            else None
+        )
         warm_start_min_iter_configured = int(warm_start_min_iter)
         effective_min_iter = (
             max(2, warm_start_min_iter_configured)
@@ -646,6 +651,7 @@ class VLARecurrent(nn.Module):
             first_threshold_satisfied_k = None
             shadow_trace_records = []
             shadow_error = None
+            shadow_previous_update = None
 
             run_one_iteration_ms_list = []
             # Output timing lists include the final return-path call unless the
@@ -797,11 +803,19 @@ class VLARecurrent(nn.Module):
                                             current_state=state,
                                             previous_output=prev_output,
                                             current_output=curr_output,
+                                            previous_update=shadow_previous_update,
+                                            warm_anchor=latent_dynamics_warm_anchor,
                                             eps=latent_only_eps,
                                         )
                                     )
                                     shadow_record = shadow_trace_records[-1]
-                                    if not shadow_record["state_finite"]:
+                                    if shadow_record["latent_dynamics_error"] is not None:
+                                        shadow_error = {
+                                            "iteration": int(actual_iter),
+                                            "stage": "latent_dynamics",
+                                            **shadow_record["latent_dynamics_error"],
+                                        }
+                                    elif not shadow_record["state_finite"]:
                                         shadow_error = {
                                             "iteration": int(actual_iter),
                                             "stage": "production_state",
@@ -813,6 +827,10 @@ class VLARecurrent(nn.Module):
                                             "stage": "production_output",
                                             "reason": "non_finite",
                                         }
+                                    if actual_iter >= 2 and shadow_record["state_finite"]:
+                                        shadow_previous_update = (
+                                            state.float() - shadow_previous_state.float()
+                                        ).detach().clone()
 
                                 prev_output = curr_output.detach()
                                 if profile_coda_cost:
@@ -917,6 +935,10 @@ class VLARecurrent(nn.Module):
                 "first_threshold_satisfied_k": first_threshold_satisfied_k,
                 "shadow_full_depth_enabled": bool(shadow_full_depth),
                 "latent_metric_trace_enabled": bool(shadow_full_depth),
+                "latent_dynamics_trace_enabled": bool(shadow_full_depth),
+                "latent_dynamics_warm_anchor_available": bool(
+                    shadow_full_depth and cached_state_used
+                ),
                 "latent_metric_trace_eps": float(latent_only_eps),
                 "shadow_trace": shadow_trace_records,
                 "shadow_trace_complete": False if shadow_full_depth else None,
@@ -964,6 +986,8 @@ class VLARecurrent(nn.Module):
                     h_a=h_a,
                     h_t=h_t,
                     p=p,
+                    previous_update=shadow_previous_update,
+                    warm_anchor=latent_dynamics_warm_anchor,
                     eps=latent_only_eps,
                 )
                 shadow_trace_records.extend(shadow_result["records"])

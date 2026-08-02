@@ -4,6 +4,11 @@ from typing import Any, Dict, Optional
 
 import torch
 
+from prismatic.models.latent_dynamics import (
+    LATENT_DYNAMICS_FIELDS,
+    NonFiniteLatentDynamicsError,
+    compute_latent_dynamics,
+)
 from prismatic.models.latent_metrics import compute_latent_metrics
 from prismatic.utils.rdvla_profiler import rdvla_range
 
@@ -33,6 +38,8 @@ def build_shadow_trace_record(
     current_state: torch.Tensor,
     previous_output: Optional[torch.Tensor],
     current_output: torch.Tensor,
+    previous_update: Optional[torch.Tensor] = None,
+    warm_anchor: Optional[torch.Tensor] = None,
     eps: float = 1e-8,
 ) -> Dict[str, Any]:
     """Build a JSON-safe record without retaining GPU tensors."""
@@ -45,6 +52,24 @@ def build_shadow_trace_record(
         and _is_finite(current_state)
         else None
     )
+    latent_dynamics_error = None
+    if latent_metrics:
+        try:
+            latent_dynamics = compute_latent_dynamics(
+                current_state,
+                previous_state,
+                previous_update=previous_update,
+                warm_anchor=warm_anchor,
+                eps=eps,
+            )
+        except NonFiniteLatentDynamicsError as exc:
+            latent_dynamics = {name: None for name in LATENT_DYNAMICS_FIELDS}
+            latent_dynamics_error = {
+                "reason": "non_finite",
+                "message": str(exc),
+            }
+    else:
+        latent_dynamics = {name: None for name in LATENT_DYNAMICS_FIELDS}
     action_mse, action_l2 = _metric_pair(previous_output, current_output)
     return {
         "k": int(iteration),
@@ -68,6 +93,8 @@ def build_shadow_trace_record(
             latent_metrics["cosine_distance"] if latent_metrics else None
         ),
         "relative_l2": latent_metrics["relative_l2"] if latent_metrics else None,
+        **latent_dynamics,
+        "latent_dynamics_error": latent_dynamics_error,
         "action_mse": action_mse,
         "action_l2": action_l2,
     }
@@ -84,6 +111,8 @@ def run_shadow_tail(
     h_a: torch.Tensor,
     h_t: torch.Tensor,
     p: torch.Tensor,
+    previous_update: Optional[torch.Tensor] = None,
+    warm_anchor: Optional[torch.Tensor] = None,
     eps: float = 1e-8,
 ) -> Dict[str, Any]:
     """Run a detached diagnostic tail that cannot change production state."""
@@ -91,6 +120,11 @@ def run_shadow_tail(
     error = None
     tail_state = state.detach().clone()
     tail_output = current_output.detach().clone()
+    tail_previous_update = (
+        previous_update.detach().clone().float()
+        if previous_update is not None
+        else None
+    )
 
     with torch.no_grad():
         for iteration in range(actual_iter + 1, max_iter + 1):
@@ -128,8 +162,17 @@ def run_shadow_tail(
                     current_state=candidate_state,
                     previous_output=previous_output,
                     current_output=candidate_output,
+                    previous_update=tail_previous_update,
+                    warm_anchor=warm_anchor,
                     eps=eps,
                 )
+                if record["latent_dynamics_error"] is not None:
+                    error = {
+                        "iteration": int(iteration),
+                        "stage": "latent_dynamics",
+                        **record["latent_dynamics_error"],
+                    }
+                    break
                 if record["latent_mse"] is None or record["action_mse"] is None:
                     error = {
                         "iteration": int(iteration),
@@ -138,6 +181,9 @@ def run_shadow_tail(
                     }
                     break
                 records.append(record)
+                tail_previous_update = (
+                    candidate_state.float() - previous_state.float()
+                ).detach().clone()
                 tail_state = candidate_state.detach().clone()
                 tail_output = candidate_output.detach().clone()
             except Exception as exc:  # Shadow diagnostics must not replace a valid production result.
