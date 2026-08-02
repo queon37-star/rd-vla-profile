@@ -449,6 +449,15 @@ def get_vla_action(
                         nonfinite_policy=getattr(cfg, "nonfinite_policy", "legacy"),
                         shadow_full_depth=getattr(cfg, "shadow_full_depth", False),
                         capture_action_head_workload=capture_action_head_workload,
+                        latent_only_metric=getattr(cfg, "latent_only_metric", "raw_mse"),
+                        latent_only_cold_threshold=getattr(
+                            cfg, "latent_only_cold_threshold", 0.0
+                        ),
+                        latent_only_warm_threshold=getattr(
+                            cfg, "latent_only_warm_threshold", 0.0
+                        ),
+                        latent_only_min_iter=getattr(cfg, "latent_only_min_iter", 2),
+                        latent_only_eps=getattr(cfg, "latent_only_eps", 1e-8),
                     )
                     recurrence_debug = getattr(getattr(action_head, "model", None), "last_recurrence_debug", None)
                     action_head_inference_metadata = (

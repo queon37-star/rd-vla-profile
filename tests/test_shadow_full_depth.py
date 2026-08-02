@@ -123,6 +123,12 @@ def test_shadow_full_depth_preserves_production_result_and_midpoint_cache():
         record["action_mse"] == 1.0
         for record in shadow_debug["shadow_trace"][1:]
     )
+    assert all(
+        set(("raw_mse", "relative_mse", "cosine_distance", "relative_l2"))
+        <= set(record)
+        for record in shadow_debug["shadow_trace"]
+    )
+    assert shadow_debug["latent_metric_trace_enabled"] is True
     assert shadow_debug["shadow_production_snapshot"] == {
         "K_t": 2,
         "terminal_iteration": 2,

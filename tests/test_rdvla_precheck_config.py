@@ -2,6 +2,7 @@ import pytest
 
 from configs.rdvla_precheck import (
     canonicalize_recurrence_strategy,
+    validate_latent_only_configuration,
     validate_latent_precheck_configuration,
 )
 
@@ -14,6 +15,7 @@ from configs.rdvla_precheck import (
         ("kl_divergence", "adjacent_action_mse"),
         ("adjacent_action_mse", "adjacent_action_mse"),
         ("cosine_similarity", "cosine_similarity"),
+        ("latent_only", "latent_only"),
     ],
 )
 def test_recurrence_strategy_canonicalization(requested, canonical):
@@ -23,6 +25,44 @@ def test_recurrence_strategy_canonicalization(requested, canonical):
 def test_unknown_recurrence_strategy_is_rejected():
     with pytest.raises(ValueError, match="Unsupported recurrence strategy"):
         canonicalize_recurrence_strategy("typo")
+
+
+def _validate_latent_only(**overrides):
+    values = {
+        "recurrence_strategy": "latent_only",
+        "metric": "raw_mse",
+        "cold_threshold": 0.1,
+        "warm_threshold": 0.2,
+        "min_iter": 2,
+        "eps": 1e-8,
+    }
+    values.update(overrides)
+    return validate_latent_only_configuration(**values)
+
+
+def test_latent_only_configuration_accepts_independent_defaults():
+    assert _validate_latent_only() is None
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"metric": "unknown"}, "Unsupported latent_only_metric"),
+        ({"cold_threshold": -1.0}, "finite non-negative"),
+        ({"warm_threshold": float("nan")}, "finite non-negative"),
+        ({"min_iter": 1}, "integer >= 2"),
+        ({"eps": 0.0}, "finite positive"),
+        ({"use_latent_precheck": True}, "cannot use a latent pre-check"),
+        ({"latent_precheck_mode": "origin_aware"}, "cannot use a latent pre-check"),
+        ({"shadow_full_depth": True}, "cannot enable shadow_full_depth"),
+        ({"use_cached_final_output": True}, "cannot reuse a cached action"),
+    ],
+)
+def test_latent_only_configuration_rejects_invalid_or_scheduler_settings(
+    overrides, message
+):
+    with pytest.raises(ValueError, match=message):
+        _validate_latent_only(**overrides)
 
 
 @pytest.mark.parametrize("trace_level", ["off", "summary", "full"])

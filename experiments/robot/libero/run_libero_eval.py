@@ -20,6 +20,7 @@ from libero.libero import benchmark, get_libero_path
 import wandb
 from configs.rdvla_precheck import (
     canonicalize_recurrence_strategy,
+    validate_latent_only_configuration,
     validate_latent_precheck_configuration,
 )
 from experiments.robot.libero.evaluation_protocol import (
@@ -149,6 +150,13 @@ class GenerateConfig:
     recurrence_cos_thresh: float = 0.999
     recurrence_max_iter: int = 32
 
+    # Independent latent-only recurrence stopping (inactive unless selected).
+    latent_only_metric: str = "raw_mse"
+    latent_only_cold_threshold: float = 0.0
+    latent_only_warm_threshold: float = 0.0
+    latent_only_min_iter: int = 2
+    latent_only_eps: float = 1e-8
+
     # Disabled-by-default warm-start inference settings.
     use_warm_start: bool = False
     warm_start_source: str = "s1"
@@ -224,6 +232,18 @@ def validate_config(cfg: GenerateConfig) -> None:
 
     assert not (cfg.load_in_8bit and cfg.load_in_4bit), "Cannot use both 8-bit and 4-bit quantization!"
     canonicalize_recurrence_strategy(cfg.recurrence_strategy)
+    validate_latent_only_configuration(
+        cfg.recurrence_strategy,
+        metric=cfg.latent_only_metric,
+        cold_threshold=cfg.latent_only_cold_threshold,
+        warm_threshold=cfg.latent_only_warm_threshold,
+        min_iter=cfg.latent_only_min_iter,
+        eps=cfg.latent_only_eps,
+        use_latent_precheck=cfg.use_latent_precheck,
+        latent_precheck_mode=cfg.latent_precheck_mode,
+        shadow_full_depth=cfg.shadow_full_depth,
+        use_cached_final_output=cfg.use_cached_final_output,
+    )
     validate_latent_precheck_configuration(
         cfg.latent_precheck_mode,
         cfg.latent_precheck_trace_level,
@@ -511,7 +531,10 @@ def _build_timing_summary_record(timing_record, result):
                     recurrence_debug = {}
 
     final_mse = recurrence_debug.get("final_mse")
-    if final_mse is None:
+    if (
+        final_mse is None
+        and recurrence_debug.get("canonical_recurrence_strategy") != "latent_only"
+    ):
         final_mse = recurrence_debug.get("final_conv_score", final_kl)
 
     record = {
@@ -548,6 +571,11 @@ def _build_timing_summary_record(timing_record, result):
         "stop_reason": recurrence_debug.get("stop_reason"),
         "canonical_stop_reason": recurrence_debug.get("canonical_stop_reason"),
         "canonical_recurrence_strategy": recurrence_debug.get("canonical_recurrence_strategy"),
+        "metric_name": recurrence_debug.get("metric_name"),
+        "actual_origin": recurrence_debug.get("actual_origin"),
+        "effective_threshold": recurrence_debug.get("effective_threshold"),
+        "coda_call_count": recurrence_debug.get("coda_call_count"),
+        "latent_metric_call_count": recurrence_debug.get("latent_metric_call_count"),
         "latent_precheck_mode": recurrence_debug.get("latent_precheck_mode", "legacy"),
         "latent_precheck_trace_level_requested": recurrence_debug.get("latent_precheck_trace_level_requested", "off"),
         "latent_precheck_trace_collected": recurrence_debug.get("latent_precheck_trace_collected"),
@@ -735,6 +763,44 @@ def _as_int(value):
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def build_latent_metric_trace_records(
+    recurrence_debug: Mapping[str, Any],
+    *,
+    task_id: int,
+    episode_id: int,
+    prediction_step: int,
+    actual_origin: str,
+) -> List[Dict[str, Any]]:
+    """Attach rollout identity and action labels to scalar full-depth traces."""
+    if not recurrence_debug.get("latent_metric_trace_enabled", False):
+        return []
+    baseline_k = _as_int(recurrence_debug.get("K_t"))
+    records = []
+    for item in recurrence_debug.get("shadow_trace", []):
+        raw_mse = item.get("raw_mse", item.get("latent_mse"))
+        action_mse = item.get("action_mse")
+        if raw_mse is None or action_mse is None:
+            continue
+        records.append(
+            {
+                "iteration_index": int(item["k"]),
+                "phase": item.get("phase"),
+                "actual_origin": actual_origin,
+                "raw_mse": float(raw_mse),
+                "relative_mse": float(item["relative_mse"]),
+                "cosine_distance": float(item["cosine_distance"]),
+                "relative_l2": float(item["relative_l2"]),
+                "adjacent_action_mse": float(action_mse),
+                "action_mse_below_0_001": bool(float(action_mse) < 0.001),
+                "baseline_stopping_iteration": baseline_k,
+                "task_id": int(task_id),
+                "episode_id": int(episode_id),
+                "prediction_id": int(prediction_step),
+            }
+        )
+    return records
 
 
 def _numeric_stats(values):
@@ -1203,6 +1269,14 @@ def run_episode(
                 final_convergence_evaluable = debug.get("final_convergence_evaluable")
                 if final_mse is None and iteration_mse and final_convergence_evaluable is not False:
                     final_mse = iteration_mse[-1]
+                actual_origin = "ACTUAL_WARM" if warm_start_used else "COLD"
+                latent_metric_trace = build_latent_metric_trace_records(
+                    debug,
+                    task_id=task_id,
+                    episode_id=episode_idx,
+                    prediction_step=prediction_step,
+                    actual_origin=actual_origin,
+                )
 
                 step_record = {
                     "schema_version": 1,
@@ -1230,6 +1304,21 @@ def run_episode(
                     "metric_name": debug.get("metric_name", "mse_between_action_outputs"),
                     "iteration_mse": iteration_mse,
                     "iteration_metric_values": debug.get("iteration_metric_values", iteration_mse),
+                    "actual_origin": debug.get("actual_origin", actual_origin),
+                    "configured_cold_threshold": debug.get("configured_cold_threshold"),
+                    "configured_warm_threshold": debug.get("configured_warm_threshold"),
+                    "effective_threshold": debug.get("effective_threshold"),
+                    "latent_only_metric": debug.get("latent_only_metric"),
+                    "latent_only_min_iter": debug.get("latent_only_min_iter"),
+                    "latent_only_eps": debug.get("latent_only_eps"),
+                    "latent_only_trace": debug.get("latent_only_trace", []),
+                    "coda_call_count": debug.get("coda_call_count"),
+                    "latent_metric_call_count": debug.get("latent_metric_call_count"),
+                    "latent_metric_trace_enabled": debug.get(
+                        "latent_metric_trace_enabled", False
+                    ),
+                    "latent_metric_trace_eps": debug.get("latent_metric_trace_eps"),
+                    "latent_metric_trace": latent_metric_trace,
                     "final_mse": _as_float(final_mse),
                     "final_convergence_evaluable": final_convergence_evaluable,
                     "final_conv_score": debug.get("final_conv_score", final_kl),

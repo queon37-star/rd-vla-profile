@@ -5,8 +5,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 from configs.rdvla_precheck import (
     canonicalize_recurrence_strategy,
+    validate_latent_only_configuration,
     validate_latent_precheck_configuration,
 )
+from prismatic.models.latent_only_stopping import run_latent_only_adaptive
 from prismatic.models.action_head_workload import build_action_head_workload
 from prismatic.models.origin_aware_scheduler import (
     NonFiniteOriginAwareInferenceError,
@@ -404,9 +406,26 @@ class VLARecurrent(nn.Module):
                 nonfinite_policy: str = "legacy",
                 shadow_full_depth: bool = False,
                 capture_action_head_workload: bool = False,
+                latent_only_metric: str = "raw_mse",
+                latent_only_cold_threshold: float = 0.0,
+                latent_only_warm_threshold: float = 0.0,
+                latent_only_min_iter: int = 2,
+                latent_only_eps: float = 1e-8,
                 **kwargs) -> torch.Tensor:
         requested_recurrence_strategy = convergence_strategy
         canonical_recurrence_strategy = canonicalize_recurrence_strategy(convergence_strategy)
+        validate_latent_only_configuration(
+            convergence_strategy,
+            metric=latent_only_metric,
+            cold_threshold=latent_only_cold_threshold,
+            warm_threshold=latent_only_warm_threshold,
+            min_iter=latent_only_min_iter,
+            eps=latent_only_eps,
+            use_latent_precheck=use_latent_precheck,
+            latent_precheck_mode=latent_precheck_mode,
+            shadow_full_depth=shadow_full_depth,
+            use_cached_final_output=use_cached_final_output,
+        )
         latent_precheck_mode = validate_latent_precheck_configuration(
             latent_precheck_mode,
             latent_precheck_trace_level,
@@ -426,6 +445,8 @@ class VLARecurrent(nn.Module):
             raise ValueError("latent_precheck_mode='origin_aware' is inference-only")
         if shadow_full_depth and self.training:
             raise ValueError("shadow_full_depth is inference-only")
+        if canonical_recurrence_strategy == "latent_only" and self.training:
+            raise ValueError("recurrence_strategy='latent_only' is inference-only")
 
         B = h_a.size(0)
         device, dtype = h_a.device, h_a.dtype
@@ -447,7 +468,11 @@ class VLARecurrent(nn.Module):
                 B,
                 device,
                 dtype,
-                validate_warm_start_finite=validate_warm_start_finite or latent_precheck_mode == "origin_aware",
+                validate_warm_start_finite=(
+                    validate_warm_start_finite
+                    or latent_precheck_mode == "origin_aware"
+                    or canonical_recurrence_strategy == "latent_only"
+                ),
                 validate_warm_start_dtype=latent_precheck_mode == "origin_aware",
             )
         else:
@@ -518,6 +543,31 @@ class VLARecurrent(nn.Module):
         #     return self._get_output(state, h_a, h_t, p), actual_iter, final_kl
 
         # 아래는 측정용 metric 추가를 위해 수정한 adaptive branch
+
+
+        if canonical_recurrence_strategy == "latent_only" and not self.training:
+            actual_origin = "ACTUAL_WARM" if cached_state_used else "COLD"
+            return run_latent_only_adaptive(
+                self,
+                state,
+                prelude_out,
+                h_a,
+                h_t,
+                p,
+                max_iter=max_iter,
+                metric_name=latent_only_metric,
+                cold_threshold=latent_only_cold_threshold,
+                warm_threshold=latent_only_warm_threshold,
+                min_iter=latent_only_min_iter,
+                eps=latent_only_eps,
+                actual_origin=actual_origin,
+                requested_recurrence_strategy=requested_recurrence_strategy,
+                profile_coda_cost=profile_coda_cost,
+                capture_warm_start_candidates=capture_warm_start_candidates,
+                warm_start_candidate_states=warm_start_candidate_states,
+                warm_start_source=warm_start_source,
+                warm_start_min_iter_configured=warm_start_min_iter_configured,
+            )
 
 
         if (
@@ -747,6 +797,7 @@ class VLARecurrent(nn.Module):
                                             current_state=state,
                                             previous_output=prev_output,
                                             current_output=curr_output,
+                                            eps=latent_only_eps,
                                         )
                                     )
                                     shadow_record = shadow_trace_records[-1]
@@ -865,6 +916,8 @@ class VLARecurrent(nn.Module):
                 "min_iter_gate_block_count": int(min_iter_gate_block_count),
                 "first_threshold_satisfied_k": first_threshold_satisfied_k,
                 "shadow_full_depth_enabled": bool(shadow_full_depth),
+                "latent_metric_trace_enabled": bool(shadow_full_depth),
+                "latent_metric_trace_eps": float(latent_only_eps),
                 "shadow_trace": shadow_trace_records,
                 "shadow_trace_complete": False if shadow_full_depth else None,
                 "shadow_tail_start_iteration": None,
@@ -911,6 +964,7 @@ class VLARecurrent(nn.Module):
                     h_a=h_a,
                     h_t=h_t,
                     p=p,
+                    eps=latent_only_eps,
                 )
                 shadow_trace_records.extend(shadow_result["records"])
                 self.last_recurrence_debug.update(
@@ -1097,8 +1151,25 @@ class ActionHeadRecurrent(nn.Module):
                        nonfinite_policy="legacy",
                        shadow_full_depth=False,
                        capture_action_head_workload=False,
+                       latent_only_metric="raw_mse",
+                       latent_only_cold_threshold=0.0,
+                       latent_only_warm_threshold=0.0,
+                       latent_only_min_iter=2,
+                       latent_only_eps=1e-8,
                        **kwargs):
         canonicalize_recurrence_strategy(convergence_strategy)
+        validate_latent_only_configuration(
+            convergence_strategy,
+            metric=latent_only_metric,
+            cold_threshold=latent_only_cold_threshold,
+            warm_threshold=latent_only_warm_threshold,
+            min_iter=latent_only_min_iter,
+            eps=latent_only_eps,
+            use_latent_precheck=use_latent_precheck,
+            latent_precheck_mode=latent_precheck_mode,
+            shadow_full_depth=shadow_full_depth,
+            use_cached_final_output=use_cached_final_output,
+        )
         validate_latent_precheck_configuration(
             latent_precheck_mode,
             latent_precheck_trace_level,
@@ -1144,7 +1215,12 @@ class ActionHeadRecurrent(nn.Module):
                                  latent_precheck_confirmation_mode=latent_precheck_confirmation_mode,
                                  nonfinite_policy=nonfinite_policy,
                                  shadow_full_depth=shadow_full_depth,
-                                 capture_action_head_workload=capture_action_head_workload)
+                                 capture_action_head_workload=capture_action_head_workload,
+                                 latent_only_metric=latent_only_metric,
+                                 latent_only_cold_threshold=latent_only_cold_threshold,
+                                 latent_only_warm_threshold=latent_only_warm_threshold,
+                                 latent_only_min_iter=latent_only_min_iter,
+                                 latent_only_eps=latent_only_eps)
             if capture_action_head_workload:
                 metadata = self.model.last_inference_metadata
                 selected_initial_state = metadata.pop("_workload_selected_initial_state")

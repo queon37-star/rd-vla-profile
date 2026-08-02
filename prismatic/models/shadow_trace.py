@@ -4,6 +4,7 @@ from typing import Any, Dict, Optional
 
 import torch
 
+from prismatic.models.latent_metrics import compute_latent_metrics
 from prismatic.utils.rdvla_profiler import rdvla_range
 
 
@@ -32,19 +33,41 @@ def build_shadow_trace_record(
     current_state: torch.Tensor,
     previous_output: Optional[torch.Tensor],
     current_output: torch.Tensor,
+    eps: float = 1e-8,
 ) -> Dict[str, Any]:
     """Build a JSON-safe record without retaining GPU tensors."""
     state_finite = _is_finite(current_state)
     output_finite = _is_finite(current_output)
-    latent_mse, latent_l2 = _metric_pair(previous_state, current_state)
+    latent_metrics = (
+        compute_latent_metrics(current_state, previous_state, eps=eps)
+        if previous_state is not None
+        and _is_finite(previous_state)
+        and _is_finite(current_state)
+        else None
+    )
     action_mse, action_l2 = _metric_pair(previous_output, current_output)
     return {
         "k": int(iteration),
         "phase": phase,
         "state_finite": state_finite,
         "output_finite": output_finite,
-        "latent_mse": latent_mse,
-        "latent_l2": latent_l2,
+        "latent_mse": latent_metrics["raw_mse"] if latent_metrics else None,
+        "latent_l2": (
+            float(
+                torch.norm(
+                    current_state.float().reshape(-1)
+                    - previous_state.float().reshape(-1)
+                ).item()
+            )
+            if latent_metrics
+            else None
+        ),
+        "raw_mse": latent_metrics["raw_mse"] if latent_metrics else None,
+        "relative_mse": latent_metrics["relative_mse"] if latent_metrics else None,
+        "cosine_distance": (
+            latent_metrics["cosine_distance"] if latent_metrics else None
+        ),
+        "relative_l2": latent_metrics["relative_l2"] if latent_metrics else None,
         "action_mse": action_mse,
         "action_l2": action_l2,
     }
@@ -61,6 +84,7 @@ def run_shadow_tail(
     h_a: torch.Tensor,
     h_t: torch.Tensor,
     p: torch.Tensor,
+    eps: float = 1e-8,
 ) -> Dict[str, Any]:
     """Run a detached diagnostic tail that cannot change production state."""
     records = []
@@ -104,6 +128,7 @@ def run_shadow_tail(
                     current_state=candidate_state,
                     previous_output=previous_output,
                     current_output=candidate_output,
+                    eps=eps,
                 )
                 if record["latent_mse"] is None or record["action_mse"] is None:
                     error = {

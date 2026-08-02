@@ -4,18 +4,65 @@ import math
 from numbers import Real
 from typing import Optional
 
+from prismatic.models.latent_metrics import LATENT_METRIC_NAMES, validate_latent_metric_eps
+
 
 SUPPORTED_RECURRENCE_STRATEGIES = {
     "fixed",
     "kl_divergence",
     "adjacent_action_mse",
     "cosine_similarity",
+    "latent_only",
 }
 SUPPORTED_LATENT_PRECHECK_MODES = {"legacy", "off", "origin_aware"}
 SUPPORTED_LATENT_PRECHECK_TRACE_LEVELS = {"off", "summary", "full"}
 SUPPORTED_ORIGIN_AWARE_CONFIRMATION_MODES = {"next_iter", "backfill_pair"}
 SUPPORTED_NONFINITE_POLICIES = {"legacy", "cold_retry_once"}
 ORIGIN_AWARE_COLD_THRESHOLD = 0.2
+
+
+def _finite_non_negative(value, name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, Real):
+        raise ValueError(f"{name} must be a finite non-negative number")
+    value = float(value)
+    if not math.isfinite(value) or value < 0:
+        raise ValueError(f"{name} must be a finite non-negative number")
+    return value
+
+
+def validate_latent_only_configuration(
+    recurrence_strategy: Optional[str],
+    *,
+    metric: str,
+    cold_threshold: float,
+    warm_threshold: float,
+    min_iter: int,
+    eps: float,
+    use_latent_precheck: bool = False,
+    latent_precheck_mode: str = "legacy",
+    shadow_full_depth: bool = False,
+    use_cached_final_output: bool = False,
+) -> None:
+    """Validate scalar settings and keep latent-only independent of schedulers."""
+    if metric not in LATENT_METRIC_NAMES:
+        raise ValueError(
+            f"Unsupported latent_only_metric: {metric}. "
+            f"Expected one of {list(LATENT_METRIC_NAMES)}"
+        )
+    _finite_non_negative(cold_threshold, "latent_only_cold_threshold")
+    _finite_non_negative(warm_threshold, "latent_only_warm_threshold")
+    if isinstance(min_iter, bool) or not isinstance(min_iter, int) or min_iter < 2:
+        raise ValueError("latent_only_min_iter must be an integer >= 2")
+    validate_latent_metric_eps(eps)
+
+    if recurrence_strategy != "latent_only":
+        return
+    if use_latent_precheck or latent_precheck_mode == "origin_aware":
+        raise ValueError("latent_only cannot use a latent pre-check scheduler")
+    if shadow_full_depth:
+        raise ValueError("latent_only cannot enable shadow_full_depth")
+    if use_cached_final_output:
+        raise ValueError("latent_only cannot reuse a cached action output")
 
 
 def canonicalize_recurrence_strategy(strategy: Optional[str]) -> Optional[str]:

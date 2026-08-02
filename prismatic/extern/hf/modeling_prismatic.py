@@ -816,6 +816,11 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
         nonfinite_policy="legacy",
         shadow_full_depth=False,
         capture_action_head_workload=False,
+        latent_only_metric="raw_mse",
+        latent_only_cold_threshold=0.0,
+        latent_only_warm_threshold=0.0,
+        latent_only_min_iter=2,
+        latent_only_eps=1e-8,
     ):
         """Run L1 regression-based continuous action prediction or discrete action tokens prediction."""
 
@@ -902,6 +907,11 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
                     nonfinite_policy=nonfinite_policy,
                     shadow_full_depth=shadow_full_depth,
                     capture_action_head_workload=capture_action_head_workload,
+                    latent_only_metric=latent_only_metric,
+                    latent_only_cold_threshold=latent_only_cold_threshold,
+                    latent_only_warm_threshold=latent_only_warm_threshold,
+                    latent_only_min_iter=latent_only_min_iter,
+                    latent_only_eps=latent_only_eps,
                 )
             # Handle convergence-based return (output, num_iters, final_kl) vs fixed return (output)
             actual_iters = None
@@ -967,6 +977,11 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
         nonfinite_policy: str = "legacy",
         shadow_full_depth: bool = False,
         capture_action_head_workload: bool = False,
+        latent_only_metric: str = "raw_mse",
+        latent_only_cold_threshold: float = 0.0,
+        latent_only_warm_threshold: float = 0.0,
+        latent_only_min_iter: int = 2,
+        latent_only_eps: float = 1e-8,
         **kwargs: str,
     ) -> np.ndarray:
 
@@ -1044,6 +1059,11 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
             nonfinite_policy=nonfinite_policy,
             shadow_full_depth=shadow_full_depth,
             capture_action_head_workload=capture_action_head_workload,
+            latent_only_metric=latent_only_metric,
+            latent_only_cold_threshold=latent_only_cold_threshold,
+            latent_only_warm_threshold=latent_only_warm_threshold,
+            latent_only_min_iter=latent_only_min_iter,
+            latent_only_eps=latent_only_eps,
             )
 
         # Unnormalize predicted actions
