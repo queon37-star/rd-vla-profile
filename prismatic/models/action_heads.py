@@ -5,9 +5,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 from configs.rdvla_precheck import (
     canonicalize_recurrence_strategy,
+    validate_fixed_terminal_only_configuration,
     validate_latent_only_configuration,
     validate_latent_precheck_configuration,
 )
+from prismatic.models.fixed_terminal_only import run_fixed_terminal_only
 from prismatic.models.latent_only_stopping import run_latent_only_adaptive
 from prismatic.models.scalar_policy_stopping_runtime import (
     run_scalar_policy_adaptive,
@@ -430,6 +432,11 @@ class VLARecurrent(nn.Module):
                 **kwargs) -> torch.Tensor:
         requested_recurrence_strategy = convergence_strategy
         canonical_recurrence_strategy = canonicalize_recurrence_strategy(convergence_strategy)
+        validate_fixed_terminal_only_configuration(
+            canonical_recurrence_strategy,
+            recurrent_num_iter=num_iter,
+            recurrence_max_iter=max_iter,
+        )
         validate_latent_only_configuration(
             convergence_strategy,
             metric=latent_only_metric,
@@ -520,6 +527,7 @@ class VLARecurrent(nn.Module):
                     or latent_precheck_mode == "origin_aware"
                     or canonical_recurrence_strategy == "latent_only"
                     or canonical_recurrence_strategy == "scalar_policy"
+                    or canonical_recurrence_strategy == "fixed_terminal_only"
                 ),
                 validate_warm_start_dtype=latent_precheck_mode == "origin_aware",
             )
@@ -564,6 +572,27 @@ class VLARecurrent(nn.Module):
         )
         self.last_recurrence_debug = None
         self._last_get_output_timing = None
+
+        if canonical_recurrence_strategy == "fixed_terminal_only":
+            if self.training:
+                raise ValueError("recurrence_strategy='fixed_terminal_only' is inference-only")
+            actual_origin = "ACTUAL_WARM" if cached_state_used else "COLD"
+            return run_fixed_terminal_only(
+                self,
+                state,
+                prelude_out,
+                h_a,
+                h_t,
+                p,
+                fixed_k=num_iter,
+                max_iter=max_iter,
+                actual_origin=actual_origin,
+                requested_recurrence_strategy=requested_recurrence_strategy,
+                profile_coda_cost=profile_coda_cost,
+                capture_warm_start_candidates=capture_warm_start_candidates,
+                warm_start_candidate_states=warm_start_candidate_states,
+                warm_start_source=warm_start_source,
+            )
 
         # Convergence-based stopping
         # 이게 원본 adaptive branch
@@ -1455,6 +1484,11 @@ class ActionHeadRecurrent(nn.Module):
                        **kwargs):
         canonical_recurrence_strategy = canonicalize_recurrence_strategy(
             convergence_strategy
+        )
+        validate_fixed_terminal_only_configuration(
+            canonical_recurrence_strategy,
+            recurrent_num_iter=num_iter,
+            recurrence_max_iter=max_iter,
         )
         (
             scalar_task_policy,

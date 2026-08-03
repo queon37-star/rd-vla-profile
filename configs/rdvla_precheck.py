@@ -9,6 +9,7 @@ from prismatic.models.latent_metrics import LATENT_METRIC_NAMES, validate_latent
 
 SUPPORTED_RECURRENCE_STRATEGIES = {
     "fixed",
+    "fixed_terminal_only",
     "kl_divergence",
     "adjacent_action_mse",
     "cosine_similarity",
@@ -75,6 +76,36 @@ def canonicalize_recurrence_strategy(strategy: Optional[str]) -> Optional[str]:
     if strategy == "kl_divergence":
         return "adjacent_action_mse"
     return strategy
+
+
+def validate_fixed_terminal_only_configuration(
+    recurrence_strategy: Optional[str],
+    *,
+    recurrent_num_iter: Optional[int],
+    recurrence_max_iter: int,
+) -> None:
+    """Validate the explicit fixed-depth, terminal-only inference strategy."""
+
+    if canonicalize_recurrence_strategy(recurrence_strategy) != "fixed_terminal_only":
+        return
+    if (
+        isinstance(recurrent_num_iter, bool)
+        or not isinstance(recurrent_num_iter, int)
+        or recurrent_num_iter < 1
+    ):
+        raise ValueError(
+            "fixed_terminal_only requires recurrent_num_iter to be a positive integer"
+        )
+    if (
+        isinstance(recurrence_max_iter, bool)
+        or not isinstance(recurrence_max_iter, int)
+        or recurrence_max_iter < 1
+    ):
+        raise ValueError("recurrence_max_iter must be a positive integer")
+    if recurrent_num_iter > recurrence_max_iter:
+        raise ValueError(
+            "fixed_terminal_only recurrent_num_iter must not exceed recurrence_max_iter"
+        )
 
 
 def validate_latent_precheck_configuration(

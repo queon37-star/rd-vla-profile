@@ -22,6 +22,7 @@ from libero.libero import benchmark, get_libero_path
 import wandb
 from configs.rdvla_precheck import (
     canonicalize_recurrence_strategy,
+    validate_fixed_terminal_only_configuration,
     validate_latent_only_configuration,
     validate_latent_precheck_configuration,
 )
@@ -288,6 +289,11 @@ def validate_config(cfg: GenerateConfig) -> None:
     assert not (cfg.load_in_8bit and cfg.load_in_4bit), "Cannot use both 8-bit and 4-bit quantization!"
     canonical_recurrence_strategy = canonicalize_recurrence_strategy(
         cfg.recurrence_strategy
+    )
+    validate_fixed_terminal_only_configuration(
+        canonical_recurrence_strategy,
+        recurrent_num_iter=cfg.recurrent_num_iter,
+        recurrence_max_iter=cfg.recurrence_max_iter,
     )
 
     if canonical_recurrence_strategy == "scalar_policy":
@@ -740,6 +746,32 @@ def build_scalar_policy_log_fields(debug):
             [],
         ),
     }
+
+
+def build_decode_call_log_fields(debug):
+    """Extract JSON-safe terminal decode metadata independent of profiling."""
+
+    debug = debug or {}
+    return {
+        "coda_call_count": _as_int(debug.get("coda_call_count")),
+        "get_output_call_count": _as_int(debug.get("get_output_call_count")),
+        "final_state_coda_executed": debug.get("final_state_coda_executed"),
+        "returned_cached_final_output": debug.get("returned_cached_final_output"),
+    }
+
+
+def resolve_fixed_k_log_value(debug, recurrence_strategy, recurrent_num_iter):
+    """Resolve fixed depth for legacy and terminal-only step records."""
+
+    debug = debug or {}
+    fixed_k = _as_int(debug.get("fixed_K"))
+    if (
+        fixed_k is None
+        and recurrence_strategy in {"fixed", "fixed_terminal_only"}
+        and recurrent_num_iter is not None
+    ):
+        fixed_k = int(recurrent_num_iter)
+    return fixed_k
 
 
 def _build_timing_summary_record(timing_record, result):
@@ -1465,7 +1497,9 @@ def run_episode(
                 debug = recurrence_debug or {}
                 recurrence_strategy = getattr(cfg, "recurrence_strategy", None)
                 recurrent_num_iter = getattr(cfg, "recurrent_num_iter", None)
-                fixed_k = int(recurrent_num_iter) if recurrence_strategy == "fixed" and recurrent_num_iter is not None else None
+                fixed_k = resolve_fixed_k_log_value(
+                    debug, recurrence_strategy, recurrent_num_iter
+                )
                 max_recurrent_iteration = debug.get("max_iter")
                 if max_recurrent_iteration is None:
                     max_recurrent_iteration = fixed_k if fixed_k is not None else getattr(cfg, "recurrence_max_iter", None)
@@ -1525,7 +1559,7 @@ def run_episode(
                     "latent_only_min_iter": debug.get("latent_only_min_iter"),
                     "latent_only_eps": debug.get("latent_only_eps"),
                     "latent_only_trace": debug.get("latent_only_trace", []),
-                    "coda_call_count": debug.get("coda_call_count"),
+                    **build_decode_call_log_fields(debug),
                     **build_scalar_policy_log_fields(
                         debug
                     ),
@@ -1577,8 +1611,6 @@ def run_episode(
                     "adjacent_comparison_pairs": debug.get("adjacent_comparison_pairs", []),
                     "adjacent_comparison_pair_count": debug.get("adjacent_comparison_pair_count", 0),
                     "origin_aware_scheduler_state": debug.get("origin_aware_scheduler_state"),
-                    "final_state_coda_executed": debug.get("final_state_coda_executed"),
-                    "returned_cached_final_output": debug.get("returned_cached_final_output"),
                     "cached_final_matches_returned": debug.get("cached_final_matches_returned"),
                     "max_iteration_convergence_evaluable": debug.get("max_iteration_convergence_evaluable"),
                     "execution_path": debug.get("execution_path"),
@@ -1714,7 +1746,6 @@ def run_episode(
                         "coda_ms_list",
                         "output_proj_ms_list",
                         "convergence_check_ms_list",
-                        "get_output_call_count",
                         "coda_ms_total",
                         "get_output_ms_total",
                         "run_one_iteration_ms_total",
