@@ -28,7 +28,22 @@ ACTION_MSE_THRESHOLD = 0.001
 DEFAULT_SEED = 7
 RANK_CANDIDATES = (4, 8, 16)
 MODEL_VARIANTS = ("no_auxiliary", "action_delta_auxiliary")
-FORCED_CODA_ITERATIONS = (1, 2)
+REPLAY_CONTRACT_VERSION = 2
+FORCED_CODA_PREFIX_MAX_ITERATION = 3
+MINIMUM_GATE_ITERATION = 3
+MODEL_APPLICABLE_MIN_K_ACTION = 4
+HISTORY_UNAVAILABLE_DEFINITION = "K_action - 1 < 3"
+FORCED_CODA_ITERATIONS = tuple(range(1, FORCED_CODA_PREFIX_MAX_ITERATION + 1))
+
+
+def replay_contract() -> dict[str, Any]:
+    return {
+        "replay_contract_version": REPLAY_CONTRACT_VERSION,
+        "forced_coda_prefix_max_iteration": FORCED_CODA_PREFIX_MAX_ITERATION,
+        "minimum_gate_iteration": MINIMUM_GATE_ITERATION,
+        "model_applicable_min_k_action": MODEL_APPLICABLE_MIN_K_ACTION,
+        "history_unavailable_definition": HISTORY_UNAVAILABLE_DEFINITION,
+    }
 
 
 class PreconvergenceValidationError(ValueError):
@@ -449,10 +464,10 @@ def replay_confirm_next(
     sequence.validate()
     _require(math.isfinite(float(threshold)), "decision threshold must be finite")
     k_action = sequence.k_action
-    coda_iterations = [1]
-    if sequence.max_iter >= 2:
-        coda_iterations.append(2)
-    if k_action <= 2:
+    coda_iterations = list(
+        range(1, min(FORCED_CODA_PREFIX_MAX_ITERATION, sequence.max_iter) + 1)
+    )
+    if k_action < MODEL_APPLICABLE_MIN_K_ACTION:
         category, offset = trigger_category(None, k_action)
         return ConfirmNextReplay(
             identity=sequence.identity,
@@ -474,7 +489,7 @@ def replay_confirm_next(
 
     k_gate = None
     evaluated = 0
-    for k in range(3, sequence.max_iter + 1):
+    for k in range(MINIMUM_GATE_ITERATION, sequence.max_iter + 1):
         _require(k in scores_by_k, f"missing gate score at k={k}")
         score = float(scores_by_k[k])
         _require(math.isfinite(score), f"non-finite gate score at k={k}")
@@ -522,7 +537,8 @@ def _threshold_candidates(
     values = sorted(
         {
             float(score)
-            for _, scores in scored_sequences
+            for sequence, scores in scored_sequences
+            if sequence.k_action >= MODEL_APPLICABLE_MIN_K_ACTION
             for score in scores.values()
         }
     )
@@ -537,11 +553,18 @@ def select_training_threshold(
 
     prepared = []
     score_values = set()
+    history_unavailable_prediction_count = 0
+    history_unavailable_scheduled_coda_calls = 0
     for sequence, scores in scored_sequences:
         # Validation is deliberately outside the candidate loop. The exhaustive
         # reference calls it from replay_confirm_next for every threshold.
         sequence.validate()
-        required_iterations = range(3, sequence.max_iter + 1)
+        k_action = sequence.k_action
+        if k_action < MODEL_APPLICABLE_MIN_K_ACTION:
+            history_unavailable_prediction_count += 1
+            history_unavailable_scheduled_coda_calls += k_action
+            continue
+        required_iterations = range(MINIMUM_GATE_ITERATION, sequence.max_iter + 1)
         for k in required_iterations:
             _require(k in scores, f"missing gate score at k={k}")
         finite_scores = {}
@@ -550,7 +573,7 @@ def select_training_threshold(
             _require(math.isfinite(score), f"non-finite gate score at k={k}")
             finite_scores[k] = score
             score_values.add(score)
-        prepared.append((sequence, finite_scores, sequence.k_action))
+        prepared.append((sequence, finite_scores, k_action))
 
     values = sorted(score_values)
     _require(bool(values), "threshold selection has no scores")
@@ -587,19 +610,22 @@ def select_training_threshold(
         k_gate: int | None,
         next_action_hit: Mapping[int, int | None],
     ) -> tuple[int, int, int, int, int]:
-        if k_action <= 2:
-            return (0, k_action, 0, 0, 0)
         if k_gate is None:
-            # k_action > 2 implies max_iter >= 3, so {1, 2, max_iter}
-            # contains exactly three distinct Coda calls.
-            return (1, 3, 0, 0, 0)
+            # Model-applicable predictions have max_iter >= 4, so the forced
+            # prefix plus max-iteration fallback contains four unique calls.
+            return (1, 4, 0, 0, 0)
         offset = int(k_gate) - (int(k_action) - 1)
         terminal_k = next_action_hit[k_gate]
         if terminal_k is None:
             terminal_k = sequence.max_iter
-        # Forced prefix calls 1 and 2, the gate call, then every call through
-        # the first strictly-later convergence hit (or max_iter fallback).
-        coda_calls = 3 + int(terminal_k) - int(k_gate)
+        # k=3 is already in the forced prefix and must not be duplicated.
+        # A later gate adds one call before the contiguous confirmation tail.
+        coda_calls = (
+            FORCED_CODA_PREFIX_MAX_ITERATION
+            + int(k_gate > FORCED_CODA_PREFIX_MAX_ITERATION)
+            + int(terminal_k)
+            - int(k_gate)
+        )
         return (
             int(offset > 0),
             coda_calls,
@@ -609,14 +635,6 @@ def select_training_threshold(
         )
 
     for sequence, scores, k_action in prepared:
-        if k_action <= 2:
-            add_interval(
-                0,
-                candidate_count,
-                contribution_for_gate(sequence, k_action, None, {}),
-            )
-            continue
-
         next_action_hit: dict[int, int | None] = {}
         next_hit = None
         for k in range(sequence.max_iter, 2, -1):
@@ -625,7 +643,7 @@ def select_training_threshold(
                 next_hit = k
 
         previous_record = -math.inf
-        for k in range(3, sequence.max_iter + 1):
+        for k in range(MINIMUM_GATE_ITERATION, sequence.max_iter + 1):
             score = scores[k]
             if score <= previous_record:
                 continue
@@ -660,7 +678,16 @@ def select_training_threshold(
         item = {
             "threshold": threshold,
             "late_or_missed_count": running_late,
-            "scheduled_coda_calls": running_calls,
+            "scheduled_coda_calls": (
+                running_calls + history_unavailable_scheduled_coda_calls
+            ),
+            "model_applicable_scheduled_coda_calls": running_calls,
+            "history_unavailable_scheduled_coda_calls": (
+                history_unavailable_scheduled_coda_calls
+            ),
+            "total_scheduled_coda_calls": (
+                running_calls + history_unavailable_scheduled_coda_calls
+            ),
             "mean_absolute_trigger_offset": (
                 float(running_absolute_offset / running_offset_count)
                 if running_offset_count
@@ -693,6 +720,17 @@ def select_training_threshold(
             else "no_safe_threshold_fail_closed"
         ),
         "candidate_count": candidate_count,
+        "model_applicable_prediction_count": len(prepared),
+        "history_unavailable_prediction_count": (
+            history_unavailable_prediction_count
+        ),
+        "model_applicable_scheduled_coda_calls": selected[
+            "model_applicable_scheduled_coda_calls"
+        ],
+        "history_unavailable_scheduled_coda_calls": selected[
+            "history_unavailable_scheduled_coda_calls"
+        ],
+        "total_scheduled_coda_calls": selected["total_scheduled_coda_calls"],
         "selection_order": [
             "require zero late or missed train triggers when feasible",
             "minimize exact CONFIRM_NEXT scheduled Coda calls",
@@ -829,6 +867,76 @@ def _task_macro_field(
 ) -> float | None:
     values = [metric[field] for metric in per_task.values() if metric[field] is not None]
     return float(np.mean(values)) if values else None
+
+
+def fallback_preservation(
+    replays: Sequence[ConfirmNextReplay],
+) -> dict[str, Any]:
+    """Audit the fixed baseline behavior for history-unavailable predictions."""
+
+    for replay in replays:
+        _require(
+            replay.k_action < MODEL_APPLICABLE_MIN_K_ACTION,
+            "fallback audit received a model-applicable prediction",
+        )
+    terminal_mismatches = sum(
+        replay.terminal_k != replay.k_action for replay in replays
+    )
+    nonzero_delta = sum(replay.delta_k != 0 for replay in replays)
+    unexpected_gate_evaluations = sum(
+        replay.gate_evaluation_count != 0 or replay.k_gate is not None
+        for replay in replays
+    )
+    exact_contract = all(
+        replay.trigger_category == "forced_prefix_convergence"
+        and replay.terminal_k == replay.k_action
+        and replay.delta_k == 0
+        and replay.k_gate is None
+        and replay.gate_evaluation_count == 0
+        and replay.coda_iterations == tuple(range(1, replay.k_action + 1))
+        and replay.coda_call_count == replay.k_action
+        and replay.saved_coda_calls == 0
+        and replay.reached_max_iter == (replay.k_action == replay.max_iter)
+        for replay in replays
+    )
+    return {
+        "prediction_count": len(replays),
+        "terminal_k_mismatch_count": terminal_mismatches,
+        "nonzero_delta_k_count": nonzero_delta,
+        "unexpected_gate_evaluation_count": unexpected_gate_evaluations,
+        "preserves_baseline_k": bool(exact_contract),
+    }
+
+
+def preconvergence_promotion_checks(
+    *,
+    overall_metrics: Mapping[str, Any],
+    model_applicable_metrics: Mapping[str, Any],
+    fallback_audit: Mapping[str, Any],
+    zero_overhead_projection: Mapping[str, Any],
+) -> dict[str, bool]:
+    categories = model_applicable_metrics["trigger_category_counts"]
+    return {
+        "model_applicable_zero_late_or_missed": (
+            categories["late"] + categories["missed"] == 0
+        ),
+        "model_applicable_mean_trigger_lead_between_0_and_1": (
+            model_applicable_metrics["mean_trigger_lead"] is not None
+            and 0.0 <= model_applicable_metrics["mean_trigger_lead"] <= 1.0
+        ),
+        "model_applicable_mean_delta_k_near_zero": (
+            abs(model_applicable_metrics["mean_delta_k"]) <= 0.1
+        ),
+        "overall_coda_reduction_positive": (
+            overall_metrics["coda_call_reduction"] > 0
+        ),
+        "fallback_preserves_baseline_k": bool(
+            fallback_audit["preserves_baseline_k"]
+        ),
+        "zero_overhead_projection_improves": (
+            zero_overhead_projection["projected_net_saving_ms"] > 0
+        ),
+    }
 
 
 def leakage_audit(
@@ -1113,14 +1221,18 @@ def save_dataset_bundle(
             "excluded": "k >= K_action",
             "minimum_model_iteration": 3,
         },
+        "replay_contract": replay_contract(),
         "history_coverage": {
             "model_applicable_prediction_count": sum(
-                sequence.k_action - 1 >= 3 for sequence in sequences
+                sequence.k_action >= MODEL_APPLICABLE_MIN_K_ACTION
+                for sequence in sequences
             ),
             "history_unavailable_prediction_count": sum(
-                sequence.k_action - 1 < 3 for sequence in sequences
+                sequence.k_action < MODEL_APPLICABLE_MIN_K_ACTION
+                for sequence in sequences
             ),
-            "history_unavailable_definition": "K_action - 1 < 3",
+            "model_applicable_min_k_action": MODEL_APPLICABLE_MIN_K_ACTION,
+            "history_unavailable_definition": HISTORY_UNAVAILABLE_DEFINITION,
         },
     }
     (output_dir / "manifest.json").write_bytes(canonical_json_bytes(manifest))
@@ -1194,7 +1306,12 @@ def fit_oof_bundle(
                     flush=True,
                 )
                 scored_training = [
-                    (sequence, score_sequence(fitted, sequence))
+                    (
+                        sequence,
+                        score_sequence(fitted, sequence)
+                        if sequence.k_action >= MODEL_APPLICABLE_MIN_K_ACTION
+                        else {},
+                    )
                     for sequence in training
                 ]
                 selection = select_training_threshold(scored_training)
@@ -1216,6 +1333,12 @@ def fit_oof_bundle(
                             if assigned_fold == fold_id
                         ),
                         "training_prediction_count": len(training),
+                        "model_applicable_training_prediction_count": selection[
+                            "model_applicable_prediction_count"
+                        ],
+                        "history_unavailable_training_prediction_count": selection[
+                            "history_unavailable_prediction_count"
+                        ],
                         "threshold_selection": selection,
                         "fitted_trigger": serialize_fitted_trigger(fitted),
                     }
@@ -1232,6 +1355,8 @@ def fit_oof_bundle(
             )
     return {
         "schema_version": SCHEMA_VERSION,
+        **replay_contract(),
+        "replay_contract": replay_contract(),
         "seed": config.seed,
         "training_config": {
             "steps": config.steps,
@@ -1240,7 +1365,9 @@ def fit_oof_bundle(
             "auxiliary_weight": config.auxiliary_weight,
         },
         "model_fitting_scope": "outer-training ACTUAL_WARM tasks only",
-        "threshold_selection_scope": "outer-training ACTUAL_WARM predictions only",
+        "threshold_selection_scope": (
+            "outer-training ACTUAL_WARM predictions with K_action >= 4 only"
+        ),
         "global_model_fitted": False,
         "global_threshold_fitted": False,
         "leakage_audit": audit,
@@ -1261,6 +1388,22 @@ def evaluate_oof_bundle(
     _require(
         training_bundle.get("global_threshold_fitted") is False,
         "global threshold is forbidden",
+    )
+    _require(
+        training_bundle.get("replay_contract_version")
+        == REPLAY_CONTRACT_VERSION,
+        "training bundle replay contract version mismatch; contract-v1 bundles are rejected",
+    )
+    _require(
+        training_bundle.get("replay_contract") == replay_contract(),
+        "training bundle replay contract metadata mismatch",
+    )
+    _require(
+        all(
+            training_bundle.get(field) == value
+            for field, value in replay_contract().items()
+        ),
+        "training bundle top-level replay contract metadata mismatch",
     )
     leakage_audit(sequences, assignment)
     results = {}
@@ -1294,7 +1437,11 @@ def evaluate_oof_bundle(
                 fold_replays.append(
                     replay_confirm_next(
                         sequence,
-                        score_sequence(fitted, sequence),
+                        (
+                            score_sequence(fitted, sequence)
+                            if sequence.k_action >= MODEL_APPLICABLE_MIN_K_ACTION
+                            else {}
+                        ),
                         threshold,
                     )
                 )
@@ -1312,16 +1459,37 @@ def evaluate_oof_bundle(
         _require(len(seen) == len(sequences), f"{name}: incomplete OOF coverage")
         primary = [replay for replay in all_replays if replay.actual_origin == "ACTUAL_WARM"]
         cold = [replay for replay in all_replays if replay.actual_origin == "COLD"]
+        primary_model_applicable = [
+            replay
+            for replay in primary
+            if replay.k_action >= MODEL_APPLICABLE_MIN_K_ACTION
+        ]
+        primary_fallback = [
+            replay
+            for replay in primary
+            if replay.k_action < MODEL_APPLICABLE_MIN_K_ACTION
+        ]
+        _require(
+            bool(primary_model_applicable),
+            f"{name}: no model-applicable ACTUAL_WARM predictions",
+        )
         primary_metrics = aggregate_replays(primary, latency=latency)
         primary_metrics["history_coverage"] = {
-            "model_applicable_prediction_count": sum(
-                replay.k_action - 1 >= 3 for replay in primary
-            ),
-            "history_unavailable_prediction_count": sum(
-                replay.k_action - 1 < 3 for replay in primary
-            ),
-            "history_unavailable_definition": "K_action - 1 < 3",
+            "model_applicable_prediction_count": len(primary_model_applicable),
+            "history_unavailable_prediction_count": len(primary_fallback),
+            "model_applicable_min_k_action": MODEL_APPLICABLE_MIN_K_ACTION,
+            "history_unavailable_definition": HISTORY_UNAVAILABLE_DEFINITION,
         }
+        applicable_metrics = aggregate_replays(
+            primary_model_applicable, latency=latency
+        )
+        fallback_audit = fallback_preservation(primary_fallback)
+        fallback_metrics = (
+            aggregate_replays(primary_fallback, latency=latency)
+            if primary_fallback
+            else {"prediction_count": 0}
+        )
+        fallback_metrics.update(fallback_audit)
         per_task = {
             str(task): aggregate_replays(
                 [replay for replay in primary if replay.identity.task_id == task],
@@ -1354,20 +1522,12 @@ def evaluate_oof_bundle(
             ),
             gate_latency_ms=0.0,
         )
-        categories = primary_metrics["trigger_category_counts"]
-        promotion = {
-            "zero_late_or_missed": categories["late"] + categories["missed"] == 0,
-            "mean_trigger_lead_between_0_and_1": (
-                primary_metrics["mean_trigger_lead"] is not None
-                and 0.0 <= primary_metrics["mean_trigger_lead"] <= 1.0
-            ),
-            "mean_delta_k_near_zero": abs(primary_metrics["mean_delta_k"]) <= 0.1,
-            "coda_reduction_positive": primary_metrics["coda_call_reduction"] > 0,
-            "zero_overhead_projection_improves": zero_overhead[
-                "projected_net_saving_ms"
-            ]
-            > 0,
-        }
+        promotion = preconvergence_promotion_checks(
+            overall_metrics=primary_metrics,
+            model_applicable_metrics=applicable_metrics,
+            fallback_audit=fallback_audit,
+            zero_overhead_projection=zero_overhead,
+        )
         first_fold = model_bundle["folds"][0]["fitted_trigger"]
         results[name] = {
             "rank": model_bundle["rank"],
@@ -1376,6 +1536,8 @@ def evaluate_oof_bundle(
             "inference_flops": int(first_fold["inference_flops"]),
             "folds": fold_reports,
             "primary_actual_warm": primary_metrics,
+            "primary_model_applicable": applicable_metrics,
+            "primary_history_unavailable_fallback": fallback_metrics,
             "secondary_cold": aggregate_replays(cold, latency=latency) if cold else None,
             "prediction_replays": [replay_record(replay) for replay in all_replays],
             "zero_overhead_projection": zero_overhead,
@@ -1384,6 +1546,8 @@ def evaluate_oof_bundle(
         }
     return {
         "schema_version": SCHEMA_VERSION,
+        **replay_contract(),
+        "replay_contract": replay_contract(),
         "scope": "offline preconvergence feasibility only",
         "label_definition": "y_k = 1 iff k == K_action - 1; k >= K_action excluded from training",
         "scheduler": "CONFIRM_NEXT; gate never declares convergence",
@@ -1404,149 +1568,24 @@ def run_oof_training(
     config: TrainingConfig = TrainingConfig(),
     latency: Mapping[str, float] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Fit every rank/variant using training tasks only and replay held-out tasks."""
+    """Fit contract-v2 folds, then evaluate them through the canonical path."""
 
-    audit = leakage_audit(sequences, assignment)
-    models: dict[str, Any] = {}
-    report_models: dict[str, Any] = {}
-    for rank in ranks:
-        for variant in variants:
-            use_aux = variant == "action_delta_auxiliary"
-            _require(variant in MODEL_VARIANTS, f"unknown model variant: {variant}")
-            name = f"rank{rank}_{variant}"
-            fold_models = []
-            all_replays: list[ConfirmNextReplay] = []
-            for fold_id in sorted(set(assignment.values())):
-                training = [
-                    sequence
-                    for sequence in sequences
-                    if assignment[str(sequence.identity.task_id)] != fold_id
-                    and sequence.actual_origin == "ACTUAL_WARM"
-                ]
-                held_out = [
-                    sequence
-                    for sequence in sequences
-                    if assignment[str(sequence.identity.task_id)] == fold_id
-                ]
-                fitted = train_trigger(
-                    training,
-                    rank=rank,
-                    use_auxiliary=use_aux,
-                    config=TrainingConfig(
-                        seed=config.seed,
-                        steps=config.steps,
-                        learning_rate=config.learning_rate,
-                        weight_decay=config.weight_decay,
-                        auxiliary_weight=config.auxiliary_weight,
-                    ),
-                )
-                scored_training = [
-                    (sequence, score_sequence(fitted, sequence)) for sequence in training
-                ]
-                selection = select_training_threshold(scored_training)
-                threshold = float(selection["selected_threshold"])
-                held_out_replays = [
-                    replay_confirm_next(sequence, score_sequence(fitted, sequence), threshold)
-                    for sequence in held_out
-                ]
-                all_replays.extend(held_out_replays)
-                fold_models.append(
-                    {
-                        "fold_id": fold_id,
-                        "training_task_ids": sorted(
-                            {sequence.identity.task_id for sequence in training}
-                        ),
-                        "held_out_task_ids": sorted(
-                            {sequence.identity.task_id for sequence in held_out}
-                        ),
-                        "training_prediction_count": len(training),
-                        "held_out_prediction_count": len(held_out),
-                        "threshold_selection": selection,
-                        "fitted_trigger": serialize_fitted_trigger(fitted),
-                    }
-                )
-            primary = [r for r in all_replays if r.actual_origin == "ACTUAL_WARM"]
-            cold = [r for r in all_replays if r.actual_origin == "COLD"]
-            by_task = {
-                str(task): aggregate_replays(
-                    [r for r in primary if r.identity.task_id == task], latency=latency
-                )
-                for task in sorted({r.identity.task_id for r in primary})
-            }
-            primary_metrics = aggregate_replays(primary, latency=latency)
-            macro_fields = (
-                "ideal_trigger_rate",
-                "early_trigger_rate",
-                "late_trigger_rate",
-                "missed_preconvergence_trigger_rate",
-                "mean_trigger_offset",
-                "mean_trigger_lead",
-                "coda_call_reduction",
-                "mean_delta_k",
-                "p95_delta_k",
-                "candidate_max_iteration_rate",
-            )
-            primary_metrics["task_macro"] = {
-                field: float(
-                    np.mean(
-                        [metrics[field] for metrics in by_task.values() if metrics[field] is not None]
-                    )
-                )
-                for field in macro_fields
-            }
-            primary_metrics["per_task"] = by_task
-            zero_overhead = project_latency(
-                primary,
-                coda_latency_ms=float((latency or {}).get("coda_latency_ms", 0.0)),
-                recurrent_iteration_latency_ms=float(
-                    (latency or {}).get("recurrent_iteration_latency_ms", 0.0)
-                ),
-                gate_latency_ms=0.0,
-            )
-            categories = primary_metrics["trigger_category_counts"]
-            promotion = {
-                "zero_late_or_missed": categories["late"] + categories["missed"] == 0,
-                "mean_trigger_lead_between_0_and_1": (
-                    primary_metrics["mean_trigger_lead"] is not None
-                    and 0.0 <= primary_metrics["mean_trigger_lead"] <= 1.0
-                ),
-                "mean_delta_k_near_zero": abs(primary_metrics["mean_delta_k"]) <= 0.1,
-                "coda_reduction_positive": primary_metrics["coda_call_reduction"] > 0,
-                "zero_overhead_projection_improves": zero_overhead["projected_net_saving_ms"] > 0,
-            }
-            models[name] = {"folds": fold_models}
-            report_models[name] = {
-                "rank": rank,
-                "variant": variant,
-                "primary_actual_warm": primary_metrics,
-                "secondary_cold": aggregate_replays(cold, latency=latency) if cold else None,
-                "zero_overhead_projection": zero_overhead,
-                "promotion_checks": promotion,
-                "passes_all_promotion_checks": all(promotion.values()),
-                "parameter_count_by_fold": [
-                    fold["fitted_trigger"]["parameter_count"] for fold in fold_models
-                ],
-                "inference_flops_by_fold": [
-                    fold["fitted_trigger"]["inference_flops"] for fold in fold_models
-                ],
-            }
-    return (
-        {
-            "schema_version": SCHEMA_VERSION,
-            "seed": config.seed,
-            "model_fitting_scope": "outer-training tasks only",
-            "threshold_selection_scope": "outer-training ACTUAL_WARM predictions only",
-            "leakage_audit": audit,
-            "models": models,
-        },
-        {
-            "schema_version": SCHEMA_VERSION,
-            "scope": "offline preconvergence feasibility only",
-            "scheduler": "CONFIRM_NEXT",
-            "models": report_models,
-            "online_integration_implemented": False,
-            "gpu_microbenchmark_required": any(
-                result["passes_all_promotion_checks"] for result in report_models.values()
-            ),
+    training_bundle = fit_oof_bundle(
+        sequences,
+        assignment,
+        ranks=ranks,
+        variants=variants,
+        config=config,
+    )
+    evaluation = evaluate_oof_bundle(
+        sequences,
+        assignment,
+        training_bundle,
+        latency=latency
+        or {
+            "coda_latency_ms": 0.0,
+            "recurrent_iteration_latency_ms": 0.0,
+            "gate_latency_ms": 0.0,
         },
     )
+    return training_bundle, evaluation

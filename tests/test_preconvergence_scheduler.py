@@ -23,7 +23,7 @@ def test_confirm_next_ideal_trigger_state_machine() -> None:
     replay = replay_confirm_next(sequence, scores(sequence.max_iter, 4), 0.5)
     assert replay.trigger_category == "ideal"
     assert replay.trigger_offset == 0
-    assert replay.coda_iterations == (1, 2, 4, 5)
+    assert replay.coda_iterations == (1, 2, 3, 4, 5)
     assert replay.terminal_k == 5
     assert replay.delta_k == 0
 
@@ -52,7 +52,7 @@ def test_non_monotonic_action_labels_are_replayed_after_late_trigger() -> None:
         max_iter=sequence.max_iter,
     )
     replay = replay_confirm_next(sequence, scores(sequence.max_iter, 6), 0.5)
-    assert replay.coda_iterations == (1, 2, 6, 7, 8)
+    assert replay.coda_iterations == (1, 2, 3, 6, 7, 8)
     assert replay.terminal_k == 8
     assert replay.delta_k == 3
 
@@ -61,26 +61,52 @@ def test_coda_call_accounting_for_missed_trigger() -> None:
     sequence = make_sequence(0, k_action=5)
     replay = replay_confirm_next(sequence, scores(sequence.max_iter, None), 0.5)
     assert replay.trigger_category == "missed"
-    assert replay.coda_iterations == (1, 2, sequence.max_iter)
-    assert replay.coda_call_count == 3
+    assert replay.coda_iterations == (1, 2, 3, sequence.max_iter)
+    assert replay.coda_call_count == 4
     assert replay.baseline_coda_call_count == 5
-    assert replay.saved_coda_calls == 2
+    assert replay.saved_coda_calls == 1
     assert replay.gate_evaluation_count == sequence.max_iter - 2
 
 
 def test_projected_latency_includes_all_cost_terms() -> None:
-    sequence = make_sequence(0, k_action=5)
-    replay = replay_confirm_next(sequence, scores(sequence.max_iter, 4), 0.5)
+    sequence = make_sequence(0, k_action=7)
+    replay = replay_confirm_next(sequence, scores(sequence.max_iter, 6), 0.5)
     projection = project_latency(
         [replay],
         coda_latency_ms=2.0,
         recurrent_iteration_latency_ms=3.0,
         gate_latency_ms=0.25,
     )
-    assert projection["gross_coda_saving_ms"] == 2.0
+    assert projection["gross_coda_saving_ms"] == 4.0
     assert projection["additional_recurrent_cost_ms"] == 0.0
-    assert projection["gate_overhead_ms"] == 0.5
-    assert projection["projected_net_saving_ms"] == 1.5
+    assert projection["gate_overhead_ms"] == 1.0
+    assert projection["projected_net_saving_ms"] == 3.0
+
+
+def test_forced_prefix_stops_at_authoritative_k2_and_k3():
+    k2 = replay_confirm_next(make_sequence(0, k_action=2), {}, 0.5)
+    k3 = replay_confirm_next(make_sequence(1, k_action=3), {}, 0.5)
+    assert k2.trigger_category == k3.trigger_category == "forced_prefix_convergence"
+    assert k2.coda_iterations == (1, 2)
+    assert k3.coda_iterations == (1, 2, 3)
+    assert k2.terminal_k == 2 and k3.terminal_k == 3
+    assert k2.gate_evaluation_count == k3.gate_evaluation_count == 0
+
+
+def test_k4_ideal_gate_at_forced_k3_does_not_duplicate_coda():
+    sequence = make_sequence(0, k_action=4)
+    replay = replay_confirm_next(sequence, scores(sequence.max_iter, 3), 0.5)
+    assert replay.trigger_category == "ideal"
+    assert replay.coda_iterations == (1, 2, 3, 4)
+    assert replay.coda_call_count == 4
+    assert replay.terminal_k == 4
+
+
+def test_gate_after_forced_prefix_has_unique_ordered_calls():
+    sequence = make_sequence(0, k_action=7)
+    replay = replay_confirm_next(sequence, scores(sequence.max_iter, 5), 0.5)
+    assert replay.coda_iterations == (1, 2, 3, 5, 6, 7)
+    assert len(replay.coda_iterations) == len(set(replay.coda_iterations))
 
 
 def test_training_threshold_selection_is_tied_and_deterministic() -> None:

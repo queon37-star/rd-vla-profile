@@ -1,14 +1,21 @@
 from __future__ import annotations
 
 import torch
+import pytest
 from dataclasses import replace
 
 import scripts.preconvergence_trigger_lib as trigger_lib
 from scripts.preconvergence_trigger_lib import (
     LowRankPreconvergenceTrigger,
+    PreconvergenceValidationError,
+    REPLAY_CONTRACT_VERSION,
     TrainingConfig,
     evaluate_oof_bundle,
+    fallback_preservation,
     fit_oof_bundle,
+    preconvergence_promotion_checks,
+    replay_confirm_next,
+    replay_contract,
     tensor_scorer_item_call_count,
     train_trigger,
 )
@@ -125,6 +132,115 @@ def test_outer_held_out_changes_do_not_alter_fold_training_or_threshold(
     assert result["primary_actual_warm"]["history_coverage"] == {
         "model_applicable_prediction_count": 10,
         "history_unavailable_prediction_count": 0,
+        "model_applicable_min_k_action": 4,
         "history_unavailable_definition": "K_action - 1 < 3",
     }
+    assert original["replay_contract_version"] == REPLAY_CONTRACT_VERSION == 2
+    assert original["replay_contract"] == replay_contract() == {
+        "replay_contract_version": 2,
+        "forced_coda_prefix_max_iteration": 3,
+        "minimum_gate_iteration": 3,
+        "model_applicable_min_k_action": 4,
+        "history_unavailable_definition": "K_action - 1 < 3",
+    }
+    assert report["replay_contract"] == replay_contract()
     assert report["online_integration_implemented"] is False
+
+
+def test_mixed_oof_reports_applicable_and_fallback_populations():
+    sequences = [
+        make_sequence(task_id, task_id=task_id, k_action=(3 if task_id < 3 else 5))
+        for task_id in range(10)
+    ]
+    assignment = {str(task_id): task_id % 5 for task_id in range(10)}
+    bundle = fit_oof_bundle(
+        sequences,
+        assignment,
+        ranks=(4,),
+        variants=("no_auxiliary",),
+        config=TrainingConfig(seed=7, steps=1),
+    )
+    report = evaluate_oof_bundle(
+        sequences,
+        assignment,
+        bundle,
+        latency={
+            "coda_latency_ms": 2.0,
+            "recurrent_iteration_latency_ms": 3.0,
+            "gate_latency_ms": 0.1,
+        },
+    )
+    result = report["models"]["rank4_no_auxiliary"]
+    overall_count = result["primary_actual_warm"]["prediction_count"]
+    applicable_count = result["primary_model_applicable"]["prediction_count"]
+    fallback = result["primary_history_unavailable_fallback"]
+    assert applicable_count + fallback["prediction_count"] == overall_count == 10
+    assert applicable_count == 7
+    assert fallback["prediction_count"] == 3
+    assert fallback["terminal_k_mismatch_count"] == 0
+    assert fallback["nonzero_delta_k_count"] == 0
+    assert fallback["unexpected_gate_evaluation_count"] == 0
+    assert fallback["preserves_baseline_k"] is True
+    assert set(result["promotion_checks"]) == {
+        "model_applicable_zero_late_or_missed",
+        "model_applicable_mean_trigger_lead_between_0_and_1",
+        "model_applicable_mean_delta_k_near_zero",
+        "overall_coda_reduction_positive",
+        "fallback_preserves_baseline_k",
+        "zero_overhead_projection_improves",
+    }
+
+
+def test_promotion_uses_applicable_delta_and_fallback_audit_fail_closed():
+    checks = preconvergence_promotion_checks(
+        overall_metrics={"mean_delta_k": 0.0, "coda_call_reduction": 0.1},
+        model_applicable_metrics={
+            "trigger_category_counts": {"late": 0, "missed": 0},
+            "mean_trigger_lead": 0.5,
+            "mean_delta_k": 1.0,
+        },
+        fallback_audit={"preserves_baseline_k": True},
+        zero_overhead_projection={"projected_net_saving_ms": 1.0},
+    )
+    assert checks["model_applicable_mean_delta_k_near_zero"] is False
+
+    baseline = replay_confirm_next(make_sequence(0, k_action=3), {}, 0.5)
+    terminal_changed = replace(baseline, terminal_k=4)
+    delta_changed = replace(baseline, delta_k=1)
+    assert fallback_preservation([terminal_changed]) == {
+        "prediction_count": 1,
+        "terminal_k_mismatch_count": 1,
+        "nonzero_delta_k_count": 0,
+        "unexpected_gate_evaluation_count": 0,
+        "preserves_baseline_k": False,
+    }
+    assert fallback_preservation([delta_changed])["preserves_baseline_k"] is False
+
+
+def test_contract_v1_training_bundle_is_rejected():
+    sequences = [
+        make_sequence(task_id, task_id=task_id, k_action=5)
+        for task_id in range(4)
+    ]
+    assignment = {"0": 0, "1": 0, "2": 1, "3": 1}
+    bundle = fit_oof_bundle(
+        sequences,
+        assignment,
+        ranks=(4,),
+        variants=("no_auxiliary",),
+        config=TrainingConfig(seed=7, steps=1),
+    )
+    old_bundle = dict(bundle)
+    old_bundle["replay_contract_version"] = 1
+    old_bundle.pop("replay_contract", None)
+    with pytest.raises(PreconvergenceValidationError, match="contract-v1"):
+        evaluate_oof_bundle(
+            sequences,
+            assignment,
+            old_bundle,
+            latency={
+                "coda_latency_ms": 2.0,
+                "recurrent_iteration_latency_ms": 3.0,
+                "gate_latency_ms": 0.1,
+            },
+        )

@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 
 from scripts.preconvergence_trigger_lib import (
+    MODEL_APPLICABLE_MIN_K_ACTION,
     PreconvergenceValidationError,
     RawPreconvergenceSequence,
     TrainingConfig,
@@ -23,25 +24,43 @@ def reference_select_training_threshold(scored_sequences):
     """Test-only exhaustive reference preserving the pre-optimization code."""
 
     candidates = _threshold_candidates(scored_sequences)
+    model_applicable = [
+        (sequence, scores)
+        for sequence, scores in scored_sequences
+        if sequence.k_action >= MODEL_APPLICABLE_MIN_K_ACTION
+    ]
+    fallback = [
+        sequence
+        for sequence, _ in scored_sequences
+        if sequence.k_action < MODEL_APPLICABLE_MIN_K_ACTION
+    ]
+    fallback_calls = sum(sequence.k_action for sequence in fallback)
     evaluated = []
     for threshold in candidates:
-        replays = [
+        applicable_replays = [
             replay_confirm_next(sequence, scores, threshold)
-            for sequence, scores in scored_sequences
+            for sequence, scores in model_applicable
         ]
         late_missed = sum(
-            replay.trigger_category in {"late", "missed"} for replay in replays
+            replay.trigger_category in {"late", "missed"}
+            for replay in applicable_replays
         )
         offsets = [
             replay.trigger_offset
-            for replay in replays
+            for replay in applicable_replays
             if replay.trigger_offset is not None
         ]
+        applicable_calls = sum(
+            replay.coda_call_count for replay in applicable_replays
+        )
         evaluated.append(
             {
                 "threshold": threshold,
                 "late_or_missed_count": late_missed,
-                "scheduled_coda_calls": sum(r.coda_call_count for r in replays),
+                "scheduled_coda_calls": applicable_calls + fallback_calls,
+                "model_applicable_scheduled_coda_calls": applicable_calls,
+                "history_unavailable_scheduled_coda_calls": fallback_calls,
+                "total_scheduled_coda_calls": applicable_calls + fallback_calls,
                 "mean_absolute_trigger_offset": (
                     float(np.mean(np.abs(offsets))) if offsets else math.inf
                 ),
@@ -71,6 +90,15 @@ def reference_select_training_threshold(scored_sequences):
             else "no_safe_threshold_fail_closed"
         ),
         "candidate_count": len(candidates),
+        "model_applicable_prediction_count": len(model_applicable),
+        "history_unavailable_prediction_count": len(fallback),
+        "model_applicable_scheduled_coda_calls": selected[
+            "model_applicable_scheduled_coda_calls"
+        ],
+        "history_unavailable_scheduled_coda_calls": selected[
+            "history_unavailable_scheduled_coda_calls"
+        ],
+        "total_scheduled_coda_calls": selected["total_scheduled_coda_calls"],
         "selection_order": [
             "require zero late or missed train triggers when feasible",
             "minimize exact CONFIRM_NEXT scheduled Coda calls",
@@ -88,12 +116,20 @@ def assert_selection_equivalent(optimized, reference):
         "selection_status",
         "candidate_count",
         "selection_order",
+        "model_applicable_prediction_count",
+        "history_unavailable_prediction_count",
+        "model_applicable_scheduled_coda_calls",
+        "history_unavailable_scheduled_coda_calls",
+        "total_scheduled_coda_calls",
     ):
         assert optimized[field] == reference[field]
     for field in (
         "threshold",
         "late_or_missed_count",
         "scheduled_coda_calls",
+        "model_applicable_scheduled_coda_calls",
+        "history_unavailable_scheduled_coda_calls",
+        "total_scheduled_coda_calls",
     ):
         assert optimized["train_metrics"][field] == reference["train_metrics"][field]
     for field in ("mean_absolute_trigger_offset", "mean_trigger_lead"):
@@ -173,6 +209,9 @@ def test_event_sweep_matches_reference_on_randomized_duplicate_scores(seed):
     for prediction_id in range(rng.randint(2, 9)):
         max_iter = rng.randint(3, 11)
         k_action = rng.randint(2, max_iter)
+        if prediction_id == 0:
+            max_iter = max(max_iter, MODEL_APPLICABLE_MIN_K_ACTION)
+            k_action = max(k_action, MODEL_APPLICABLE_MIN_K_ACTION)
         tail = {
             k: rng.choice((0.02, 0.01, 0.0009, 0.0004))
             for k in range(k_action + 1, max_iter + 1)
@@ -196,8 +235,8 @@ def test_event_sweep_matches_reference_on_randomized_duplicate_scores(seed):
 
 def test_selector_validates_each_sequence_once_before_candidate_sweep(monkeypatch):
     sequences = [
-        sequence_with_action_mse(index, max_iter=8, k_action=4 + index)
-        for index in range(3)
+        sequence_with_action_mse(index, max_iter=8, k_action=k_action)
+        for index, k_action in enumerate((3, 5, 6))
     ]
     scored = [
         (sequence, {k: float((k + index) % 3) for k in range(3, 9)})
@@ -225,6 +264,27 @@ def test_selector_fail_closed_score_coverage_and_finiteness():
         select_training_threshold(
             [(sequence, {3: 0.1, 4: float("nan"), 5: 0.2, 6: 0.3})]
         )
+
+
+def test_fallback_scores_do_not_change_candidates_or_selection():
+    applicable = sequence_with_action_mse(0, max_iter=8, k_action=5)
+    fallback = sequence_with_action_mse(1, max_iter=8, k_action=3)
+    applicable_scores = {k: (0.8 if k == 4 else 0.2) for k in range(3, 9)}
+    low_fallback_scores = {k: -1000.0 - k for k in range(3, 9)}
+    high_fallback_scores = {k: 1000.0 + k for k in range(3, 9)}
+    low = select_training_threshold(
+        [(applicable, applicable_scores), (fallback, low_fallback_scores)]
+    )
+    high = select_training_threshold(
+        [(applicable, applicable_scores), (fallback, high_fallback_scores)]
+    )
+    assert low == high
+    assert low["candidate_count"] == 3
+    assert low["model_applicable_prediction_count"] == 1
+    assert low["history_unavailable_prediction_count"] == 1
+    assert low["history_unavailable_scheduled_coda_calls"] == 3
+    assert low["selection_status"] == "no_late_or_missed_feasible"
+    assert low["train_metrics"]["late_or_missed_count"] == 0
 
 
 def test_fit_oof_bundle_prints_flushed_stage_progress(capsys):

@@ -41,6 +41,12 @@ def _summary(bundle: Mapping[str, Any]) -> dict[str, Any]:
                     "training_task_ids": fold["training_task_ids"],
                     "held_out_task_ids": fold["held_out_task_ids"],
                     "training_prediction_count": fold["training_prediction_count"],
+                    "model_applicable_training_prediction_count": fold[
+                        "model_applicable_training_prediction_count"
+                    ],
+                    "history_unavailable_training_prediction_count": fold[
+                        "history_unavailable_training_prediction_count"
+                    ],
                     "threshold_selection": fold["threshold_selection"],
                     "parameter_count": fold["fitted_trigger"]["parameter_count"],
                     "inference_flops": fold["fitted_trigger"]["inference_flops"],
@@ -50,6 +56,8 @@ def _summary(bundle: Mapping[str, Any]) -> dict[str, Any]:
         }
     return {
         "schema_version": bundle["schema_version"],
+        **bundle["replay_contract"],
+        "replay_contract": bundle["replay_contract"],
         "seed": bundle["seed"],
         "training_config": bundle["training_config"],
         "model_fitting_scope": bundle["model_fitting_scope"],

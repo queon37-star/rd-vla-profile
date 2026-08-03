@@ -89,6 +89,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                     for fold in result["folds"]
                 ],
                 "primary_actual_warm": primary,
+                "primary_model_applicable": result[
+                    "primary_model_applicable"
+                ],
+                "primary_history_unavailable_fallback": result[
+                    "primary_history_unavailable_fallback"
+                ],
                 "secondary_cold": result["secondary_cold"],
                 "zero_overhead_projection": result["zero_overhead_projection"],
                 "promotion_checks": result["promotion_checks"],
@@ -98,6 +104,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             }
         compact = {
             "schema_version": report["schema_version"],
+            **report["replay_contract"],
+            "replay_contract": report["replay_contract"],
             "study": "one-step-ahead-coda-trigger-feasibility",
             "inputs": report["inputs"],
             "models": compact_models,
