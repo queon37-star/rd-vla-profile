@@ -1,5 +1,6 @@
 import types
 
+import pytest
 import torch
 
 from configs.rdvla_precheck import (
@@ -56,6 +57,7 @@ def make_model(*, constant_state=False):
     model = VLARecurrent(cfg)
     model.eval()
     model.test_coda_calls = 0
+    model.test_coda_states = []
 
     def run_one_iteration(
         self,
@@ -82,6 +84,9 @@ def make_model(*, constant_state=False):
     ):
         del h_a, h_t, p
         self.test_coda_calls += 1
+        self.test_coda_states.append(
+            state.detach().clone()
+        )
 
         if profile:
             self._last_get_output_timing = {
@@ -184,9 +189,19 @@ def test_warm_scalar_policy_runs_direct_executor():
     assert debug["returned_cached_final_output"] is False
 
 
-def test_cold_scalar_request_falls_back_to_action_mse():
+@pytest.mark.parametrize(
+    "execution_mode",
+    ["direct", "confirm_next"],
+)
+def test_cold_scalar_request_falls_back_to_action_mse(
+    execution_mode,
+):
     model = make_model(constant_state=True)
     h_a, h_t, p = inputs()
+    kwargs = scalar_kwargs()
+    kwargs["scalar_policy_execution_mode"] = (
+        execution_mode
+    )
 
     output, actual_iter, final_mse = model(
         h_a,
@@ -194,12 +209,12 @@ def test_cold_scalar_request_falls_back_to_action_mse():
         p,
         warm_start_state=None,
         kl_thresh=0.001,
-        **scalar_kwargs(),
+        **kwargs,
     )
 
     assert actual_iter == 2
     assert final_mse == 0.0
-    assert model.test_coda_calls == 3
+    assert model.test_coda_calls == actual_iter == 2
     assert torch.all(output == 0)
 
     debug = model.last_recurrence_debug
@@ -219,16 +234,51 @@ def test_cold_scalar_request_falls_back_to_action_mse():
         == "adjacent_action_mse_cold_fallback"
     )
     assert debug["warm_start_state_used"] is False
-    assert debug["coda_call_count"] == 3
-    assert debug["get_output_call_count"] == 3
-    assert debug["final_state_coda_executed"] is True
-    assert debug["returned_cached_final_output"] is False
+    assert debug["scalar_policy_execution_mode"] == execution_mode
+    assert debug["coda_call_count"] == actual_iter
+    assert debug["get_output_call_count"] == actual_iter
+    assert debug["final_state_coda_executed"] is False
+    assert debug["returned_cached_final_output"] is True
+    assert debug["use_cached_final_output"] is False
     assert debug["scalar_policy_score_call_count"] == 0
     assert debug["scalar_policy_gate_iteration"] is None
+
+    # Re-decoding the same terminal state is a reference only: the
+    # production return must already equal that terminal action.
+    terminal_state = model.test_coda_states[-1]
+    reference_output = model._get_output(
+        terminal_state,
+        h_a,
+        h_t,
+        p,
+    )
+    torch.testing.assert_close(
+        output,
+        reference_output,
+        rtol=0,
+        atol=0,
+    )
 
     warm = model.last_inference_metadata["warm_start"]
     assert warm["source"] == "midpoint"
     assert warm["source_K"] == 2
+
+    import json
+
+    from experiments.robot.libero.run_libero_eval import (
+        build_decode_call_log_fields,
+        build_scalar_policy_log_fields,
+    )
+
+    log_fields = {
+        **build_decode_call_log_fields(debug),
+        **build_scalar_policy_log_fields(debug),
+    }
+    assert log_fields["coda_call_count"] == actual_iter
+    assert log_fields["get_output_call_count"] == actual_iter
+    assert log_fields["final_state_coda_executed"] is False
+    assert log_fields["returned_cached_final_output"] is True
+    json.dumps(log_fields, allow_nan=False)
 
 
 def test_action_head_resolves_bound_task_policy():
@@ -307,8 +357,6 @@ def test_action_head_rejects_invalid_bound_mode():
         action_dim=2,
         cfg=cfg,
     )
-
-    import pytest
 
     with pytest.raises(
         ValueError,

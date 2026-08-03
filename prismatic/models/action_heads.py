@@ -773,7 +773,7 @@ class VLARecurrent(nn.Module):
 
             run_one_iteration_ms_list = []
             # Output timing lists include the final return-path call unless the
-            # cached-final-output option reuses the last adaptive-loop result.
+            # terminal output from the adaptive loop is returned directly.
             get_output_ms_list = []
             coda_ms_list = []
             output_proj_ms_list = []
@@ -989,8 +989,16 @@ class VLARecurrent(nn.Module):
                 with rdvla_range("RDVLA/action_head/stop_reason_update"):
                     stop_reason = "max_iter"
 
+            reuse_terminal_output = bool(
+                curr_output is not None
+                and (
+                    use_cached_final_output
+                    or scalar_policy_cold_fallback
+                )
+            )
+
             with rdvla_range("RDVLA/action_head/final_get_output"):
-                if use_cached_final_output and curr_output is not None:
+                if reuse_terminal_output:
                     final_output = curr_output
                 else:
                     final_output = self._get_output(
@@ -1017,9 +1025,7 @@ class VLARecurrent(nn.Module):
                     "midpoint_source_iteration": self.last_inference_metadata[
                         "warm_start"
                     ].get("source_iteration"),
-                    "cached_final_output_reused": bool(
-                        use_cached_final_output and curr_output is not None
-                    ),
+                    "cached_final_output_reused": reuse_terminal_output,
                 }
             else:
                 production_snapshot = None
@@ -1102,16 +1108,8 @@ class VLARecurrent(nn.Module):
                 "canonical_stop_reason": canonical_recurrence_strategy if adaptive_stop else stop_reason,
                 "coda_call_count": int(get_output_call_count),
                 "get_output_call_count": int(get_output_call_count),
-                "final_state_coda_executed": bool(
-                    not (
-                        use_cached_final_output
-                        and curr_output is not None
-                    )
-                ),
-                "returned_cached_final_output": bool(
-                    use_cached_final_output
-                    and curr_output is not None
-                ),
+                "final_state_coda_executed": not reuse_terminal_output,
+                "returned_cached_final_output": reuse_terminal_output,
                 "profiling_enabled": bool(profile_coda_cost),
                 "use_cached_final_output": bool(use_cached_final_output),
                 "warm_start_min_iter_configured": warm_start_min_iter_configured,

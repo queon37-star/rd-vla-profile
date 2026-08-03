@@ -116,6 +116,13 @@ def test_off_mode_removes_latent_metrics_item_sync_and_gate_trace(tiny_recurrent
     assert off_debug["latent_precheck_skip_ratio"] is None
     assert off_debug["latent_precheck_trace_collected"] is False
 
+    for debug in (legacy_debug, off_debug):
+        assert debug["K_t"] == 3
+        assert debug["coda_call_count"] == 3
+        assert debug["get_output_call_count"] == 3
+        assert debug["final_state_coda_executed"] is False
+        assert debug["returned_cached_final_output"] is True
+
 
 def test_legacy_alias_and_canonical_strategy_share_internal_behavior(tiny_recurrent):
     alias_result, alias_debug, _, _ = _run_with_spies(
