@@ -818,12 +818,67 @@ def _authoritative_records(dataset_dir: Path) -> tuple[dict[str, Any], dict[tupl
 
 
 def load_raw_manifest_sequences(
-    raw_manifest_path: Path,
-    authoritative_dataset_dir: Path,
+    raw_manifest_path: Path | Sequence[Path],
+    authoritative_dataset_dir: Path | None = None,
 ) -> tuple[dict[str, Any], list[RawPreconvergenceSequence]]:
     """Join optional raw shards to frozen labels by exact workload identity."""
 
-    raw_manifest_path = Path(raw_manifest_path)
+    raw_manifest_paths = (
+        [Path(path) for path in raw_manifest_path]
+        if isinstance(raw_manifest_path, (list, tuple))
+        else [Path(raw_manifest_path)]
+    )
+    _require(bool(raw_manifest_paths), "at least one raw manifest is required")
+    first_manifest = json.loads(raw_manifest_paths[0].read_text(encoding="utf-8"))
+    if first_manifest.get("schema_version") == 2:
+        from experiments.robot.libero.raw_preconvergence_trace import (
+            load_and_validate_manifests,
+        )
+
+        compact, predictions = load_and_validate_manifests(raw_manifest_paths)
+        sequences = []
+        for payload in predictions:
+            identity = payload["identity"]
+            key = (
+                int(identity["task_id"]),
+                int(identity["episode_id"]),
+                int(identity["prediction_id"]),
+            )
+            raw_origin = str(payload["actual_origin"])
+            actual_origin = "ACTUAL_WARM" if raw_origin == "ACTUAL_WARM" else "COLD"
+            sequence = RawPreconvergenceSequence(
+                identity=SequenceIdentity(*key),
+                actual_origin=actual_origin,
+                states=payload["tensors"]["states"],
+                actions=payload["tensors"]["actions"],
+                action_mse=tuple(payload["action_mse"]),
+                action_mse_phase=tuple(payload["action_mse_phase"]),
+                baseline_k=int(payload["production_terminal_k"]),
+                max_iter=int(payload["maximum_shadow_depth"]),
+            )
+            sequence.validate()
+            _require(sequence.k_action == sequence.baseline_k, f"{key}: collected first-hit mismatch")
+            sequences.append(sequence)
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "raw_manifest_schema_version": 2,
+            "raw_manifests": [str(path.resolve()) for path in raw_manifest_paths],
+            "raw_manifest_sha256": [sha256_file(path) for path in raw_manifest_paths],
+            "source_trace_set_sha256": compact["trace_set_sha256"],
+            "authoritative_dataset_manifest": None,
+            "authoritative_dataset_sha256": None,
+            "authoritative_label_sources": {
+                "production": "native BF16 control-flow iteration_mse embedded in raw shard",
+                "shadow_tail": "FP32 diagnostic action_mse embedded in raw shard only after baseline K",
+            },
+            "prediction_count": len(sequences),
+            "raw_states_present": True,
+            "raw_actions_present_for_auxiliary_supervision": True,
+        }, sequences
+
+    _require(len(raw_manifest_paths) == 1, "legacy raw schema accepts exactly one manifest")
+    _require(authoritative_dataset_dir is not None, "legacy raw schema requires authoritative_dataset_dir")
+    raw_manifest_path = raw_manifest_paths[0]
     raw_manifest = json.loads(raw_manifest_path.read_text(encoding="utf-8"))
     _require(raw_manifest.get("schema_version") == SCHEMA_VERSION, "raw manifest schema mismatch")
     _require(

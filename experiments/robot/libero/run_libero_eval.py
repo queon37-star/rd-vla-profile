@@ -1,6 +1,8 @@
 import json
+import hashlib
 import logging
 import os
+import random
 import shutil
 import sys
 import time
@@ -34,6 +36,13 @@ from experiments.robot.libero.latent_metric_trace import (
     build_latent_metric_trace_records,
     build_stop_reason_fields,
     require_prediction_id,
+)
+from experiments.robot.libero.raw_preconvergence_trace import (
+    RAW_PRECONVERGENCE_SCHEMA_VERSION,
+    RawPreconvergenceShardWriter,
+    build_prediction_payload,
+    checkpoint_identity,
+    current_source_commit,
 )
 
 sys.path.append("../..")
@@ -76,6 +85,31 @@ class TaskSuite(str, Enum):
     LIBERO_GOAL = "libero_goal"
     LIBERO_10 = "libero_10"
     LIBERO_90 = "libero_90"
+
+
+def _tensor_or_array_sha256(value) -> Optional[str]:
+    if value is None:
+        return None
+    if torch.is_tensor(value):
+        array = value.detach().to(device="cpu", copy=True).contiguous().view(torch.uint8).numpy()
+    else:
+        array = np.ascontiguousarray(np.asarray(value)).view(np.uint8)
+    return hashlib.sha256(array.tobytes()).hexdigest()
+
+
+def _rng_state_sha256() -> str:
+    """Hash Python, NumPy, CPU torch, and available CUDA RNG states."""
+    digest = hashlib.sha256()
+    digest.update(repr(random.getstate()).encode("utf-8"))
+    numpy_state = np.random.get_state()
+    digest.update(str(numpy_state[0]).encode("ascii"))
+    digest.update(np.ascontiguousarray(numpy_state[1]).view(np.uint8).tobytes())
+    digest.update(repr(numpy_state[2:]).encode("ascii"))
+    digest.update(torch.get_rng_state().contiguous().numpy().tobytes())
+    if torch.cuda.is_available():
+        for state in torch.cuda.get_rng_state_all():
+            digest.update(state.contiguous().cpu().numpy().tobytes())
+    return digest.hexdigest()
 
 
 TASK_MAX_STEPS = {
@@ -196,6 +230,10 @@ class GenerateConfig:
     latent_precheck_confirmation_mode: str = "next_iter"
     nonfinite_policy: str = "legacy"
     shadow_full_depth: bool = False
+    collect_preconvergence_raw_shadow: bool = False
+    preconvergence_raw_shadow_dir: str = ""
+    preconvergence_raw_shadow_max_depth: int = 32
+    preconvergence_raw_shadow_shard_size: int = 32
     calibration_workload_dir: str = ""
     calibration_workload_predictions_per_episode: int = 0
 
@@ -320,6 +358,39 @@ def validate_config(cfg: GenerateConfig) -> None:
     elif cfg.calibration_workload_dir:
         raise ValueError(
             "calibration_workload_dir requires calibration_workload_predictions_per_episode > 0"
+        )
+
+    raw_shard_size = cfg.preconvergence_raw_shadow_shard_size
+    if (
+        isinstance(raw_shard_size, bool)
+        or not isinstance(raw_shard_size, int)
+        or raw_shard_size < 1
+    ):
+        raise ValueError("preconvergence_raw_shadow_shard_size must be an integer >= 1")
+    if cfg.collect_preconvergence_raw_shadow:
+        if cfg.evaluation_protocol_phase not in {"smoke", "calibration"}:
+            raise ValueError("raw preconvergence collection is smoke/calibration-only")
+        if not cfg.preconvergence_raw_shadow_dir:
+            raise ValueError(
+                "preconvergence_raw_shadow_dir is required when raw collection is enabled"
+            )
+        if not cfg.shadow_full_depth:
+            raise ValueError("raw preconvergence collection requires shadow_full_depth=True")
+        if cfg.latent_precheck_mode != "off" or cfg.use_latent_precheck:
+            raise ValueError("raw preconvergence collection requires clean pre-check off mode")
+        if canonicalize_recurrence_strategy(cfg.recurrence_strategy) != "adjacent_action_mse":
+            raise ValueError("raw preconvergence collection requires adjacent action-MSE stopping")
+        if not cfg.use_warm_start or cfg.warm_start_source != "midpoint":
+            raise ValueError("raw preconvergence collection requires midpoint warm-start")
+        if not cfg.use_cached_final_output:
+            raise ValueError("raw preconvergence collection requires cached final output")
+        if cfg.preconvergence_raw_shadow_max_depth != cfg.recurrence_max_iter:
+            raise ValueError(
+                "preconvergence_raw_shadow_max_depth must equal recurrence_max_iter"
+            )
+    elif cfg.preconvergence_raw_shadow_dir:
+        raise ValueError(
+            "preconvergence_raw_shadow_dir requires collect_preconvergence_raw_shadow=True"
         )
 
     if cfg.profile_timing_summary:
@@ -992,6 +1063,7 @@ def run_episode(
     episode_protocol=None,
     profile_state=None,
     timing_state=None,
+    raw_shadow_writer=None,
 ):
     """Run a single episode in the environment."""
     episode_protocol = dict(episode_protocol or {})
@@ -1062,6 +1134,9 @@ def run_episode(
 
                 if torch.cuda.is_available():
                     torch.cuda.synchronize()
+                rng_state_before_sha256 = (
+                    _rng_state_sha256() if cfg.shadow_full_depth else None
+                )
                 action_start = time.perf_counter()
 
                 # 원본 action prediction 호출 코드
@@ -1160,11 +1235,15 @@ def run_episode(
                     warm_start_metadata = dict(inference_metadata.get("warm_start") or {})
                     next_warm_start_state = inference_metadata.get("next_warm_start_state")
                     action_head_workload = inference_metadata.get("action_head_workload")
+                    preconvergence_raw_shadow = inference_metadata.get(
+                        "preconvergence_raw_shadow"
+                    )
                 else:
                     recurrence_debug = {}
                     warm_start_metadata = {}
                     next_warm_start_state = None
                     action_head_workload = None
+                    preconvergence_raw_shadow = None
 
                 warm_start_enabled = bool(
                     warm_start_metadata.get("enabled", getattr(cfg, "use_warm_start", False))
@@ -1184,6 +1263,9 @@ def run_episode(
 
                 if torch.cuda.is_available():
                     torch.cuda.synchronize()
+                rng_state_after_sha256 = (
+                    _rng_state_sha256() if cfg.shadow_full_depth else None
+                )
                 action_latency_ms = (time.perf_counter() - action_start) * 1000.0
                 episode_action_latencies_ms.append(action_latency_ms)
                 log_message(
@@ -1394,6 +1476,16 @@ def run_episode(
                     "rollout_max_iteration": None,
                     "rollout_min_iteration": None,
                     "success": None,
+                    "returned_action_sha256": (
+                        _tensor_or_array_sha256(actions) if cfg.shadow_full_depth else None
+                    ),
+                    "next_warm_start_state_sha256": (
+                        _tensor_or_array_sha256(next_warm_start_state)
+                        if cfg.shadow_full_depth
+                        else None
+                    ),
+                    "rng_state_before_action_sha256": rng_state_before_sha256,
+                    "rng_state_after_action_sha256": rng_state_after_sha256,
                 }
                 workload_identity = build_action_head_workload_identity(
                     capture_requested=capture_action_head_workload,
@@ -1412,6 +1504,44 @@ def run_episode(
                         identity=workload_identity,
                     )
                 )
+                if cfg.collect_preconvergence_raw_shadow:
+                    if raw_shadow_writer is None:
+                        raise RuntimeError("raw collection enabled without a shard writer")
+                    if preconvergence_raw_shadow is None:
+                        raise RuntimeError(
+                            "raw collection was requested but the action head returned no trajectory"
+                        )
+                    expected_origin = "ACTUAL_WARM" if warm_start_used else "COLD_PRIMARY"
+                    if preconvergence_raw_shadow.get("actual_origin") != expected_origin:
+                        raise RuntimeError("raw trajectory origin does not match rollout warm-start metadata")
+                    raw_prediction = build_prediction_payload(
+                        preconvergence_raw_shadow,
+                        task_id=int(task_id),
+                        task_name=task_description,
+                        episode_id=int(episode_idx),
+                        timestep=int(t),
+                        prediction_id=prediction_id,
+                        protocol_identity=protocol_log_metadata,
+                        warm_start_metadata=warm_start_metadata,
+                        checkpoint=raw_shadow_writer.checkpoint,
+                        source_commit=raw_shadow_writer.source_commit,
+                        run_identity=raw_shadow_writer.run_identity,
+                        returned_action_sha256=step_record["returned_action_sha256"],
+                        rng_state_before_sha256=rng_state_before_sha256,
+                        rng_state_after_sha256=rng_state_after_sha256,
+                    )
+                    raw_shadow_writer.add(raw_prediction)
+                    step_record.update(
+                        {
+                            "preconvergence_raw_shadow_collected": True,
+                            "preconvergence_raw_shadow_schema_version": RAW_PRECONVERGENCE_SCHEMA_VERSION,
+                            "preconvergence_raw_shadow_tensor_sha256": raw_prediction[
+                                "tensor_sha256"
+                            ],
+                        }
+                    )
+                else:
+                    step_record["preconvergence_raw_shadow_collected"] = False
                 step_record["profiling_enabled"] = bool(debug.get("profiling_enabled", False))
                 step_record["use_cached_final_output"] = bool(
                     debug.get("use_cached_final_output", getattr(cfg, "use_cached_final_output", False))
@@ -1514,6 +1644,8 @@ def run_episode(
         record["rollout_min_iteration"] = rollout_summary["min_iteration"]
 
     append_jsonl(get_step_log_file(cfg), episode_step_logs)
+    if raw_shadow_writer is not None:
+        raw_shadow_writer.flush()
 
     return success, replay_images, episode_iters, replay_stats, rollout_summary
 
@@ -1536,6 +1668,7 @@ def run_task(
     save_version=None,
     profile_state=None,
     timing_state=None,
+    raw_shadow_writer=None,
 ):
     """Run evaluation for a single task."""
     task = task_suite.get_task(task_id)
@@ -1621,6 +1754,7 @@ def run_task(
             episode_protocol=episode_protocol,
             profile_state=profile_state,
             timing_state=timing_state,
+            raw_shadow_writer=raw_shadow_writer,
         )
 
         if episode_iters:
@@ -1711,6 +1845,28 @@ def eval_libero(cfg: GenerateConfig) -> float:
     resize_size = get_image_resize_size(cfg)
     log_file, local_log_filepath, run_id = setup_logging(cfg)
 
+    raw_shadow_writer = None
+    if cfg.collect_preconvergence_raw_shadow:
+        source_commit = current_source_commit()
+        checkpoint = checkpoint_identity(Path(cfg.pretrained_checkpoint))
+        raw_shadow_writer = RawPreconvergenceShardWriter(
+            Path(cfg.preconvergence_raw_shadow_dir),
+            shard_size=cfg.preconvergence_raw_shadow_shard_size,
+            maximum_shadow_depth=cfg.preconvergence_raw_shadow_max_depth,
+            source_commit=source_commit,
+            checkpoint=checkpoint,
+            run_identity={
+                "run_id": run_id,
+                "evaluation_protocol_phase": cfg.evaluation_protocol_phase,
+                "task_suite_name": cfg.task_suite_name,
+                "seed": int(cfg.seed),
+            },
+        )
+        log_message(
+            f"Raw preconvergence shadow collection enabled: {raw_shadow_writer.output_dir}",
+            log_file,
+        )
+
     RDVLAProfiler.set_enabled(False)
     RDVLAProfiler.set_timing_enabled(False)
     profile_state = {"profiled_calls": 0} if cfg.profile_pytorch else None
@@ -1797,6 +1953,7 @@ def eval_libero(cfg: GenerateConfig) -> float:
             cfg.save_version,
             profile_state,
             timing_state,
+            raw_shadow_writer,
         )
         task = task_suite.get_task(task_id)
         full_results["tasks"][task.name] = task_stats
@@ -1804,6 +1961,11 @@ def eval_libero(cfg: GenerateConfig) -> float:
         if cfg.json_log_file:
             with open(cfg.json_log_file, "w") as jf:
                 json.dump(full_results, jf, indent=2)
+
+    if raw_shadow_writer is not None:
+        raw_manifest_path = raw_shadow_writer.finalize()
+        full_results["preconvergence_raw_shadow_manifest"] = str(raw_manifest_path)
+        log_message(f"Finalized raw shadow manifest: {raw_manifest_path}", log_file)
 
     final_success_rate = float(total_successes) / float(total_episodes) if total_episodes > 0 else 0
 

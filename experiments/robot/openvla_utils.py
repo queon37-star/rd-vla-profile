@@ -448,6 +448,12 @@ def get_vla_action(
                         latent_precheck_confirmation_mode=getattr(cfg, "latent_precheck_confirmation_mode", "next_iter"),
                         nonfinite_policy=getattr(cfg, "nonfinite_policy", "legacy"),
                         shadow_full_depth=getattr(cfg, "shadow_full_depth", False),
+                        collect_preconvergence_raw_shadow=getattr(
+                            cfg, "collect_preconvergence_raw_shadow", False
+                        ),
+                        preconvergence_raw_shadow_max_depth=getattr(
+                            cfg, "preconvergence_raw_shadow_max_depth", 32
+                        ),
                         capture_action_head_workload=capture_action_head_workload,
                         latent_only_metric=getattr(cfg, "latent_only_metric", "raw_mse"),
                         latent_only_cold_threshold=getattr(
@@ -471,6 +477,9 @@ def get_vla_action(
             "recurrence_debug": recurrence_debug,
             "next_warm_start_state": action_head_inference_metadata.get("next_warm_start_state"),
             "action_head_workload": action_head_inference_metadata.get("action_head_workload"),
+            "preconvergence_raw_shadow": action_head_inference_metadata.get(
+                "preconvergence_raw_shadow"
+            ),
             "warm_start": {
                 "enabled": bool(getattr(cfg, "use_warm_start", False)),
                 "source": warm_start_metadata.get("source"),

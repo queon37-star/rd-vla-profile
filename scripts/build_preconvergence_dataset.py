@@ -21,8 +21,8 @@ from scripts.preconvergence_trigger_lib import (  # noqa: E402
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--raw-manifest", type=Path, required=True)
-    parser.add_argument("--authoritative-dataset-dir", type=Path, required=True)
+    parser.add_argument("--raw-manifest", type=Path, action="append", required=True)
+    parser.add_argument("--authoritative-dataset-dir", type=Path)
     parser.add_argument("--output-dir", type=Path, required=True)
     return parser
 

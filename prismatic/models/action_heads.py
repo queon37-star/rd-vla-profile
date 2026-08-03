@@ -15,7 +15,11 @@ from prismatic.models.origin_aware_scheduler import (
     run_origin_aware_adaptive,
 )
 from prismatic.models.numerical_retry import run_cold_full_coda_retry
-from prismatic.models.shadow_trace import build_shadow_trace_record, run_shadow_tail
+from prismatic.models.shadow_trace import (
+    build_shadow_trace_record,
+    capture_raw_shadow_tensor,
+    run_shadow_tail,
+)
 from prismatic.vla.constants import ACTION_DIM, NUM_ACTIONS_CHUNK
 from prismatic.utils.rdvla_profiler import rdvla_range
 from dataclasses import dataclass
@@ -405,6 +409,8 @@ class VLARecurrent(nn.Module):
                 latent_precheck_confirmation_mode: str = "next_iter",
                 nonfinite_policy: str = "legacy",
                 shadow_full_depth: bool = False,
+                collect_preconvergence_raw_shadow: bool = False,
+                preconvergence_raw_shadow_max_depth: int = 32,
                 capture_action_head_workload: bool = False,
                 latent_only_metric: str = "raw_mse",
                 latent_only_cold_threshold: float = 0.0,
@@ -445,6 +451,19 @@ class VLARecurrent(nn.Module):
             raise ValueError("latent_precheck_mode='origin_aware' is inference-only")
         if shadow_full_depth and self.training:
             raise ValueError("shadow_full_depth is inference-only")
+        if collect_preconvergence_raw_shadow:
+            if not shadow_full_depth:
+                raise ValueError("raw preconvergence collection requires shadow_full_depth=True")
+            if self.training:
+                raise ValueError("raw preconvergence collection is inference-only")
+            if preconvergence_raw_shadow_max_depth != max_iter:
+                raise ValueError(
+                    "raw preconvergence maximum depth must equal recurrence max_iter"
+                )
+            if latent_precheck_mode != "off" or use_latent_precheck:
+                raise ValueError("raw preconvergence collection requires clean pre-check off mode")
+            if canonical_recurrence_strategy != "adjacent_action_mse":
+                raise ValueError("raw preconvergence collection requires adjacent action-MSE stopping")
         if canonical_recurrence_strategy == "latent_only" and self.training:
             raise ValueError("recurrence_strategy='latent_only' is inference-only")
 
@@ -652,6 +671,8 @@ class VLARecurrent(nn.Module):
             shadow_trace_records = []
             shadow_error = None
             shadow_previous_update = None
+            raw_production_states = []
+            raw_production_actions = []
 
             run_one_iteration_ms_list = []
             # Output timing lists include the final return-path call unless the
@@ -674,6 +695,10 @@ class VLARecurrent(nn.Module):
                         if profile_coda_cost:
                             run_one_iteration_start = self._sync_time()
                         state = self._run_one_iteration(state, prelude_out, h_a, h_t, p)
+                        if collect_preconvergence_raw_shadow:
+                            # Retain only a detached reference. The CPU copy happens
+                            # after all production-visible values have been frozen.
+                            raw_production_states.append(state.detach())
                         if profile_coda_cost:
                             run_one_iteration_end = self._sync_time()
                             run_one_iteration_ms_list.append((run_one_iteration_end - run_one_iteration_start) * 1000.0)
@@ -832,6 +857,9 @@ class VLARecurrent(nn.Module):
                                             state.float() - shadow_previous_state.float()
                                         ).detach().clone()
 
+                                if collect_preconvergence_raw_shadow:
+                                    raw_production_actions.append(curr_output.detach())
+
                                 prev_output = curr_output.detach()
                                 if profile_coda_cost:
                                     convergence_check_end = self._sync_time()
@@ -989,6 +1017,7 @@ class VLARecurrent(nn.Module):
                     previous_update=shadow_previous_update,
                     warm_anchor=latent_dynamics_warm_anchor,
                     eps=latent_only_eps,
+                    collect_raw=collect_preconvergence_raw_shadow,
                 )
                 shadow_trace_records.extend(shadow_result["records"])
                 self.last_recurrence_debug.update(
@@ -1004,6 +1033,49 @@ class VLARecurrent(nn.Module):
                         "shadow_error": shadow_result["error"],
                     }
                 )
+                if collect_preconvergence_raw_shadow and shadow_result["completed"]:
+                    states = [
+                        capture_raw_shadow_tensor(value)
+                        for value in raw_production_states
+                    ] + shadow_result["raw_states"]
+                    actions = [
+                        capture_raw_shadow_tensor(value)
+                        for value in raw_production_actions
+                    ] + shadow_result["raw_actions"]
+                    depth = int(preconvergence_raw_shadow_max_depth)
+                    if len(states) != depth or len(actions) != depth:
+                        raise RuntimeError(
+                            "raw preconvergence trajectory does not cover the requested depth"
+                        )
+                    action_mse = [None] * (depth + 1)
+                    action_mse_phase = [None] * (depth + 1)
+                    action_mse_source = [None] * (depth + 1)
+                    for k, value in enumerate(conv_score_list, start=2):
+                        action_mse[k] = float(value)
+                        action_mse_phase[k] = "production"
+                        action_mse_source[k] = "production_native_bf16"
+                    for record in shadow_result["records"]:
+                        k = int(record["k"])
+                        action_mse[k] = float(record["action_mse"])
+                        action_mse_phase[k] = "shadow_tail"
+                        action_mse_source[k] = "shadow_tail_fp32"
+                    self.last_inference_metadata["preconvergence_raw_shadow"] = {
+                        "actual_origin": (
+                            "ACTUAL_WARM" if cached_state_used else "COLD_PRIMARY"
+                        ),
+                        "production_terminal_k": int(actual_iter),
+                        "maximum_shadow_depth": depth,
+                        "valid_trajectory_length": len(states),
+                        "action_mse_threshold": float(kl_thresh),
+                        "tensors": {
+                            "states": torch.stack(states, dim=0),
+                            "actions": torch.stack(actions, dim=0),
+                        },
+                        "production_iteration_mse": [float(value) for value in conv_score_list],
+                        "action_mse": action_mse,
+                        "action_mse_phase": action_mse_phase,
+                        "action_mse_source": action_mse_source,
+                    }
             return final_output, actual_iter, final_kl
 
         # 여기까지가 metric 추가한 adaptive branch
@@ -1174,6 +1246,8 @@ class ActionHeadRecurrent(nn.Module):
                        latent_precheck_confirmation_mode="next_iter",
                        nonfinite_policy="legacy",
                        shadow_full_depth=False,
+                       collect_preconvergence_raw_shadow=False,
+                       preconvergence_raw_shadow_max_depth=32,
                        capture_action_head_workload=False,
                        latent_only_metric="raw_mse",
                        latent_only_cold_threshold=0.0,
@@ -1239,6 +1313,8 @@ class ActionHeadRecurrent(nn.Module):
                                  latent_precheck_confirmation_mode=latent_precheck_confirmation_mode,
                                  nonfinite_policy=nonfinite_policy,
                                  shadow_full_depth=shadow_full_depth,
+                                 collect_preconvergence_raw_shadow=collect_preconvergence_raw_shadow,
+                                 preconvergence_raw_shadow_max_depth=preconvergence_raw_shadow_max_depth,
                                  capture_action_head_workload=capture_action_head_workload,
                                  latent_only_metric=latent_only_metric,
                                  latent_only_cold_threshold=latent_only_cold_threshold,

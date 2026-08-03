@@ -17,6 +17,15 @@ def _is_finite(tensor: torch.Tensor) -> bool:
     return bool(torch.isfinite(tensor).all().item())
 
 
+def capture_raw_shadow_tensor(tensor: torch.Tensor) -> torch.Tensor:
+    """Copy a detached tensor to CPU without changing dtype, shape, or values."""
+    if not torch.is_tensor(tensor):
+        raise TypeError("raw shadow value must be a tensor")
+    if not _is_finite(tensor):
+        raise ValueError("raw shadow tensor contains non-finite values")
+    return tensor.detach().to(device="cpu", copy=True)
+
+
 def _metric_pair(
     previous: Optional[torch.Tensor],
     current: torch.Tensor,
@@ -114,9 +123,12 @@ def run_shadow_tail(
     previous_update: Optional[torch.Tensor] = None,
     warm_anchor: Optional[torch.Tensor] = None,
     eps: float = 1e-8,
+    collect_raw: bool = False,
 ) -> Dict[str, Any]:
     """Run a detached diagnostic tail that cannot change production state."""
     records = []
+    raw_states = []
+    raw_actions = []
     error = None
     tail_state = state.detach().clone()
     tail_output = current_output.detach().clone()
@@ -181,6 +193,9 @@ def run_shadow_tail(
                     }
                     break
                 records.append(record)
+                if collect_raw:
+                    raw_states.append(capture_raw_shadow_tensor(candidate_state))
+                    raw_actions.append(capture_raw_shadow_tensor(candidate_output))
                 tail_previous_update = (
                     candidate_state.float() - previous_state.float()
                 ).detach().clone()
@@ -202,4 +217,6 @@ def run_shadow_tail(
         "error": error,
         "tail_iteration_count": len(records),
         "tail_start_iteration": actual_iter + 1 if actual_iter < max_iter else None,
+        "raw_states": raw_states,
+        "raw_actions": raw_actions,
     }

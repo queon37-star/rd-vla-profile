@@ -3,13 +3,16 @@
 ## Status
 
 This branch contains an offline-only implementation of the proposed
-pre-convergence trigger. It does not change `action_heads.py`, runtime stopping,
-Coda scheduling, model outputs, warm-cache behavior, or defaults.
+pre-convergence trigger plus an explicit, disabled-by-default raw shadow
+collector. The collector adds diagnostic plumbing to `action_heads.py` but
+does not change runtime stopping, Coda scheduling, model outputs, warm-cache
+behavior, or defaults.
 
 The local artifact audit found that the required raw recurrent trajectory is
-not currently recorded. Consequently no real model was fit, no task-OOF result
-manifest was produced, and no GPU or LIBERO run was started. This is a blocked
-data-feasibility state, not a negative model result and not a promotion result.
+not present in the existing artifacts. Collection code is now available, but
+no new raw shard, real model, task-OOF result, GPU run, or LIBERO run has been
+produced. Feasibility remains blocked pending the documented smoke and formal
+collection; this is not a negative model or promotion result.
 
 ## Phase-0 artifact audit
 
@@ -31,9 +34,10 @@ exactly the iterations 2 through 32.
 The completed latent-dynamics JSONL is not an authoritative replacement for
 production labels. Its `adjacent_action_mse` is a diagnostic FP32 value in the
 production prefix as well as the shadow tail. Twelve values close to 0.001
-produce a different first hit from native BF16 control flow. The builder
-therefore joins raw shards only to the frozen learned-probe dataset and enforces
-the production/shadow phase boundary.
+produce a different first hit from native BF16 control flow. New schema-2 raw
+shards therefore embed native production labels and FP32 shadow-tail labels
+with explicit per-iteration source flags. The legacy schema-1 builder still
+joins old-style raw shards to the frozen learned-probe dataset.
 
 There are 200 existing action-head workload shards, split into 100 cold and 100
 actual-warm workloads. Their tensor fields are:
@@ -127,45 +131,136 @@ max-iteration change, actual-warm and cold results, per-task/task-macro results,
 and latency terms for saved Coda, added recurrence, gate evaluations, and the
 explicit gate-cost assumption.
 
-## Minimal optional collection design
+## Optional raw-shadow collection contract
 
-The missing data should be collected only behind a new calibration-only option
-whose default is off. The minimal change is:
+Raw collection is wired only behind
+`collect_preconvergence_raw_shadow=false` by default. It is accepted only for
+the smoke or calibration protocol, clean adjacent action-MSE stopping,
+midpoint warm-start, cached final output, and existing `shadow_full_depth`.
+No production stopping or scheduling branch reads the collected payload.
 
-1. freeze the returned action, terminal K, warm-start candidate, cache, and RNG
-   state exactly as `shadow_full_depth` already does;
-2. in the detached full-depth diagnostic namespace, retain cloned `S_1..S_32`
-   and `a_1..a_32` only long enough to write one binary shard per prediction;
-3. store no tensor in JSONL; JSON contains only identity, shard path, SHA-256,
-   tensor metadata, origin, and phase/protocol identity;
-4. write a manifest with `collection_mode=optional_post_production_shadow` and
-   `source_trace_set_sha256` equal to the authoritative learned dataset;
-5. verify before/after equality for returned action, terminal K, cached state,
-   warm candidate, Coda call count in the production prefix, and stop reason.
+The action head freezes terminal K, returned output, and midpoint candidate
+before copying production-prefix tensors to CPU or continuing the existing
+detached shadow tail. It stores native state/action dtype and values; it does
+not pool, summarize, or cast tensors to FP32. Grouped shards are bounded by
+`preconvergence_raw_shadow_shard_size` (default 32 predictions), written to a
+temporary file, and atomically renamed. A non-empty output directory is never
+reused. An interrupted manifest remains `complete=false` and is rejected by
+the validator.
 
-Required shard keys are `schema_version`, exact identity, `actual_origin`,
-`states` with leading iteration dimension 32, and `actions` with leading
-iteration dimension 32. The manifest must cover every authoritative prediction.
-Collection must preserve native state/action dtypes and record shape, stride,
-dtype, and layout metadata. This design has not been wired into runtime code on
-this branch because the collection change and one-task smoke result must be
-reviewed before a ten-task calibration is launched.
+Schema version 2 stores `states[S_1..S_max]`, `actions[a_1..a_max]`, production
+native-BF16 `iteration_mse`, shadow-tail FP32 diagnostic action MSE, and an
+iteration-level source/phase vector. Every prediction also carries exact
+task/episode/prediction/timestep identity, detailed origin
+(`ACTUAL_WARM`, `COLD_PRIMARY`, or `COLD_RETRY`), terminal K, protocol and warm
+metadata, source commit, run identity, checkpoint file hashes, tensor
+shape/stride/dtype/layout, and tensor content SHA-256. JSONL retains hashes and
+flags only; full latent tensors exist only in ignored binary shards.
+
+The raw artifact creates its own `trace_set_sha256` from its prediction
+identities and tensor hashes. It deliberately does not reuse the earlier
+scalar trace-set SHA. The dataset builder accepts one or more schema-2 raw
+manifests directly because authoritative BF16/FP32 labels are embedded in the
+shards; its legacy schema-1 join remains supported.
+
+For `[1,8,896]` BF16 states and `[1,8,7]` BF16 actions, 32 iterations occupy
+about 451.5 KiB per prediction. At 2,398 predictions the raw tensors total
+about 1.033 GiB; allow roughly 1.05--1.15 GiB including serialization and
+metadata. A 32-prediction shard is approximately 14.1 MiB, or about 75 shards.
 
 ## Commands and expected outputs
 
-After an optional raw collection manifest has been reviewed, build the derived
-dataset without rerunning LIBERO:
+Run the paired three-episode task-0 smoke first. These commands are for manual
+GPU/LIBERO execution and are not run by unit tests:
+
+```bash
+# Collection off reference (full-depth diagnostics remain on for parity hashes).
+python experiments/robot/libero/run_libero_eval.py \
+  --pretrained_checkpoint outputs/12_24-24_24_Spatial_40k \
+  --task_suite_name libero_spatial --task_id 0 --num_trials_per_task 3 \
+  --evaluation_protocol_phase smoke \
+  --initial_state_manifest_path experiments/robot/libero/manifests/libero_spatial_official_50_v1.json \
+  --initial_states_path DEFAULT --reset_rng_each_episode True --seed 7 \
+  --use_recurrent True --recurrence_strategy adjacent_action_mse \
+  --recurrence_kl_thresh 0.001 --recurrence_max_iter 32 \
+  --use_warm_start True --warm_start_source midpoint --warm_start_min_iter 2 \
+  --use_cached_final_output True --use_latent_precheck False \
+  --latent_precheck_mode off --shadow_full_depth True \
+  --step_log_file benchmark_results/preconvergence_trigger/raw_shadow_smoke_off/steps.jsonl \
+  --json_log_file benchmark_results/preconvergence_trigger/raw_shadow_smoke_off/result.json
+
+# Collection on, using a fresh output directory.
+python experiments/robot/libero/run_libero_eval.py \
+  --pretrained_checkpoint outputs/12_24-24_24_Spatial_40k \
+  --task_suite_name libero_spatial --task_id 0 --num_trials_per_task 3 \
+  --evaluation_protocol_phase smoke \
+  --initial_state_manifest_path experiments/robot/libero/manifests/libero_spatial_official_50_v1.json \
+  --initial_states_path DEFAULT --reset_rng_each_episode True --seed 7 \
+  --use_recurrent True --recurrence_strategy adjacent_action_mse \
+  --recurrence_kl_thresh 0.001 --recurrence_max_iter 32 \
+  --use_warm_start True --warm_start_source midpoint --warm_start_min_iter 2 \
+  --use_cached_final_output True --use_latent_precheck False \
+  --latent_precheck_mode off --shadow_full_depth True \
+  --collect_preconvergence_raw_shadow True \
+  --preconvergence_raw_shadow_max_depth 32 \
+  --preconvergence_raw_shadow_shard_size 32 \
+  --preconvergence_raw_shadow_dir benchmark_results/preconvergence_trigger/raw_shadow_smoke_on \
+  --step_log_file benchmark_results/preconvergence_trigger/raw_shadow_smoke_on/steps.jsonl \
+  --json_log_file benchmark_results/preconvergence_trigger/raw_shadow_smoke_on/result.json
+
+python scripts/validate_preconvergence_raw_shards.py \
+  --manifest benchmark_results/preconvergence_trigger/raw_shadow_smoke_on/manifest.json \
+  --step-log benchmark_results/preconvergence_trigger/raw_shadow_smoke_on/steps.jsonl \
+  --parity-step-log benchmark_results/preconvergence_trigger/raw_shadow_smoke_off/steps.jsonl \
+  --expected-state-shape 32,1,8,896 --expected-state-dtype torch.bfloat16 \
+  --expected-action-shape 32,1,8,7 --expected-action-dtype torch.bfloat16 \
+  --output benchmark_results/preconvergence_trigger/raw_shadow_smoke_on/validation_report.json \
+  --compact-manifest benchmark_results/preconvergence_trigger/raw_shadow_smoke_on/compact_manifest.json
+```
+
+After validator and parity review, verify that the builder reads the smoke
+artifact without rerunning LIBERO:
 
 ```bash
 python scripts/build_preconvergence_dataset.py \
-  --raw-manifest benchmark_results/preconvergence_trigger/raw_shadow_v1/manifest.json \
-  --authoritative-dataset-dir benchmark_results/learned_convergence_probe/20260801_seed7/dataset \
-  --output-dir benchmark_results/preconvergence_trigger/seed7/dataset
+  --raw-manifest benchmark_results/preconvergence_trigger/raw_shadow_smoke_on/manifest.json \
+  --output-dir benchmark_results/preconvergence_trigger/raw_shadow_smoke_dataset
 ```
 
 Expected outputs are `manifest.json` and ignored binary
 `preconvergence_dataset.pt`. The command fails closed on identity, SHA-256,
 phase, first-hit, non-finite, shape, or coverage errors.
+
+Only after the smoke report is reviewed, the formal 10-task x 10-episode
+collection is shown below. Run it from the reviewed collector commit so its
+recorded `source_commit` is the new collector commit, not the earlier scalar
+artifact commit:
+
+```bash
+python experiments/robot/libero/run_libero_eval.py \
+  --pretrained_checkpoint outputs/12_24-24_24_Spatial_40k \
+  --task_suite_name libero_spatial --num_trials_per_task 10 \
+  --evaluation_protocol_phase calibration \
+  --initial_state_manifest_path experiments/robot/libero/manifests/libero_spatial_official_50_v1.json \
+  --initial_states_path DEFAULT --reset_rng_each_episode True --seed 7 \
+  --use_recurrent True --recurrence_strategy adjacent_action_mse \
+  --recurrence_kl_thresh 0.001 --recurrence_max_iter 32 \
+  --use_warm_start True --warm_start_source midpoint --warm_start_min_iter 2 \
+  --use_cached_final_output True --use_latent_precheck False \
+  --latent_precheck_mode off --shadow_full_depth True \
+  --collect_preconvergence_raw_shadow True \
+  --preconvergence_raw_shadow_max_depth 32 \
+  --preconvergence_raw_shadow_shard_size 32 \
+  --preconvergence_raw_shadow_dir benchmark_results/preconvergence_trigger/raw_shadow_calibration_seed7 \
+  --step_log_file benchmark_results/preconvergence_trigger/raw_shadow_calibration_seed7/steps.jsonl \
+  --json_log_file benchmark_results/preconvergence_trigger/raw_shadow_calibration_seed7/result.json
+```
+
+The expected root is
+`benchmark_results/preconvergence_trigger/raw_shadow_calibration_seed7/` with
+`manifest.json`, grouped `raw_shadow_*.pt` shards, step/results logs, and a
+separately generated validation report. The manifest reports ACTUAL_WARM and
+cold counts separately; primary feasibility remains ACTUAL_WARM-only.
 
 Train all six rank/auxiliary configurations with the frozen task split:
 
