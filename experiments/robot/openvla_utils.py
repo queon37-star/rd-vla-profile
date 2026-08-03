@@ -105,6 +105,17 @@ def check_model_logic_mismatch(pretrained_checkpoint: str) -> None:
         _handle_file_sync(curr_filepath, checkpoint_filepath, filename)
 
 
+def prepare_checkpoint_source_config(cfg: Any) -> bool:
+    """Synchronize local checkpoint source/config files when explicitly enabled."""
+
+    if not getattr(cfg, "sync_checkpoint_source_config", True):
+        return False
+
+    update_auto_map(cfg.pretrained_checkpoint)
+    check_model_logic_mismatch(cfg.pretrained_checkpoint)
+    return True
+
+
 def find_checkpoint_file(pretrained_checkpoint: str, file_pattern: str) -> str:
     assert os.path.isdir(pretrained_checkpoint)
     checkpoint_files = []
@@ -137,8 +148,7 @@ def get_vla(cfg: Any) -> torch.nn.Module:
         AutoProcessor.register(OpenVLAConfig, PrismaticProcessor)
         AutoModelForVision2Seq.register(OpenVLAConfig, OpenVLAForActionPrediction)
 
-        update_auto_map(cfg.pretrained_checkpoint)
-        check_model_logic_mismatch(cfg.pretrained_checkpoint)
+        prepare_checkpoint_source_config(cfg)
 
     vla = AutoModelForVision2Seq.from_pretrained(
         cfg.pretrained_checkpoint,

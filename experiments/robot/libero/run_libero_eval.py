@@ -144,6 +144,7 @@ class GenerateConfig:
     #################################################################################################################
     model_family: str = "openvla"                    # Model family
     pretrained_checkpoint: Union[str, Path] = ""     # Pretrained checkpoint path
+    sync_checkpoint_source_config: bool = True        # Synchronize local checkpoint source/config mirrors
     use_minivlm: bool = True                         # If True, uses minivlm
     use_film: bool = False                           # If True, uses FiLM to infuse language inputs into visual features
     num_images_in_input: int = 2                     # Number of images in the VLA input (default: 1)
