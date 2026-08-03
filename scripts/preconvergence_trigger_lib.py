@@ -12,6 +12,8 @@ import hashlib
 import inspect
 import json
 import math
+import time
+from bisect import bisect_right
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
@@ -531,47 +533,157 @@ def _threshold_candidates(
 def select_training_threshold(
     scored_sequences: Sequence[tuple[RawPreconvergenceSequence, Mapping[int, float]]]
 ) -> dict[str, Any]:
-    """Safety-first train-only selection; held-out values never enter here."""
+    """Safety-first train-only selection via an exact threshold event sweep."""
 
-    candidates = _threshold_candidates(scored_sequences)
-    evaluated = []
-    for threshold in candidates:
-        replays = [
-            replay_confirm_next(sequence, scores, threshold)
-            for sequence, scores in scored_sequences
-        ]
-        late_missed = sum(
-            replay.trigger_category in {"late", "missed"} for replay in replays
+    prepared = []
+    score_values = set()
+    for sequence, scores in scored_sequences:
+        # Validation is deliberately outside the candidate loop. The exhaustive
+        # reference calls it from replay_confirm_next for every threshold.
+        sequence.validate()
+        required_iterations = range(3, sequence.max_iter + 1)
+        for k in required_iterations:
+            _require(k in scores, f"missing gate score at k={k}")
+        finite_scores = {}
+        for k, value in scores.items():
+            score = float(value)
+            _require(math.isfinite(score), f"non-finite gate score at k={k}")
+            finite_scores[k] = score
+            score_values.add(score)
+        prepared.append((sequence, finite_scores, sequence.k_action))
+
+    values = sorted(score_values)
+    _require(bool(values), "threshold selection has no scores")
+    fail_closed = float(np.nextafter(values[-1], math.inf))
+    _require(math.isfinite(fail_closed), "decision threshold must be finite")
+    candidates = values + [fail_closed]
+    candidate_count = len(candidates)
+
+    late_diff = [0] * (candidate_count + 1)
+    calls_diff = [0] * (candidate_count + 1)
+    absolute_offset_diff = [0] * (candidate_count + 1)
+    offset_diff = [0] * (candidate_count + 1)
+    offset_count_diff = [0] * (candidate_count + 1)
+
+    def add_interval(start: int, end: int, contribution: tuple[int, int, int, int, int]) -> None:
+        if start >= end:
+            return
+        for difference, value in zip(
+            (
+                late_diff,
+                calls_diff,
+                absolute_offset_diff,
+                offset_diff,
+                offset_count_diff,
+            ),
+            contribution,
+        ):
+            difference[start] += value
+            difference[end] -= value
+
+    def contribution_for_gate(
+        sequence: RawPreconvergenceSequence,
+        k_action: int,
+        k_gate: int | None,
+        next_action_hit: Mapping[int, int | None],
+    ) -> tuple[int, int, int, int, int]:
+        if k_action <= 2:
+            return (0, k_action, 0, 0, 0)
+        if k_gate is None:
+            # k_action > 2 implies max_iter >= 3, so {1, 2, max_iter}
+            # contains exactly three distinct Coda calls.
+            return (1, 3, 0, 0, 0)
+        offset = int(k_gate) - (int(k_action) - 1)
+        terminal_k = next_action_hit[k_gate]
+        if terminal_k is None:
+            terminal_k = sequence.max_iter
+        # Forced prefix calls 1 and 2, the gate call, then every call through
+        # the first strictly-later convergence hit (or max_iter fallback).
+        coda_calls = 3 + int(terminal_k) - int(k_gate)
+        return (
+            int(offset > 0),
+            coda_calls,
+            abs(offset),
+            offset,
+            1,
         )
-        offsets = [
-            replay.trigger_offset
-            for replay in replays
-            if replay.trigger_offset is not None
-        ]
-        evaluated.append(
-            {
-                "threshold": threshold,
-                "late_or_missed_count": late_missed,
-                "scheduled_coda_calls": sum(r.coda_call_count for r in replays),
-                "mean_absolute_trigger_offset": (
-                    float(np.mean(np.abs(offsets))) if offsets else math.inf
-                ),
-                "mean_trigger_lead": (
-                    float(np.mean([-offset for offset in offsets])) if offsets else None
-                ),
-            }
+
+    for sequence, scores, k_action in prepared:
+        if k_action <= 2:
+            add_interval(
+                0,
+                candidate_count,
+                contribution_for_gate(sequence, k_action, None, {}),
+            )
+            continue
+
+        next_action_hit: dict[int, int | None] = {}
+        next_hit = None
+        for k in range(sequence.max_iter, 2, -1):
+            next_action_hit[k] = next_hit
+            if float(sequence.action_mse[k]) < ACTION_MSE_THRESHOLD:
+                next_hit = k
+
+        previous_record = -math.inf
+        for k in range(3, sequence.max_iter + 1):
+            score = scores[k]
+            if score <= previous_record:
+                continue
+            start = bisect_right(candidates, previous_record)
+            end = bisect_right(candidates, score)
+            add_interval(
+                start,
+                end,
+                contribution_for_gate(sequence, k_action, k, next_action_hit),
+            )
+            previous_record = score
+        add_interval(
+            bisect_right(candidates, previous_record),
+            candidate_count,
+            contribution_for_gate(sequence, k_action, None, next_action_hit),
         )
-    feasible = [item for item in evaluated if item["late_or_missed_count"] == 0]
-    pool = feasible if feasible else evaluated
-    selected = min(
-        pool,
-        key=lambda item: (
+
+    running_late = 0
+    running_calls = 0
+    running_absolute_offset = 0
+    running_offset = 0
+    running_offset_count = 0
+    selected = None
+    selected_key = None
+    feasible = False
+    for index, threshold in enumerate(candidates):
+        running_late += late_diff[index]
+        running_calls += calls_diff[index]
+        running_absolute_offset += absolute_offset_diff[index]
+        running_offset += offset_diff[index]
+        running_offset_count += offset_count_diff[index]
+        item = {
+            "threshold": threshold,
+            "late_or_missed_count": running_late,
+            "scheduled_coda_calls": running_calls,
+            "mean_absolute_trigger_offset": (
+                float(running_absolute_offset / running_offset_count)
+                if running_offset_count
+                else math.inf
+            ),
+            "mean_trigger_lead": (
+                float(-running_offset / running_offset_count)
+                if running_offset_count
+                else None
+            ),
+        }
+        feasible = feasible or running_late == 0
+        key = (
             item["late_or_missed_count"],
             item["scheduled_coda_calls"],
             item["mean_absolute_trigger_offset"],
             -item["threshold"],
-        ),
-    )
+        )
+        if selected_key is None or key < selected_key:
+            selected = item
+            selected_key = key
+
+    _require(selected is not None, "threshold selection produced no candidate")
     return {
         "selected_threshold": selected["threshold"],
         "selected_threshold_hex": float(selected["threshold"]).hex(),
@@ -580,7 +692,7 @@ def select_training_threshold(
             if feasible
             else "no_safe_threshold_fail_closed"
         ),
-        "candidate_count": len(candidates),
+        "candidate_count": candidate_count,
         "selection_order": [
             "require zero late or missed train triggers when feasible",
             "minimize exact CONFIRM_NEXT scheduled Coda calls",
@@ -1045,6 +1157,11 @@ def fit_oof_bundle(
             _require(variant in MODEL_VARIANTS, f"unknown model variant: {variant}")
             use_auxiliary = variant == "action_delta_auxiliary"
             name = f"rank{rank}_{variant}"
+            model_started = time.perf_counter()
+            print(
+                f"[preconvergence] model={name} stage=model start",
+                flush=True,
+            )
             folds = []
             for fold_id in sorted(set(assignment.values())):
                 training = [
@@ -1053,17 +1170,39 @@ def fit_oof_bundle(
                     if assignment[str(sequence.identity.task_id)] != fold_id
                     and sequence.actual_origin == "ACTUAL_WARM"
                 ]
+                train_started = time.perf_counter()
+                print(
+                    f"[preconvergence] model={name} fold={fold_id} "
+                    f"stage=train start predictions={len(training)}",
+                    flush=True,
+                )
                 fitted = train_trigger(
                     training,
                     rank=rank,
                     use_auxiliary=use_auxiliary,
                     config=config,
                 )
-                selection = select_training_threshold(
-                    [
-                        (sequence, score_sequence(fitted, sequence))
-                        for sequence in training
-                    ]
+                print(
+                    f"[preconvergence] model={name} fold={fold_id} "
+                    f"stage=train end elapsed_seconds={time.perf_counter() - train_started:.3f}",
+                    flush=True,
+                )
+                threshold_started = time.perf_counter()
+                print(
+                    f"[preconvergence] model={name} fold={fold_id} "
+                    "stage=threshold start",
+                    flush=True,
+                )
+                scored_training = [
+                    (sequence, score_sequence(fitted, sequence))
+                    for sequence in training
+                ]
+                selection = select_training_threshold(scored_training)
+                print(
+                    f"[preconvergence] model={name} fold={fold_id} "
+                    f"stage=threshold end candidates={selection['candidate_count']} "
+                    f"elapsed_seconds={time.perf_counter() - threshold_started:.3f}",
+                    flush=True,
                 )
                 folds.append(
                     {
@@ -1086,6 +1225,11 @@ def fit_oof_bundle(
                 "variant": variant,
                 "folds": folds,
             }
+            print(
+                f"[preconvergence] model={name} stage=model end "
+                f"elapsed_seconds={time.perf_counter() - model_started:.3f}",
+                flush=True,
+            )
     return {
         "schema_version": SCHEMA_VERSION,
         "seed": config.seed,
