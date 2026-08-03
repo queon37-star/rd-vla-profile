@@ -13,6 +13,7 @@ SUPPORTED_RECURRENCE_STRATEGIES = {
     "adjacent_action_mse",
     "cosine_similarity",
     "latent_only",
+    "scalar_policy",
 }
 SUPPORTED_LATENT_PRECHECK_MODES = {"legacy", "off", "origin_aware"}
 SUPPORTED_LATENT_PRECHECK_TRACE_LEVELS = {"off", "summary", "full"}

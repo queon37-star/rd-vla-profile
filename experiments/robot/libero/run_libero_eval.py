@@ -75,6 +75,11 @@ from prismatic.models.action_head_workload import (
     save_action_head_workload,
 )
 from prismatic.models.numerical_retry import NumericalInferenceAbort
+from prismatic.models.scalar_stopping_policy import (
+    SUPPORTED_SCALAR_EXECUTION_MODES,
+    load_scalar_policy_artifact,
+    prepare_scalar_task_policy,
+)
 from prismatic.vla.constants import NUM_ACTIONS_CHUNK
 from prismatic.utils.rdvla_profiler import RDVLAProfiler
 
@@ -197,6 +202,11 @@ class GenerateConfig:
     latent_only_min_iter: int = 2
     latent_only_eps: float = 1e-8
 
+    # Task-level OOF scalar stopping policy.
+    scalar_policy_artifact_path: str = ""
+    scalar_policy_expected_sha256: str = ""
+    scalar_policy_execution_mode: str = "direct"
+
     # Disabled-by-default warm-start inference settings.
     use_warm_start: bool = False
     warm_start_source: str = "s1"
@@ -275,7 +285,93 @@ def validate_config(cfg: GenerateConfig) -> None:
         assert cfg.center_crop, "Expecting `center_crop==True` because model was trained with image augmentations!"
 
     assert not (cfg.load_in_8bit and cfg.load_in_4bit), "Cannot use both 8-bit and 4-bit quantization!"
-    canonicalize_recurrence_strategy(cfg.recurrence_strategy)
+    canonical_recurrence_strategy = canonicalize_recurrence_strategy(
+        cfg.recurrence_strategy
+    )
+
+    if canonical_recurrence_strategy == "scalar_policy":
+        if not cfg.use_recurrent:
+            raise ValueError(
+                "scalar_policy requires use_recurrent=True"
+            )
+        if cfg.task_suite_name != TaskSuite.LIBERO_SPATIAL:
+            raise ValueError(
+                "the exported scalar OOF artifact is LIBERO Spatial-only"
+            )
+        if not cfg.scalar_policy_artifact_path:
+            raise ValueError(
+                "scalar_policy_artifact_path is required"
+            )
+        if not Path(cfg.scalar_policy_artifact_path).exists():
+            raise ValueError(
+                "scalar policy artifact path does not exist: "
+                f"{cfg.scalar_policy_artifact_path}"
+            )
+
+        expected_hash = cfg.scalar_policy_expected_sha256
+        if (
+            len(expected_hash) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in expected_hash.lower()
+            )
+        ):
+            raise ValueError(
+                "scalar_policy_expected_sha256 must be "
+                "a 64-character hexadecimal SHA-256"
+            )
+
+        if (
+            cfg.scalar_policy_execution_mode
+            not in SUPPORTED_SCALAR_EXECUTION_MODES
+        ):
+            raise ValueError(
+                "scalar_policy_execution_mode must be direct "
+                "or confirm_next"
+            )
+        if not cfg.use_warm_start:
+            raise ValueError(
+                "scalar_policy requires use_warm_start=True"
+            )
+        if cfg.warm_start_source != "midpoint":
+            raise ValueError(
+                "scalar_policy requires warm_start_source='midpoint'"
+            )
+        if cfg.use_latent_precheck:
+            raise ValueError(
+                "scalar_policy cannot use latent pre-check"
+            )
+        if cfg.latent_precheck_mode != "off":
+            raise ValueError(
+                "scalar_policy requires latent_precheck_mode='off'"
+            )
+        if cfg.latent_precheck_trace_level != "off":
+            raise ValueError(
+                "scalar_policy requires "
+                "latent_precheck_trace_level='off'"
+            )
+        if cfg.shadow_full_depth:
+            raise ValueError(
+                "scalar_policy cannot enable shadow_full_depth"
+            )
+        if cfg.collect_preconvergence_raw_shadow:
+            raise ValueError(
+                "scalar_policy cannot collect raw shadow trajectories"
+            )
+        if cfg.use_cached_final_output:
+            raise ValueError(
+                "scalar_policy cannot use cached final output"
+            )
+    else:
+        if (
+            cfg.scalar_policy_artifact_path
+            or cfg.scalar_policy_expected_sha256
+        ):
+            raise ValueError(
+                "scalar policy artifact settings require "
+                "recurrence_strategy='scalar_policy'"
+            )
+
     validate_latent_only_configuration(
         cfg.recurrence_strategy,
         metric=cfg.latent_only_metric,
@@ -587,6 +683,64 @@ def _timing_ms(timings: Dict[str, float], *names: str) -> Optional[float]:
     return None
 
 
+def build_scalar_policy_log_fields(debug):
+    """Extract compact JSON-safe scalar-policy runtime metadata."""
+
+    debug = debug or {}
+    applied = bool(
+        debug.get("scalar_policy_applied", False)
+    )
+
+    return {
+        "scalar_policy_requested": bool(
+            debug.get("scalar_policy_requested", False)
+        ),
+        "scalar_policy_applied": applied,
+        "scalar_policy_cold_fallback": bool(
+            debug.get(
+                "scalar_policy_cold_fallback",
+                False,
+            )
+        ),
+        "scalar_policy_execution_mode": debug.get(
+            "scalar_policy_execution_mode"
+        ),
+        "scalar_policy_task_id": _as_int(
+            debug.get("scalar_policy_task_id")
+        ),
+        "scalar_policy_outer_fold": _as_int(
+            debug.get("scalar_policy_outer_fold")
+        ),
+        "scalar_policy_threshold": _as_float(
+            debug.get("scalar_policy_threshold")
+        ),
+        "scalar_policy_gate_iteration": _as_int(
+            debug.get(
+                "scalar_policy_gate_iteration"
+            )
+        ),
+        "scalar_policy_terminal_iteration": _as_int(
+            debug.get(
+                "scalar_policy_terminal_iteration"
+            )
+        ),
+        "scalar_policy_score_call_count": _as_int(
+            debug.get(
+                "scalar_policy_score_call_count"
+            )
+        ),
+        "scalar_policy_final_score": (
+            _as_float(debug.get("final_conv_score"))
+            if applied
+            else None
+        ),
+        "scalar_policy_score_trace": debug.get(
+            "scalar_policy_score_trace",
+            [],
+        ),
+    }
+
+
 def _build_timing_summary_record(timing_record, result):
     timings = timing_record.get("timings_ms", {})
     counts = timing_record.get("counts", {})
@@ -652,6 +806,9 @@ def _build_timing_summary_record(timing_record, result):
         "actual_origin": recurrence_debug.get("actual_origin"),
         "effective_threshold": recurrence_debug.get("effective_threshold"),
         "coda_call_count": recurrence_debug.get("coda_call_count"),
+        **build_scalar_policy_log_fields(
+            recurrence_debug
+        ),
         "latent_metric_call_count": recurrence_debug.get("latent_metric_call_count"),
         "latent_precheck_mode": recurrence_debug.get("latent_precheck_mode", "legacy"),
         "latent_precheck_trace_level_requested": recurrence_debug.get("latent_precheck_trace_level_requested", "off"),
@@ -1368,6 +1525,9 @@ def run_episode(
                     "latent_only_eps": debug.get("latent_only_eps"),
                     "latent_only_trace": debug.get("latent_only_trace", []),
                     "coda_call_count": debug.get("coda_call_count"),
+                    **build_scalar_policy_log_fields(
+                        debug
+                    ),
                     "latent_metric_call_count": debug.get("latent_metric_call_count"),
                     "latent_metric_trace_enabled": debug.get(
                         "latent_metric_trace_enabled", False
@@ -1841,9 +2001,36 @@ def eval_libero(cfg: GenerateConfig) -> float:
     validate_config(cfg)
     set_seed_everywhere(cfg.seed)
 
+    scalar_policy_manifest = None
+    scalar_policy_payload = None
+
+    if (
+        canonicalize_recurrence_strategy(
+            cfg.recurrence_strategy
+        )
+        == "scalar_policy"
+    ):
+        (
+            scalar_policy_manifest,
+            scalar_policy_payload,
+        ) = load_scalar_policy_artifact(
+            cfg.scalar_policy_artifact_path,
+            expected_sha256=(
+                cfg.scalar_policy_expected_sha256.lower()
+            ),
+        )
+
     model, action_head, proprio_projector, processor = initialize_model(cfg)
     resize_size = get_image_resize_size(cfg)
     log_file, local_log_filepath, run_id = setup_logging(cfg)
+
+    if scalar_policy_manifest is not None:
+        log_message(
+            "Loaded scalar OOF policy artifact: "
+            f"sha256={scalar_policy_manifest['artifact_sha256']}, "
+            f"mode={cfg.scalar_policy_execution_mode}",
+            log_file,
+        )
 
     raw_shadow_writer = None
     if cfg.collect_preconvergence_raw_shadow:
@@ -1906,6 +2093,25 @@ def eval_libero(cfg: GenerateConfig) -> float:
 
     total_episodes, total_successes = 0, 0
     full_results = {"config": str(cfg), "tasks": {}}
+
+    if scalar_policy_manifest is not None:
+        full_results["scalar_policy"] = {
+            "artifact_path": cfg.scalar_policy_artifact_path,
+            "artifact_sha256": scalar_policy_manifest[
+                "artifact_sha256"
+            ],
+            "policy_name": scalar_policy_manifest[
+                "policy_name"
+            ],
+            "target_reference": scalar_policy_manifest[
+                "target_reference"
+            ],
+            "execution_mode": (
+                cfg.scalar_policy_execution_mode
+            ),
+            "task_level_oof": True,
+        }
+
     if cfg.evaluation_protocol_phase != "legacy":
         protocol_manifest, manifest_sha256 = load_protocol_manifest(
             cfg.initial_state_manifest_path, require_source_file_hashes=True
@@ -1938,6 +2144,32 @@ def eval_libero(cfg: GenerateConfig) -> float:
             log_message(f"Starting from task {start_task}", log_file)
 
     for task_id in tqdm.tqdm(task_ids):
+        if scalar_policy_payload is not None:
+            action_head_device = next(
+                action_head.parameters()
+            ).device
+            prepared_scalar_policy = (
+                prepare_scalar_task_policy(
+                    scalar_policy_payload,
+                    int(task_id),
+                    device=action_head_device,
+                )
+            )
+            action_head.configure_scalar_task_policy(
+                prepared_scalar_policy,
+                cfg.scalar_policy_execution_mode,
+            )
+            log_message(
+                "Bound scalar OOF policy: "
+                f"task={task_id}, "
+                f"fold={prepared_scalar_policy.outer_fold}, "
+                f"threshold={prepared_scalar_policy.threshold:.9f}, "
+                f"mode={cfg.scalar_policy_execution_mode}",
+                log_file,
+            )
+        else:
+            action_head.clear_scalar_task_policy()
+
         total_episodes, total_successes, task_stats = run_task(
             cfg,
             task_suite,

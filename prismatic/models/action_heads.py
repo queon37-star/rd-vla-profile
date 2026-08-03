@@ -9,6 +9,14 @@ from configs.rdvla_precheck import (
     validate_latent_precheck_configuration,
 )
 from prismatic.models.latent_only_stopping import run_latent_only_adaptive
+from prismatic.models.scalar_policy_stopping_runtime import (
+    run_scalar_policy_adaptive,
+)
+from prismatic.models.scalar_stopping_policy import (
+    PreparedScalarTaskPolicy,
+    SUPPORTED_SCALAR_EXECUTION_MODES,
+    validate_scalar_runtime_configuration,
+)
 from prismatic.models.action_head_workload import build_action_head_workload
 from prismatic.models.origin_aware_scheduler import (
     NonFiniteOriginAwareInferenceError,
@@ -417,6 +425,8 @@ class VLARecurrent(nn.Module):
                 latent_only_warm_threshold: float = 0.0,
                 latent_only_min_iter: int = 2,
                 latent_only_eps: float = 1e-8,
+                scalar_task_policy=None,
+                scalar_policy_execution_mode: str = "direct",
                 **kwargs) -> torch.Tensor:
         requested_recurrence_strategy = convergence_strategy
         canonical_recurrence_strategy = canonicalize_recurrence_strategy(convergence_strategy)
@@ -447,6 +457,22 @@ class VLARecurrent(nn.Module):
             nonfinite_policy=nonfinite_policy,
             shadow_full_depth=shadow_full_depth,
         )
+        validate_scalar_runtime_configuration(
+            canonical_recurrence_strategy,
+            task_policy=scalar_task_policy,
+            execution_mode=scalar_policy_execution_mode,
+            use_warm_start=enable_warm_start,
+            warm_start_source=warm_start_source,
+            use_latent_precheck=use_latent_precheck,
+            latent_precheck_mode=latent_precheck_mode,
+            latent_precheck_trace_level=latent_precheck_trace_level,
+            shadow_full_depth=shadow_full_depth,
+            collect_preconvergence_raw_shadow=(
+                collect_preconvergence_raw_shadow
+            ),
+            use_cached_final_output=use_cached_final_output,
+            max_iter=max_iter,
+        )
         if latent_precheck_mode == "origin_aware" and self.training:
             raise ValueError("latent_precheck_mode='origin_aware' is inference-only")
         if shadow_full_depth and self.training:
@@ -466,6 +492,8 @@ class VLARecurrent(nn.Module):
                 raise ValueError("raw preconvergence collection requires adjacent action-MSE stopping")
         if canonical_recurrence_strategy == "latent_only" and self.training:
             raise ValueError("recurrence_strategy='latent_only' is inference-only")
+        if canonical_recurrence_strategy == "scalar_policy" and self.training:
+            raise ValueError("recurrence_strategy='scalar_policy' is inference-only")
 
         B = h_a.size(0)
         device, dtype = h_a.device, h_a.dtype
@@ -491,6 +519,7 @@ class VLARecurrent(nn.Module):
                     validate_warm_start_finite
                     or latent_precheck_mode == "origin_aware"
                     or canonical_recurrence_strategy == "latent_only"
+                    or canonical_recurrence_strategy == "scalar_policy"
                 ),
                 validate_warm_start_dtype=latent_precheck_mode == "origin_aware",
             )
@@ -593,6 +622,44 @@ class VLARecurrent(nn.Module):
                 warm_start_min_iter_configured=warm_start_min_iter_configured,
             )
 
+        scalar_policy_cold_fallback = False
+        if canonical_recurrence_strategy == "scalar_policy" and not self.training:
+            actual_origin = "ACTUAL_WARM" if cached_state_used else "COLD"
+
+            if cached_state_used:
+                return run_scalar_policy_adaptive(
+                    self,
+                    state,
+                    prelude_out,
+                    h_a,
+                    h_t,
+                    p,
+                    policy=scalar_task_policy,
+                    execution_mode=scalar_policy_execution_mode,
+                    max_iter=max_iter,
+                    actual_origin=actual_origin,
+                    requested_recurrence_strategy=(
+                        requested_recurrence_strategy
+                    ),
+                    profile_coda_cost=profile_coda_cost,
+                    capture_warm_start_candidates=(
+                        capture_warm_start_candidates
+                    ),
+                    warm_start_candidate_states=(
+                        warm_start_candidate_states
+                    ),
+                    warm_start_source=warm_start_source,
+                    warm_start_min_iter_configured=(
+                        warm_start_min_iter_configured
+                    ),
+                )
+
+            # The first prediction has no cached midpoint state.
+            # Preserve the production adjacent action-MSE path so that
+            # it can create the warm-start candidate for the next call.
+            scalar_policy_cold_fallback = True
+            canonical_recurrence_strategy = "adjacent_action_mse"
+
 
         if (
             canonical_recurrence_strategy == "adjacent_action_mse"
@@ -673,6 +740,7 @@ class VLARecurrent(nn.Module):
             shadow_previous_update = None
             raw_production_states = []
             raw_production_actions = []
+            get_output_call_count = 0
 
             run_one_iteration_ms_list = []
             # Output timing lists include the final return-path call unless the
@@ -758,7 +826,14 @@ class VLARecurrent(nn.Module):
                             if should_call_coda:
                                 with rdvla_range("RDVLA/action_head/coda_stop_get_output"):
                                     with rdvla_range("RDVLA/action_head/get_output_each_iter"):
-                                        curr_output = self._get_output(state, h_a, h_t, p, profile=profile_coda_cost)
+                                        curr_output = self._get_output(
+                                            state,
+                                            h_a,
+                                            h_t,
+                                            p,
+                                            profile=profile_coda_cost,
+                                        )
+                                        get_output_call_count += 1
                                 if profile_coda_cost:
                                     append_get_output_timing()
                                     convergence_check_start = self._sync_time()
@@ -815,7 +890,11 @@ class VLARecurrent(nn.Module):
                                                 if actual_iter >= effective_min_iter:
                                                     with rdvla_range("RDVLA/action_head/stop_reason_update"):
                                                         adaptive_stop = True
-                                                        stop_reason = requested_recurrence_strategy
+                                                        stop_reason = (
+                                                            "adjacent_action_mse_cold_fallback"
+                                                            if scalar_policy_cold_fallback
+                                                            else requested_recurrence_strategy
+                                                        )
                                                 else:
                                                     min_iter_gate_block_count += 1
 
@@ -885,7 +964,14 @@ class VLARecurrent(nn.Module):
                 if use_cached_final_output and curr_output is not None:
                     final_output = curr_output
                 else:
-                    final_output = self._get_output(state, h_a, h_t, p, profile=profile_coda_cost)
+                    final_output = self._get_output(
+                        state,
+                        h_a,
+                        h_t,
+                        p,
+                        profile=profile_coda_cost,
+                    )
+                    get_output_call_count += 1
                     if profile_coda_cost:
                         append_get_output_timing()
 
@@ -914,6 +1000,37 @@ class VLARecurrent(nn.Module):
                 "requested_recurrence_strategy": requested_recurrence_strategy,
                 "canonical_recurrence_strategy": canonical_recurrence_strategy,
                 "canonical_metric_name": canonical_recurrence_strategy,
+                "scalar_policy_requested": (
+                    requested_recurrence_strategy == "scalar_policy"
+                ),
+                "scalar_policy_applied": False,
+                "scalar_policy_cold_fallback": bool(
+                    scalar_policy_cold_fallback
+                ),
+                "scalar_policy_execution_mode": (
+                    scalar_policy_execution_mode
+                    if scalar_policy_cold_fallback
+                    else None
+                ),
+                "scalar_policy_task_id": (
+                    int(scalar_task_policy.task_id)
+                    if scalar_policy_cold_fallback
+                    else None
+                ),
+                "scalar_policy_outer_fold": (
+                    int(scalar_task_policy.outer_fold)
+                    if scalar_policy_cold_fallback
+                    else None
+                ),
+                "scalar_policy_threshold": (
+                    float(scalar_task_policy.threshold)
+                    if scalar_policy_cold_fallback
+                    else None
+                ),
+                "scalar_policy_gate_iteration": None,
+                "scalar_policy_terminal_iteration": None,
+                "scalar_policy_score_call_count": 0,
+                "scalar_policy_score_trace": [],
                 "action_mse_threshold": float(kl_thresh) if canonical_recurrence_strategy == "adjacent_action_mse" else None,
                 "threshold": float(kl_thresh) if canonical_recurrence_strategy == "adjacent_action_mse" else float(cos_thresh),
                 "fixed_K": None,
@@ -954,6 +1071,18 @@ class VLARecurrent(nn.Module):
                 "final_conv_score": final_kl,
                 "stop_reason": stop_reason,
                 "canonical_stop_reason": canonical_recurrence_strategy if adaptive_stop else stop_reason,
+                "coda_call_count": int(get_output_call_count),
+                "get_output_call_count": int(get_output_call_count),
+                "final_state_coda_executed": bool(
+                    not (
+                        use_cached_final_output
+                        and curr_output is not None
+                    )
+                ),
+                "returned_cached_final_output": bool(
+                    use_cached_final_output
+                    and curr_output is not None
+                ),
                 "profiling_enabled": bool(profile_coda_cost),
                 "use_cached_final_output": bool(use_cached_final_output),
                 "warm_start_min_iter_configured": warm_start_min_iter_configured,
@@ -984,13 +1113,19 @@ class VLARecurrent(nn.Module):
                 # Ratio denominator is recurrent-core time plus all _get_output() calls.
                 # The uncached baseline therefore includes the final return-path Coda call.
                 profiled_recurrent_ms_total = run_one_iteration_ms_total + get_output_ms_total
+                if len(get_output_ms_list) != get_output_call_count:
+                    raise RuntimeError(
+                        "profiled and production get_output call counts differ: "
+                        f"profiled={len(get_output_ms_list)}, "
+                        f"production={get_output_call_count}"
+                    )
                 self.last_recurrence_debug.update({
                     "run_one_iteration_ms_list": run_one_iteration_ms_list,
                     "get_output_ms_list": get_output_ms_list,
                     "coda_ms_list": coda_ms_list,
                     "output_proj_ms_list": output_proj_ms_list,
                     "convergence_check_ms_list": convergence_check_ms_list,
-                    "get_output_call_count": len(get_output_ms_list),
+                    "get_output_call_count": int(get_output_call_count),
                     "coda_ms_total": coda_ms_total,
                     "get_output_ms_total": get_output_ms_total,
                     "run_one_iteration_ms_total": run_one_iteration_ms_total,
@@ -1226,6 +1361,67 @@ class ActionHeadRecurrent(nn.Module):
         self.action_dim = action_dim
         self.num_task_tokens = 512
         self.model = VLARecurrent(cfg)
+        self._scalar_task_policy = None
+        self._scalar_policy_execution_mode = None
+
+    def configure_scalar_task_policy(
+        self,
+        policy: PreparedScalarTaskPolicy,
+        execution_mode: str,
+    ) -> None:
+        """Bind one held-out task policy before running that LIBERO task."""
+
+        if not isinstance(policy, PreparedScalarTaskPolicy):
+            raise TypeError(
+                "configure_scalar_task_policy requires "
+                "PreparedScalarTaskPolicy"
+            )
+        if execution_mode not in SUPPORTED_SCALAR_EXECUTION_MODES:
+            raise ValueError(
+                "scalar policy execution mode must be direct "
+                "or confirm_next"
+            )
+
+        self._scalar_task_policy = policy
+        self._scalar_policy_execution_mode = execution_mode
+
+    def clear_scalar_task_policy(self) -> None:
+        self._scalar_task_policy = None
+        self._scalar_policy_execution_mode = None
+
+    def _resolve_scalar_runtime_policy(
+        self,
+        convergence_strategy,
+        scalar_task_policy,
+        scalar_policy_execution_mode,
+    ):
+        canonical = canonicalize_recurrence_strategy(
+            convergence_strategy
+        )
+
+        if canonical != "scalar_policy":
+            return (
+                scalar_task_policy,
+                scalar_policy_execution_mode
+                if scalar_policy_execution_mode is not None
+                else "direct",
+            )
+
+        if scalar_task_policy is None:
+            scalar_task_policy = self._scalar_task_policy
+
+        if scalar_policy_execution_mode is None:
+            scalar_policy_execution_mode = (
+                self._scalar_policy_execution_mode
+            )
+
+        if scalar_policy_execution_mode is None:
+            scalar_policy_execution_mode = "direct"
+
+        return (
+            scalar_task_policy,
+            scalar_policy_execution_mode,
+        )
 
     def forward(self, x, h_a=None, h_t=None, p=None, num_iter=None, **kwargs):
         return self.model(h_a, h_t, p, num_iter=num_iter, **kwargs)
@@ -1254,8 +1450,20 @@ class ActionHeadRecurrent(nn.Module):
                        latent_only_warm_threshold=0.0,
                        latent_only_min_iter=2,
                        latent_only_eps=1e-8,
+                       scalar_task_policy=None,
+                       scalar_policy_execution_mode=None,
                        **kwargs):
-        canonicalize_recurrence_strategy(convergence_strategy)
+        canonical_recurrence_strategy = canonicalize_recurrence_strategy(
+            convergence_strategy
+        )
+        (
+            scalar_task_policy,
+            scalar_policy_execution_mode,
+        ) = self._resolve_scalar_runtime_policy(
+            convergence_strategy,
+            scalar_task_policy,
+            scalar_policy_execution_mode,
+        )
         validate_latent_only_configuration(
             convergence_strategy,
             metric=latent_only_metric,
@@ -1282,6 +1490,22 @@ class ActionHeadRecurrent(nn.Module):
             min_iter=latent_precheck_min_iter,
             nonfinite_policy=nonfinite_policy,
             shadow_full_depth=shadow_full_depth,
+        )
+        validate_scalar_runtime_configuration(
+            canonical_recurrence_strategy,
+            task_policy=scalar_task_policy,
+            execution_mode=scalar_policy_execution_mode,
+            use_warm_start=enable_warm_start,
+            warm_start_source=warm_start_source,
+            use_latent_precheck=use_latent_precheck,
+            latent_precheck_mode=latent_precheck_mode,
+            latent_precheck_trace_level=latent_precheck_trace_level,
+            shadow_full_depth=shadow_full_depth,
+            collect_preconvergence_raw_shadow=(
+                collect_preconvergence_raw_shadow
+            ),
+            use_cached_final_output=use_cached_final_output,
+            max_iter=max_iter,
         )
         with rdvla_range("RDVLA/action_head/wrapper_total"):
             B = actions_hidden_states.shape[0]
@@ -1320,7 +1544,11 @@ class ActionHeadRecurrent(nn.Module):
                                  latent_only_cold_threshold=latent_only_cold_threshold,
                                  latent_only_warm_threshold=latent_only_warm_threshold,
                                  latent_only_min_iter=latent_only_min_iter,
-                                 latent_only_eps=latent_only_eps)
+                                 latent_only_eps=latent_only_eps,
+                                 scalar_task_policy=scalar_task_policy,
+                                 scalar_policy_execution_mode=(
+                                     scalar_policy_execution_mode
+                                 ))
             if capture_action_head_workload:
                 metadata = self.model.last_inference_metadata
                 selected_initial_state = metadata.pop("_workload_selected_initial_state")
