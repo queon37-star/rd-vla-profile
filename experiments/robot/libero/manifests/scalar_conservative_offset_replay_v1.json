@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "study_name": "scalar_conservative_offset_full_trajectory_replay",
+  "primary_origin": "ACTUAL_WARM",
+  "expected_prediction_count": 2398,
+  "expected_actual_warm_count": 2298,
+  "expected_cold_count": 100,
+  "expected_task_ids": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+  "minimum_gate_iteration": 3,
+  "execution_mode": "confirm_next",
+  "candidate_sources": [
+    "deployed_offset_zero",
+    "k3_severe_fpr_limits_0.01_0.05_0.10_0.20"
+  ],
+  "planning_recurrent_iteration_ms": 2.4125,
+  "planning_repeated_output_path_ms": 1.0715,
+  "planning_gate_evaluation_ms": 0.0,
+  "latency_scope": "post-VLM action-policy path; VLM backbone excluded",
+  "promotion_allowed": false,
+  "selection_partition": "seen calibration; descriptive replay only"
+}
