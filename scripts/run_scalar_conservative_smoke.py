@@ -47,6 +47,13 @@ def load_json(path: Path) -> dict[str, Any]:
     return value
 
 
+def draccus_string(value: str) -> str:
+    """Protect YAML-like scalar words such as 'off' from bool coercion."""
+
+    require(isinstance(value, str) and value, "Draccus string token must be non-empty")
+    return json.dumps(value)
+
+
 def candidate_identity(path: Path, expected_limit: float) -> dict[str, Any]:
     manifest = load_json(path / "manifest.json")
     require(manifest.get("runtime_screening_only") is True, "candidate is not screening-only")
@@ -58,7 +65,8 @@ def candidate_identity(path: Path, expected_limit: float) -> dict[str, Any]:
     require(observed_source == expected_source, f"candidate source mismatch: {path}")
     artifact_sha256 = str(manifest.get("artifact_sha256", ""))
     require(len(artifact_sha256) == 64, f"candidate artifact SHA-256 is invalid: {path}")
-    require((path / str(manifest.get("artifact_file", ""))).is_file(), f"candidate artifact is missing: {path}")
+    artifact_file = path / str(manifest.get("artifact_file", ""))
+    require(artifact_file.is_file(), f"candidate artifact is missing: {path}")
     return {
         "path": str(path.resolve()),
         "artifact_sha256": artifact_sha256,
@@ -115,9 +123,9 @@ def command_for(
         "--use_latent_precheck",
         "False",
         "--latent_precheck_mode",
-        "off",
+        draccus_string("off"),
         "--latent_precheck_trace_level",
-        "off",
+        draccus_string("off"),
         "--shadow_full_depth",
         "False",
         "--num_exec_actions",
@@ -254,26 +262,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         output_dir = Path(run["output_dir"])
         output_dir.mkdir(parents=True, exist_ok=False)
         command = list(run["command"])
-        print(
-            f"[{index}/{len(runs)}] task={run['task_id']} arm={run['arm']}"
-        )
+        print(f"[{index}/{len(runs)}] task={run['task_id']} arm={run['arm']}")
         print(shlex.join(command))
-        subprocess.run(
-            command,
-            cwd=REPO_ROOT,
-            env=environment,
-            check=True,
-        )
+        subprocess.run(command, cwd=REPO_ROOT, env=environment, check=True)
         summary = {
             "task_id": run["task_id"],
             "arm": run["arm"],
             **result_summary(output_dir / "result.json"),
         }
         summaries.append(summary)
-        print(
-            f"Completed: success={summary['total_successes']}/"
-            f"{summary['total_episodes']}"
-        )
+        print(f"Completed: success={summary['total_successes']}/{summary['total_episodes']}")
 
     execution_report = {
         **plan,
