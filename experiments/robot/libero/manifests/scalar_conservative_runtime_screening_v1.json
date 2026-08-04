@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "study": "scalar_conservative_runtime_screening",
+  "latency_scope": "post-VLM action-policy path; VLM backbone excluded",
+  "source_population": "formal calibration ACTUAL_WARM predictions",
+  "source_replay_is_descriptive_only": true,
+  "runtime_execution_mode": "confirm_next",
+  "baseline": {
+    "name": "action_mse",
+    "recurrence_strategy": "adjacent_action_mse",
+    "threshold": 0.001
+  },
+  "candidate_operating_points": [
+    {
+      "name": "offset05",
+      "source_k3_severe_fpr_limit": 0.05,
+      "role": "safety-leaning candidate"
+    },
+    {
+      "name": "offset10",
+      "source_k3_severe_fpr_limit": 0.1,
+      "role": "balanced candidate"
+    }
+  ],
+  "excluded_operating_points": [
+    {
+      "source_k3_severe_fpr_limit": 0.01,
+      "reason": "mean delta K +0.9735 and lower planning saving"
+    },
+    {
+      "source_k3_severe_fpr_limit": 0.2,
+      "reason": "mean delta K -0.2550 and 38.903 percent early terminals"
+    }
+  ],
+  "paired_smoke": {
+    "phase": "smoke",
+    "task_ids": [0, 5],
+    "episodes_per_task": 3,
+    "arms": ["action_mse", "offset05", "offset10"],
+    "promotion_allowed": false
+  },
+  "screening_after_smoke": {
+    "phase": "screening",
+    "task_ids": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+    "episodes_per_task": 10,
+    "arms": ["action_mse", "offset05", "offset10"],
+    "candidate_selection_only": true,
+    "final_partition_reuse_prohibited": true
+  }
+}
