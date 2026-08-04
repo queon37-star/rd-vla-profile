@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Run the paired midpoint warm-start preflight or planning-only pilot.
+"""Run paired midpoint warm-start planning checks or a planning-only pilot.
 
 Modes:
 - preflight: tasks 0 and 5, frozen smoke phase, 3 pairs/task.
+- extended_preflight: all ten tasks, frozen smoke phase, 3 pairs/task.
 - pilot: all ten tasks, frozen calibration phase, 10 pairs/task.
 
-Neither mode is confirmatory evidence. The pilot is blocked until a preflight
-validation report has passed.
+No mode produces confirmatory evidence. The 10-pair/task pilot remains blocked
+until the frozen task-0/task-5 preflight validation report has passed.
 """
 
 from __future__ import annotations
@@ -36,6 +37,12 @@ MODE_CONFIG = {
         "episodes_per_task": 3,
         "default_tasks": (0, 5),
         "role": "planning_preflight_not_evidence",
+    },
+    "extended_preflight": {
+        "phase": "smoke",
+        "episodes_per_task": 3,
+        "default_tasks": tuple(range(10)),
+        "role": "extended_planning_preflight_not_evidence",
     },
     "pilot": {
         "phase": "calibration",
@@ -223,7 +230,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--checkpoint", type=Path, default=DEFAULT_CHECKPOINT)
     parser.add_argument("--initial-state-manifest", type=Path, default=DEFAULT_MANIFEST)
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
-    parser.add_argument("--tasks", help="Comma-separated task IDs; pilot remains fixed to all 0..9.")
+    parser.add_argument(
+        "--tasks",
+        help=(
+            "Comma-separated task IDs. Frozen defaults are 0,5 for preflight "
+            "and all 0..9 for extended_preflight/pilot."
+        ),
+    )
     parser.add_argument("--preflight-report", type=Path)
     parser.add_argument("--dry-run", action="store_true")
     return parser
@@ -233,10 +246,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     config = MODE_CONFIG[args.mode]
     tasks = parse_tasks(args.tasks, config["default_tasks"])
+
     if args.mode == "pilot":
         require(tasks == tuple(range(10)), "planning pilot must cover exactly tasks 0..9")
         require(args.preflight_report is not None, "pilot requires --preflight-report")
         preflight = validate_preflight_report(args.preflight_report)
+    elif args.mode == "extended_preflight":
+        require(
+            tasks == tuple(range(10)),
+            "extended preflight must cover exactly tasks 0..9",
+        )
+        require(
+            args.preflight_report is None,
+            "extended preflight must not receive --preflight-report",
+        )
+        preflight = None
     else:
         require(tasks == (0, 5), "preflight is frozen to tasks 0 and 5")
         require(args.preflight_report is None, "preflight must not receive --preflight-report")
@@ -307,7 +331,10 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     args.output_root.mkdir(parents=True, exist_ok=True)
     plan_path = args.output_root / "run_plan.json"
-    plan_path.write_text(json.dumps(plan, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    plan_path.write_text(
+        json.dumps(plan, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
 
     environment = dict(os.environ)
     environment["NUMBA_DISABLE_JIT"] = "1"
@@ -341,7 +368,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         "run_summaries": summaries,
     }
     report_path = args.output_root / "execution_report.json"
-    report_path.write_text(json.dumps(execution_report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    report_path.write_text(
+        json.dumps(execution_report, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
 
     validation_path = args.output_root / "validation_report.json"
     validation_command = [
