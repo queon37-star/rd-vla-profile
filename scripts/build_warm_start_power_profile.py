@@ -48,7 +48,10 @@ def load_json(path: Path) -> dict[str, Any]:
 
 def load_task_name_map(manifest_path: Path) -> tuple[dict[str, int], str]:
     manifest = load_json(manifest_path)
-    require(manifest.get("task_suite_name") == "libero_spatial", "manifest must be LIBERO Spatial")
+    require(
+        manifest.get("task_suite_name") == "libero_spatial",
+        "manifest must be LIBERO Spatial",
+    )
     tasks = manifest.get("tasks")
     require(isinstance(tasks, dict), "manifest is missing tasks")
 
@@ -57,22 +60,31 @@ def load_task_name_map(manifest_path: Path) -> tuple[dict[str, int], str]:
         entry = tasks.get(str(task_id))
         require(isinstance(entry, dict), f"manifest is missing task {task_id}")
         task_name = entry.get("task_name")
-        require(isinstance(task_name, str) and task_name, f"manifest task {task_id} has no task_name")
-        require(task_name not in name_to_id, f"duplicate task_name in manifest: {task_name}")
+        require(
+            isinstance(task_name, str) and task_name,
+            f"manifest task {task_id} has no task_name",
+        )
+        require(
+            task_name not in name_to_id,
+            f"duplicate task_name in manifest: {task_name}",
+        )
         name_to_id[task_name] = task_id
     return name_to_id, sha256_file(manifest_path)
 
 
-def pair_key(record: dict[str, Any], *, source: Path, task_name: str) -> tuple[int, int, int]:
+def pair_key(
+    record: dict[str, Any], *, source: Path, task_name: str
+) -> tuple[int, int, int]:
     values = []
     for field in ("paired_trial_id", "initial_state_id", "episode_seed"):
         value = record.get(field)
         require(
             isinstance(value, int) and not isinstance(value, bool),
-            f"{source}: task={task_name} requires integer {field}; legacy/unpaired results are not admissible",
+            f"{source}: task={task_name} requires integer {field}; "
+            "legacy/unpaired results are not admissible",
         )
         values.append(int(value))
-    return tuple(values)  # type: ignore[return-value]
+    return values[0], values[1], values[2]
 
 
 def collect_arm(
@@ -80,14 +92,20 @@ def collect_arm(
     *,
     arm_name: str,
     task_name_to_id: dict[str, int],
-) -> tuple[dict[int, dict[tuple[int, int, int], dict[str, Any]]], list[dict[str, Any]]]:
+) -> tuple[
+    dict[int, dict[tuple[int, int, int], dict[str, Any]]],
+    list[dict[str, Any]],
+]:
     by_task: dict[int, dict[tuple[int, int, int], dict[str, Any]]] = defaultdict(dict)
     provenance = []
 
     for path in paths:
         payload = load_json(path)
         tasks = payload.get("tasks")
-        require(isinstance(tasks, dict) and tasks, f"{path}: result JSON has no task records")
+        require(
+            isinstance(tasks, dict) and tasks,
+            f"{path}: result JSON has no task records",
+        )
         provenance.append(
             {
                 "path": str(path.resolve()),
@@ -99,18 +117,35 @@ def collect_arm(
         )
 
         for task_name, records in tasks.items():
-            require(task_name in task_name_to_id, f"{path}: unknown task name {task_name!r}")
+            require(
+                task_name in task_name_to_id,
+                f"{path}: unknown task name {task_name!r}",
+            )
             task_id = task_name_to_id[task_name]
-            require(isinstance(records, list), f"{path}: task {task_name} records must be a list")
+            require(
+                isinstance(records, list),
+                f"{path}: task {task_name} records must be a list",
+            )
             for record in records:
-                require(isinstance(record, dict), f"{path}: task {task_name} contains a non-object record")
+                require(
+                    isinstance(record, dict),
+                    f"{path}: task {task_name} contains a non-object record",
+                )
                 key = pair_key(record, source=path, task_name=task_name)
-                require(key not in by_task[task_id], f"duplicate {arm_name} pair for task {task_id}: {key}")
+                require(
+                    key not in by_task[task_id],
+                    f"duplicate {arm_name} pair for task {task_id}: {key}",
+                )
                 success = record.get("success")
-                require(isinstance(success, bool), f"{path}: task {task_name} pair {key} has invalid success")
+                require(
+                    isinstance(success, bool),
+                    f"{path}: task {task_name} pair {key} has invalid success",
+                )
                 by_task[task_id][key] = {
                     "success": success,
-                    "evaluation_protocol_phase": record.get("evaluation_protocol_phase"),
+                    "evaluation_protocol_phase": record.get(
+                        "evaluation_protocol_phase"
+                    ),
                     "source_path": str(path.resolve()),
                 }
 
@@ -122,8 +157,14 @@ def summarize_profile(
     baseline: dict[int, dict[tuple[int, int, int], dict[str, Any]]],
     warm: dict[int, dict[tuple[int, int, int], dict[str, Any]]],
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
-    require(set(baseline) == set(EXPECTED_TASK_IDS), "baseline must contain exactly task IDs 0..9")
-    require(set(warm) == set(EXPECTED_TASK_IDS), "warm arm must contain exactly task IDs 0..9")
+    require(
+        set(baseline) == set(EXPECTED_TASK_IDS),
+        "baseline must contain exactly task IDs 0..9",
+    )
+    require(
+        set(warm) == set(EXPECTED_TASK_IDS),
+        "warm arm must contain exactly task IDs 0..9",
+    )
 
     task_rows = []
     aggregate = {
@@ -172,7 +213,10 @@ def summarize_profile(
         aggregate["total_pairs"] += n_pairs
         p01 = counts["warm_only_success"] / n_pairs
         p10 = counts["baseline_only_success"] / n_pairs
-        require(math.isfinite(p01) and math.isfinite(p10), "non-finite profile probability")
+        require(
+            math.isfinite(p01) and math.isfinite(p10),
+            "non-finite profile probability",
+        )
         task_rows.append(
             {
                 "task_id": task_id,
@@ -182,7 +226,9 @@ def summarize_profile(
                 "paired_difference": p01 - p10,
                 "discordance": p01 + p10,
                 **counts,
-                "evaluation_protocol_phases": sorted(str(value) for value in phases),
+                "evaluation_protocol_phases": sorted(
+                    str(value) for value in phases
+                ),
             }
         )
 
@@ -197,7 +243,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--initial-state-manifest",
         type=Path,
-        default=Path("experiments/robot/libero/manifests/libero_spatial_official_50_v1.json"),
+        default=Path(
+            "experiments/robot/libero/manifests/"
+            "libero_spatial_official_50_v1.json"
+        ),
     )
     parser.add_argument("--scenario-name", default="observed_warm_start_pilot")
     return parser
@@ -205,9 +254,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    require(not args.output.exists(), f"refusing to overwrite existing output: {args.output}")
+    require(
+        not args.output.exists(),
+        f"refusing to overwrite existing output: {args.output}",
+    )
 
-    task_name_to_id, manifest_sha256 = load_task_name_map(args.initial_state_manifest)
+    task_name_to_id, manifest_sha256 = load_task_name_map(
+        args.initial_state_manifest
+    )
     baseline, baseline_sources = collect_arm(
         args.baseline,
         arm_name="baseline",
@@ -232,9 +286,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             "sha256": manifest_sha256,
         },
         "pair_contract": {
-            "identity_fields": ["paired_trial_id", "initial_state_id", "episode_seed"],
-            "exact_cross_arm_identity_required": true,
-            "legacy_unpaired_runs_allowed": false
+            "identity_fields": [
+                "paired_trial_id",
+                "initial_state_id",
+                "episode_seed",
+            ],
+            "exact_cross_arm_identity_required": True,
+            "legacy_unpaired_runs_allowed": False,
         },
         "sources": {
             "cold_initialized_adaptive": baseline_sources,
