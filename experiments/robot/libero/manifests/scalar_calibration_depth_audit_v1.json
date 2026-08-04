@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "audit_name": "scalar_calibration_depth_audit",
+  "primary_origin": "ACTUAL_WARM",
+  "action_mse_threshold": 0.001,
+  "hard_depth_threshold": 6,
+  "very_hard_depth_threshold": 8,
+  "minimum_scalar_gate_iteration": 3,
+  "expected_task_ids": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+  "expected_prediction_count": 2398,
+  "expected_actual_warm_count": 2298,
+  "expected_cold_count": 100,
+  "depth_reports": {
+    "exact": [3, 4, 5],
+    "thresholds": [6, 8],
+    "exclusive_buckets": ["K<=3", "K=4", "K=5", "K=6-7", "K>=8"]
+  },
+  "hard_negative_definition": "actual-warm prediction with K_action>=6 whose task-OOF scalar policy already triggers at k=3",
+  "latency_scope": "post-VLM action-policy path; VLM backbone excluded"
+}
