@@ -37,6 +37,36 @@ not only the transformer Coda layers in isolation. The terminal-only path also
 retains its current fail-closed finite checks. These implementation details must
 be preserved when interpreting the result.
 
+## Correctness preflight
+
+Before timing, the preflight replays every paired `K=4`, `K=6`, and `K=8`
+condition and requires exact tensor equality between the terminal action from
+the legacy fixed path and the terminal-only path. It also validates recurrent
+depth, output-decode count, warm/cold origin handling, and terminal decode
+execution.
+
+The correctness check is intentionally separate from the timed runner so that
+output comparison and diagnostic synchronization cannot contaminate the primary
+latency measurement.
+
+Development preflight:
+
+```bash
+python scripts/run_fixed_coda_preflight.py \
+  --max-workloads 2 \
+  --output benchmark_results/fixed_coda_microprofile/dev/preflight.json
+```
+
+Formal preflight:
+
+```bash
+python scripts/run_fixed_coda_preflight.py \
+  --output benchmark_results/fixed_coda_microprofile/seed7/preflight.json
+```
+
+Do not start the formal timing run unless the formal preflight reports zero
+output-equivalence failures.
+
 ## Timed boundary
 
 The primary measurement is CPU wall-clock time around
@@ -69,7 +99,7 @@ paired terminal-only versus legacy comparisons at each `K`.
 No post-hoc pass/fail latency threshold is used. The raw synchronized
 measurements and descriptive summaries are retained in the JSON report.
 
-## Development run
+## Development timing run
 
 ```bash
 cd /home/siwon/RD-VLA_test/rd-vla
@@ -86,7 +116,7 @@ python scripts/run_fixed_coda_microprofile.py \
 
 A development subset is never marked as a formal run.
 
-## Formal run
+## Formal timing run
 
 ```bash
 python scripts/run_fixed_coda_microprofile.py \
