@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "expected_prediction_count": 2398,
+  "expected_actual_warm_count": 2298,
+  "expected_task_ids": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+  "safe_gate_max_K_action": 4,
+  "unsafe_gate_min_K_action": 5,
+  "severe_unsafe_min_K_action": 6,
+  "very_severe_unsafe_min_K_action": 8,
+  "deployed_margin_offset": 0.0,
+  "severe_false_trigger_limits": [0.01, 0.05, 0.10, 0.20],
+  "primary_score_field": "k3_scalar_score",
+  "primary_margin_field": "k3_score_margin",
+  "latency_scope": "post-VLM action-policy path; VLM backbone excluded",
+  "purpose": "Distinguish an overly aggressive deployed threshold from weak k=3 scalar feature separability without retraining or using final evaluation data."
+}
