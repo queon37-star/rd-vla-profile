@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "device": "cuda:0",
+  "seed": 7,
+  "measurement_repeats": 5,
+  "warmup_rounds_per_origin": 3,
+  "fixed_depths": [4, 6, 8],
+  "include_terminal_only_k5": true,
+  "primary_scope": "actual_warm",
+  "expected_formal_workload_count": 200,
+  "expected_cold_workload_count": 100,
+  "expected_actual_warm_workload_count": 100,
+  "timed_boundary": "synchronized ActionHeadRecurrent.predict_action wall clock",
+  "notes": [
+    "All conditions replay the same captured action-head workload and selected initial latent state.",
+    "Legacy fixed K executes K recurrent iterations and K output decodes.",
+    "Terminal-only fixed K executes K recurrent iterations and one terminal output decode.",
+    "Tensor loading, validation, CPU-to-GPU copies, and projector equivalence checks are outside the timer.",
+    "No success-rate claim is made from this microprofile."
+  ]
+}
