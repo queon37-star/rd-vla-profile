@@ -1,0 +1,161 @@
+{
+  "schema_version": 1,
+  "study": "midpoint_warm_start_primary_evaluation",
+  "status": "planning_freeze_v1_final_run_not_authorized",
+  "repository": {
+    "branch": "experiment/warm-start-primary-evaluation",
+    "base_ref": "experiment/scalar-conservative-runtime-screening",
+    "source_commit": null
+  },
+  "benchmark": {
+    "task_suite_name": "libero_spatial",
+    "task_ids": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+    "task_population": "fixed_ten_task_benchmark",
+    "equal_pairs_per_task": true
+  },
+  "checkpoint": {
+    "path": "outputs/12_24-24_24_Spatial_40k",
+    "sync_checkpoint_source_config": false,
+    "snapshot_sha256": null
+  },
+  "common_runtime": {
+    "use_recurrent": true,
+    "recurrence_strategy": "adjacent_action_mse",
+    "recurrence_kl_thresh": 0.001,
+    "recurrence_max_iter": 32,
+    "use_cached_final_output": true,
+    "num_exec_actions": 5,
+    "reset_rng_each_episode": true,
+    "use_latent_precheck": false,
+    "latent_precheck_mode": "off",
+    "latent_precheck_trace_level": "off",
+    "shadow_full_depth": false,
+    "collect_preconvergence_raw_shadow": false,
+    "adaptive_exec": false,
+    "dynamic_exec": false,
+    "use_linear_decay_horizon": false,
+    "scalar_policy_enabled": false
+  },
+  "arms": {
+    "cold_initialized_adaptive": {
+      "use_warm_start": false,
+      "warm_start_source": "midpoint",
+      "warm_start_min_iter": 2,
+      "validate_warm_start_finite": true,
+      "initialization_contract": "fresh_checkpoint_random_initial_state_for_every_prediction"
+    },
+    "midpoint_warm_start_adaptive": {
+      "use_warm_start": true,
+      "warm_start_source": "midpoint",
+      "warm_start_min_iter": 2,
+      "validate_warm_start_finite": true,
+      "initialization_contract": "first_prediction_cold_then_previous_prediction_midpoint_candidate_when_finite"
+    }
+  },
+  "primary_success_analysis": {
+    "estimand": "paired_success_difference_warm_minus_cold_baseline",
+    "p01_definition": "cold_baseline_failure_and_warm_start_success",
+    "p10_definition": "cold_baseline_success_and_warm_start_failure",
+    "analysis_population": "all_valid_paired_trials_across_ten_fixed_tasks",
+    "resampling": "paired_trials_resampled_within_each_task_tasks_not_resampled",
+    "interval": "one_sided_95_percent_task_stratified_percentile_bootstrap_lower_bound",
+    "alpha": 0.05,
+    "noninferiority_margin": null,
+    "candidate_margins": [0.05, 0.03, 0.02],
+    "pass_rule": "lower_bound_strictly_greater_than_negative_margin",
+    "formal_taskwise_noninferiority": false,
+    "catastrophic_regression_guardrail": null
+  },
+  "power_planning": {
+    "script": "scripts/simulate_warm_start_power.py",
+    "target_power": null,
+    "target_power_candidates": [0.8, 0.9],
+    "homogeneous_discordance_grid": [0.03, 0.05, 0.08, 0.1],
+    "homogeneous_true_difference_grid": [0.0, -0.01, -0.02],
+    "candidate_pairs_per_task": [10, 20, 30, 40, 50],
+    "task_level_p01_p10_profile_source": null,
+    "selected_pairs_per_task": null,
+    "selected_total_pairs": null,
+    "maximum_unique_official_pairs_per_task": 50,
+    "repeated_state_design_modeled": false
+  },
+  "data_reuse": {
+    "official_initial_states_per_task": 50,
+    "existing_scalar_partitions_consumed": true,
+    "untouched_initial_state_partition_claim_allowed": false,
+    "planned_design": "fresh_preregistered_paired_rng_replicate_over_frozen_official_initial_states",
+    "fresh_warm_start_seed_namespace": null,
+    "one_primary_pair_per_selected_state": true,
+    "individual_state_selection_from_scalar_results": false,
+    "prior_state_use_disclosure_required": true
+  },
+  "latency": {
+    "online_rollout_metric": {
+      "name": "synchronized_online_policy_query_latency",
+      "boundary": "cuda_synchronize_before_and_after_get_action",
+      "includes": [
+        "image_collection_and_preparation",
+        "processor",
+        "vlm_prediction",
+        "action_policy_and_action_head",
+        "action_postprocessing"
+      ]
+    },
+    "fixed_coda_microprofile_metric": {
+      "name": "synchronized_post_vlm_action_head_latency",
+      "boundary": "action_head_call_after_vlm_features_are_available",
+      "must_remain_separate": true
+    },
+    "selected_primary_online_boundary": null,
+    "unmatched_timer_average_composition_allowed": false
+  },
+  "required_efficiency_metrics": [
+    "recurrent_iterations_per_prediction",
+    "recurrent_calls_per_episode",
+    "coda_or_get_output_calls_per_prediction",
+    "coda_or_get_output_calls_per_episode",
+    "predictions_per_episode",
+    "synchronized_policy_query_latency_per_prediction",
+    "summed_inference_time_per_episode",
+    "environment_steps_per_episode"
+  ],
+  "preflight_contract": {
+    "checkpoint_unchanged": false,
+    "paired_task_state_trial_and_seed_identity": false,
+    "arm_absent_from_seed_derivation": false,
+    "first_prediction_cold_in_both_arms": false,
+    "later_warm_state_use_validated": false,
+    "baseline_random_initialization_validated": false,
+    "inactive_mechanisms_disabled": false,
+    "coda_call_count_equals_terminal_k": false,
+    "cached_terminal_output_reused": false,
+    "no_nonfinite_or_runtime_contract_failure": false
+  },
+  "forbidden_post_outcome_changes": [
+    "fixed_depth_candidate",
+    "task_specific_warm_start_rules",
+    "staleness_gate",
+    "noise_interpolation",
+    "latent_or_scalar_stopping",
+    "latent_precheck",
+    "adaptive_action_horizon",
+    "threshold_retuning",
+    "midpoint_redefinition",
+    "warm_start_min_iter_retuning"
+  ],
+  "final_run_authorization": {
+    "source_commit_frozen": false,
+    "checkpoint_digest_frozen": false,
+    "runtime_environment_frozen": false,
+    "initial_state_allocation_frozen": false,
+    "fresh_seed_namespace_frozen": false,
+    "noninferiority_margin_frozen": false,
+    "target_power_frozen": false,
+    "power_profile_provenance_frozen": false,
+    "pairs_per_task_frozen": false,
+    "bootstrap_implementation_validated": false,
+    "latency_boundary_frozen": false,
+    "preflight_passed": false,
+    "authorized": false
+  }
+}
