@@ -490,6 +490,11 @@ def get_vla_action(
                                 False,
                             )
                         ),
+                        action_delta_gate_return_mode=getattr(
+                            cfg,
+                            "action_delta_gate_return_mode",
+                            "anchor",
+                        ),
                     )
                     recurrence_debug = getattr(getattr(action_head, "model", None), "last_recurrence_debug", None)
                     action_head_inference_metadata = (

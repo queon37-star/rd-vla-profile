@@ -20,8 +20,10 @@ from prismatic.models.scalar_stopping_policy import (
     validate_scalar_runtime_configuration,
 )
 from prismatic.models.action_delta_gate import (
+    ActionDeltaGateCorrectionError,
     NonFiniteActionDeltaGateError,
     PreparedActionDeltaGate,
+    build_action_delta_gate_corrected_output,
     evaluate_action_delta_gate,
     validate_action_delta_gate_runtime_configuration,
 )
@@ -124,10 +126,21 @@ def select_warm_start_candidate(states, actual_iter, source):
     return states[source_index], source_index, source_index + 1
 
 
-def _action_delta_gate_exact_audit_metrics(anchor_output, terminal_output):
+def _action_delta_gate_exact_audit_metrics(
+    anchor_output,
+    terminal_output,
+    predicted_delta_action,
+):
     """Build JSON-safe float32 diagnostics for one exact action transition."""
 
-    if not torch.is_tensor(anchor_output) or not torch.is_tensor(terminal_output):
+    if not all(
+        torch.is_tensor(value)
+        for value in (
+            anchor_output,
+            terminal_output,
+            predicted_delta_action,
+        )
+    ):
         raise ValueError("exact audit actions must be tensors")
     if anchor_output.ndim not in (2, 3):
         raise ValueError(
@@ -145,6 +158,12 @@ def _action_delta_gate_exact_audit_metrics(anchor_output, terminal_output):
             f"anchor={tuple(anchor_output.shape)}, "
             f"terminal={tuple(terminal_output.shape)}"
         )
+    if tuple(predicted_delta_action.shape) != tuple(anchor_output.shape):
+        raise ValueError(
+            "exact audit predicted delta shape mismatch: "
+            f"anchor={tuple(anchor_output.shape)}, "
+            f"predicted_delta={tuple(predicted_delta_action.shape)}"
+        )
     has_leading_batch = anchor_output.ndim == 3
     if has_leading_batch and anchor_output.shape[0] != 1:
         raise ValueError(
@@ -153,17 +172,31 @@ def _action_delta_gate_exact_audit_metrics(anchor_output, terminal_output):
 
     anchor = anchor_output.detach().float()
     terminal = terminal_output.detach().float()
+    predicted_delta = predicted_delta_action.detach().float()
     if not bool(torch.isfinite(anchor).all().item()):
         raise ValueError("exact audit anchor action is non-finite")
     if not bool(torch.isfinite(terminal).all().item()):
         raise ValueError("exact audit terminal action is non-finite")
+    if not bool(torch.isfinite(predicted_delta).all().item()):
+        raise ValueError("exact audit predicted delta action is non-finite")
 
     delta = terminal - anchor
+    predicted_corrected = anchor + predicted_delta
+    correction_error = terminal - predicted_corrected
     if not bool(torch.isfinite(delta).all().item()):
         raise ValueError("exact audit delta action is non-finite")
+    if not bool(torch.isfinite(predicted_corrected).all().item()):
+        raise ValueError("exact audit predicted corrected action is non-finite")
+    if not bool(torch.isfinite(correction_error).all().item()):
+        raise ValueError("exact audit correction error is non-finite")
     metric_delta = delta.squeeze(0) if has_leading_batch else delta
+    metric_correction_error = (
+        correction_error.squeeze(0) if has_leading_batch else correction_error
+    )
     squared = metric_delta.square()
     absolute = metric_delta.abs()
+    correction_squared = metric_correction_error.square()
+    correction_absolute = metric_correction_error.abs()
     full_mse = squared.mean()
     l2 = torch.linalg.vector_norm(metric_delta)
     max_abs = absolute.max()
@@ -171,6 +204,16 @@ def _action_delta_gate_exact_audit_metrics(anchor_output, terminal_output):
     per_step_max_abs = absolute.amax(dim=-1)
     per_dim_mse = squared.mean(dim=-2)
     per_dim_max_abs = absolute.amax(dim=-2)
+    correction_full_mse = correction_squared.mean()
+    correction_l2 = torch.linalg.vector_norm(metric_correction_error)
+    correction_max_abs = correction_absolute.max()
+    correction_per_step_mse = correction_squared.mean(dim=-1)
+    correction_per_step_max_abs = correction_absolute.amax(dim=-1)
+    correction_per_dim_mse = correction_squared.mean(dim=-2)
+    correction_per_dim_max_abs = correction_absolute.amax(dim=-2)
+    prefix_step_count = min(5, int(metric_delta.shape[-2]))
+    anchor_reuse_prefix_mse = squared[:prefix_step_count].mean()
+    correction_prefix_mse = correction_squared[:prefix_step_count].mean()
     metric_tensors = (
         full_mse,
         l2,
@@ -179,9 +222,25 @@ def _action_delta_gate_exact_audit_metrics(anchor_output, terminal_output):
         per_step_max_abs,
         per_dim_mse,
         per_dim_max_abs,
+        correction_full_mse,
+        correction_l2,
+        correction_max_abs,
+        correction_per_step_mse,
+        correction_per_step_max_abs,
+        correction_per_dim_mse,
+        correction_per_dim_max_abs,
+        anchor_reuse_prefix_mse,
+        correction_prefix_mse,
     )
     if not all(bool(torch.isfinite(value).all().item()) for value in metric_tensors):
         raise ValueError("exact audit action metrics are non-finite")
+
+    def safe_ratio(numerator, denominator):
+        numerator_value = float(numerator.item())
+        denominator_value = float(denominator.item())
+        if denominator_value > 0.0:
+            return numerator_value / denominator_value
+        return 1.0 if numerator_value == 0.0 else None
 
     return {
         "action_delta_gate_exact_audit_action_shape": list(anchor.shape),
@@ -209,6 +268,48 @@ def _action_delta_gate_exact_audit_metrics(anchor_output, terminal_output):
         "action_delta_gate_exact_audit_anchor_action": anchor.cpu().tolist(),
         "action_delta_gate_exact_audit_terminal_action": terminal.cpu().tolist(),
         "action_delta_gate_exact_audit_delta_action": delta.cpu().tolist(),
+        "action_delta_gate_exact_audit_predicted_delta_action": (
+            predicted_delta.cpu().tolist()
+        ),
+        "action_delta_gate_exact_audit_predicted_corrected_action": (
+            predicted_corrected.cpu().tolist()
+        ),
+        "action_delta_gate_exact_audit_correction_full_mse": float(
+            correction_full_mse.item()
+        ),
+        "action_delta_gate_exact_audit_correction_l2": float(
+            correction_l2.item()
+        ),
+        "action_delta_gate_exact_audit_correction_max_abs": float(
+            correction_max_abs.item()
+        ),
+        "action_delta_gate_exact_audit_correction_per_step_mse": (
+            correction_per_step_mse.cpu().tolist()
+        ),
+        "action_delta_gate_exact_audit_correction_per_step_max_abs": (
+            correction_per_step_max_abs.cpu().tolist()
+        ),
+        "action_delta_gate_exact_audit_correction_per_dim_mse": (
+            correction_per_dim_mse.cpu().tolist()
+        ),
+        "action_delta_gate_exact_audit_correction_per_dim_max_abs": (
+            correction_per_dim_max_abs.cpu().tolist()
+        ),
+        "action_delta_gate_exact_audit_prefix_step_count": prefix_step_count,
+        "action_delta_gate_exact_audit_anchor_reuse_prefix_mse": float(
+            anchor_reuse_prefix_mse.item()
+        ),
+        "action_delta_gate_exact_audit_correction_prefix_mse": float(
+            correction_prefix_mse.item()
+        ),
+        "action_delta_gate_exact_audit_correction_full_mse_ratio": safe_ratio(
+            correction_full_mse,
+            full_mse,
+        ),
+        "action_delta_gate_exact_audit_correction_prefix_mse_ratio": safe_ratio(
+            correction_prefix_mse,
+            anchor_reuse_prefix_mse,
+        ),
     }
 
 
@@ -528,6 +629,7 @@ class VLARecurrent(nn.Module):
                 action_delta_gate_max_skip: int = 1,
                 action_delta_gate_min_terminal_iter: int = 2,
                 action_delta_gate_exact_coda_audit: bool = False,
+                action_delta_gate_return_mode: str = "anchor",
                 **kwargs) -> torch.Tensor:
         requested_recurrence_strategy = convergence_strategy
         canonical_recurrence_strategy = canonicalize_recurrence_strategy(convergence_strategy)
@@ -596,6 +698,7 @@ class VLARecurrent(nn.Module):
             max_skip=action_delta_gate_max_skip,
             min_terminal_iter=action_delta_gate_min_terminal_iter,
             exact_coda_audit=action_delta_gate_exact_coda_audit,
+            return_mode=action_delta_gate_return_mode,
         )
         if latent_precheck_mode == "origin_aware" and self.training:
             raise ValueError("latent_precheck_mode='origin_aware' is inference-only")
@@ -921,6 +1024,20 @@ class VLARecurrent(nn.Module):
                 "action_delta_gate_exact_audit_anchor_action": None,
                 "action_delta_gate_exact_audit_terminal_action": None,
                 "action_delta_gate_exact_audit_delta_action": None,
+                "action_delta_gate_exact_audit_predicted_delta_action": None,
+                "action_delta_gate_exact_audit_predicted_corrected_action": None,
+                "action_delta_gate_exact_audit_correction_full_mse": None,
+                "action_delta_gate_exact_audit_correction_l2": None,
+                "action_delta_gate_exact_audit_correction_max_abs": None,
+                "action_delta_gate_exact_audit_correction_per_step_mse": None,
+                "action_delta_gate_exact_audit_correction_per_step_max_abs": None,
+                "action_delta_gate_exact_audit_correction_per_dim_mse": None,
+                "action_delta_gate_exact_audit_correction_per_dim_max_abs": None,
+                "action_delta_gate_exact_audit_prefix_step_count": None,
+                "action_delta_gate_exact_audit_anchor_reuse_prefix_mse": None,
+                "action_delta_gate_exact_audit_correction_prefix_mse": None,
+                "action_delta_gate_exact_audit_correction_full_mse_ratio": None,
+                "action_delta_gate_exact_audit_correction_prefix_mse_ratio": None,
                 "action_delta_gate_exact_audit_action_shape": None,
                 "action_delta_gate_exact_audit_metric_action_shape": None,
                 "action_delta_gate_exact_audit_leading_batch_dim_squeezed": None,
@@ -1021,15 +1138,32 @@ class VLARecurrent(nn.Module):
                                     if profile_coda_cost
                                     else None
                                 )
+                                gate_predicted_delta = None
                                 try:
                                     with rdvla_range(
                                         "RDVLA/action_head/action_delta_gate_total"
                                     ):
-                                        gate_score, gate_triggered = evaluate_action_delta_gate(
-                                            action_delta_gate,
-                                            action_delta_gate_anchor_state,
-                                            state,
-                                        )
+                                        if (
+                                            action_delta_gate_exact_coda_audit
+                                            or action_delta_gate_return_mode
+                                            == "predicted_correction"
+                                        ):
+                                            (
+                                                gate_score,
+                                                gate_triggered,
+                                                gate_predicted_delta,
+                                            ) = evaluate_action_delta_gate(
+                                                action_delta_gate,
+                                                action_delta_gate_anchor_state,
+                                                state,
+                                                return_pred_delta=True,
+                                            )
+                                        else:
+                                            gate_score, gate_triggered = evaluate_action_delta_gate(
+                                                action_delta_gate,
+                                                action_delta_gate_anchor_state,
+                                                state,
+                                            )
                                 except NonFiniteActionDeltaGateError as exc:
                                     gate_score = None
                                     gate_triggered = False
@@ -1059,15 +1193,32 @@ class VLARecurrent(nn.Module):
                                     }
                                 )
                                 if gate_triggered:
+                                    if (
+                                        action_delta_gate_return_mode
+                                        == "predicted_correction"
+                                    ):
+                                        try:
+                                            action_delta_gate_return_output = (
+                                                build_action_delta_gate_corrected_output(
+                                                    action_delta_gate_anchor_output,
+                                                    gate_predicted_delta,
+                                                )
+                                            )
+                                        except ActionDeltaGateCorrectionError as exc:
+                                            gate_triggered = False
+                                            action_delta_gate_fallback_reason = str(exc)
+                                            action_delta_gate_enabled_for_prediction = False
+                                    else:
+                                        action_delta_gate_return_output = (
+                                            action_delta_gate_anchor_output
+                                        )
+                                if gate_triggered:
                                     action_delta_gate_triggered = True
                                     action_delta_gate_terminal_iteration = int(
                                         actual_iter
                                     )
                                     action_delta_gate_returned_action_source_iteration = int(
                                         action_delta_gate_anchor_iteration
-                                    )
-                                    action_delta_gate_return_output = (
-                                        action_delta_gate_anchor_output
                                     )
                                     adaptive_stop = True
                                     stop_reason = "action_delta_gate"
@@ -1123,6 +1274,7 @@ class VLARecurrent(nn.Module):
                                                     _action_delta_gate_exact_audit_metrics(
                                                         action_delta_gate_anchor_output,
                                                         audit_output,
+                                                        gate_predicted_delta,
                                                     )
                                                 )
                                             except Exception as exc:
@@ -1389,6 +1541,9 @@ class VLARecurrent(nn.Module):
                 "action_delta_gate_min_terminal_iter": int(
                     action_delta_gate_min_terminal_iter
                 ),
+                "action_delta_gate_return_mode": str(
+                    action_delta_gate_return_mode
+                ),
                 "action_delta_gate_first_eligible_terminal_iteration": (
                     int(action_delta_gate_min_terminal_iter)
                     if action_delta_gate_applied
@@ -1408,6 +1563,14 @@ class VLARecurrent(nn.Module):
                 "action_delta_gate_skipped_coda_count": int(
                     action_delta_gate_triggered
                 ),
+                "action_delta_gate_returned_predicted_correction": bool(
+                    action_delta_gate_triggered
+                    and action_delta_gate_return_mode == "predicted_correction"
+                ),
+                "action_delta_gate_returned_anchor": bool(
+                    action_delta_gate_triggered
+                    and action_delta_gate_return_mode == "anchor"
+                ),
                 "action_delta_gate_fallback_reason": action_delta_gate_fallback_reason,
                 "action_delta_gate_predictor_ms_list": (
                     action_delta_gate_predictor_ms_list
@@ -1418,6 +1581,7 @@ class VLARecurrent(nn.Module):
                 **action_delta_gate_exact_audit,
                 "action_delta_gate_returned_previous_coda": bool(
                     action_delta_gate_triggered
+                    and action_delta_gate_return_mode == "anchor"
                 ),
                 "action_mse_threshold": float(kl_thresh) if canonical_recurrence_strategy == "adjacent_action_mse" else None,
                 "threshold": float(kl_thresh) if canonical_recurrence_strategy == "adjacent_action_mse" else float(cos_thresh),
@@ -1879,6 +2043,7 @@ class ActionHeadRecurrent(nn.Module):
                        action_delta_gate_max_skip=1,
                        action_delta_gate_min_terminal_iter=2,
                        action_delta_gate_exact_coda_audit=False,
+                       action_delta_gate_return_mode="anchor",
                        **kwargs):
         canonical_recurrence_strategy = canonicalize_recurrence_strategy(
             convergence_strategy
@@ -1993,6 +2158,9 @@ class ActionHeadRecurrent(nn.Module):
                                  ),
                                  action_delta_gate_exact_coda_audit=(
                                      action_delta_gate_exact_coda_audit
+                                 ),
+                                 action_delta_gate_return_mode=(
+                                     action_delta_gate_return_mode
                                  ))
             if capture_action_head_workload:
                 metadata = self.model.last_inference_metadata

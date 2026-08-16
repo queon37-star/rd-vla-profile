@@ -26,6 +26,7 @@ ACTION_DELTA_GATE_ACTION_DIM = 7
 ACTION_DELTA_GATE_CHUNK_LEN = 8
 ACTION_DELTA_GATE_OUTER_FOLD = 4
 ACTION_DELTA_GATE_HELD_OUT_TASK_IDS = (4, 5)
+ACTION_DELTA_GATE_RETURN_MODES = ("anchor", "predicted_correction")
 
 
 class ActionDeltaGateError(ValueError):
@@ -34,6 +35,10 @@ class ActionDeltaGateError(ValueError):
 
 class NonFiniteActionDeltaGateError(RuntimeError):
     """Raised before a non-finite value can cause a Coda skip."""
+
+
+class ActionDeltaGateCorrectionError(RuntimeError):
+    """Raised before an invalid predicted correction can cause a Coda skip."""
 
 
 def _require(condition: bool, message: str) -> None:
@@ -261,7 +266,9 @@ def score_action_delta_gate(
     gate: PreparedActionDeltaGate,
     anchor_state: torch.Tensor,
     current_state: torch.Tensor,
-) -> torch.Tensor:
+    *,
+    return_pred_delta: bool = False,
+) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """Return the on-device predicted next action-delta MSE without synchronizing."""
 
     if not isinstance(gate, PreparedActionDeltaGate):
@@ -287,6 +294,8 @@ def score_action_delta_gate(
         pred_delta = pred_norm * gate.y_std + gate.y_mean
         score = pred_delta.square().mean()
 
+    if return_pred_delta:
+        return score, pred_delta
     return score
 
 
@@ -294,7 +303,9 @@ def evaluate_action_delta_gate(
     gate: PreparedActionDeltaGate,
     anchor_state: torch.Tensor,
     current_state: torch.Tensor,
-) -> tuple[float, bool]:
+    *,
+    return_pred_delta: bool = False,
+) -> tuple[float, bool] | tuple[float, bool, torch.Tensor]:
     """Return score and decision with exactly one device-to-host synchronization.
 
     Artifact tensors are finite, and both normalization scales are finite and
@@ -305,18 +316,75 @@ def evaluate_action_delta_gate(
     sufficient for fail-closed behavior under the frozen artifact contract.
     """
 
-    score_tensor = score_action_delta_gate(
-        gate,
-        anchor_state,
-        current_state,
-    )
+    pred_delta = None
+    if return_pred_delta:
+        score_tensor, pred_delta = score_action_delta_gate(
+            gate,
+            anchor_state,
+            current_state,
+            return_pred_delta=True,
+        )
+    else:
+        score_tensor = score_action_delta_gate(
+            gate,
+            anchor_state,
+            current_state,
+        )
     # One scalar D2H transfer is the runtime decision's only sync point.
     score = float(score_tensor.item())
     if not math.isfinite(score):
         raise NonFiniteActionDeltaGateError(
             "Action-Delta Gate state or score is non-finite"
         )
-    return score, score <= gate.threshold
+    triggered = score <= gate.threshold
+    if return_pred_delta:
+        return score, triggered, pred_delta
+    return score, triggered
+
+
+def build_action_delta_gate_corrected_output(
+    anchor_output: torch.Tensor,
+    pred_delta: torch.Tensor,
+) -> torch.Tensor:
+    """Add a float32 predicted delta and restore the exact anchor output contract."""
+
+    if not torch.is_tensor(anchor_output) or not torch.is_tensor(pred_delta):
+        raise ActionDeltaGateCorrectionError(
+            "Action-Delta Gate correction inputs must be tensors"
+        )
+    if tuple(pred_delta.shape) != tuple(anchor_output.shape):
+        raise ActionDeltaGateCorrectionError(
+            "Action-Delta Gate correction shape mismatch: "
+            f"anchor={tuple(anchor_output.shape)}, "
+            f"predicted_delta={tuple(pred_delta.shape)}"
+        )
+    if pred_delta.device != anchor_output.device:
+        raise ActionDeltaGateCorrectionError(
+            "Action-Delta Gate correction tensors must share a device"
+        )
+    if not anchor_output.is_floating_point() or not pred_delta.is_floating_point():
+        raise ActionDeltaGateCorrectionError(
+            "Action-Delta Gate correction tensors must be floating point"
+        )
+
+    corrected_float = anchor_output.float() + pred_delta.float()
+    corrected_output = corrected_float.to(dtype=anchor_output.dtype)
+    valid = torch.isfinite(corrected_float).all() & torch.isfinite(
+        corrected_output
+    ).all()
+    if not bool(valid.item()):
+        raise ActionDeltaGateCorrectionError(
+            "Action-Delta Gate predicted correction is non-finite"
+        )
+    if (
+        tuple(corrected_output.shape) != tuple(anchor_output.shape)
+        or corrected_output.device != anchor_output.device
+        or corrected_output.dtype != anchor_output.dtype
+    ):
+        raise ActionDeltaGateCorrectionError(
+            "Action-Delta Gate predicted correction violated the output contract"
+        )
+    return corrected_output
 
 
 def validate_action_delta_gate_runtime_configuration(
@@ -337,7 +405,13 @@ def validate_action_delta_gate_runtime_configuration(
     max_skip: int,
     min_terminal_iter: int,
     exact_coda_audit: bool,
+    return_mode: str,
 ) -> None:
+    _require(
+        return_mode in ACTION_DELTA_GATE_RETURN_MODES,
+        "Action-Delta Gate return mode must be one of "
+        f"{ACTION_DELTA_GATE_RETURN_MODES}",
+    )
     if not enabled:
         return
     _require(isinstance(prepared_gate, PreparedActionDeltaGate), "Action-Delta Gate requires a prepared artifact")

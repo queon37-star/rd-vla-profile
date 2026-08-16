@@ -5,6 +5,7 @@ import types
 import pytest
 import torch
 
+import prismatic.models.action_delta_gate as action_delta_gate_module
 import prismatic.models.action_heads as action_heads_module
 from prismatic.models.action_delta_gate import (
     ACTION_DELTA_GATE_ARTIFACT_TYPE,
@@ -142,6 +143,7 @@ def test_gate_disabled_preserves_baseline_and_does_not_score():
         *inputs(),
         warm_start_state=warm,
         action_delta_gate_min_terminal_iter=5,
+        action_delta_gate_return_mode="predicted_correction",
         **kwargs,
     )
     torch.testing.assert_close(first[0], second[0], rtol=0, atol=0)
@@ -152,6 +154,134 @@ def test_gate_disabled_preserves_baseline_and_does_not_score():
     assert supported.last_recurrence_debug[
         "action_delta_gate_first_eligible_terminal_iteration"
     ] is None
+
+
+def test_explicit_anchor_return_mode_matches_default_behavior():
+    default_model = make_model()
+    explicit_model = make_model()
+    warm = torch.zeros(1, 2, 4, dtype=torch.bfloat16)
+    kwargs = gate_kwargs(make_gate(predicted_delta=0.5, threshold=1.0))
+
+    default_result = default_model(*inputs(), warm_start_state=warm, **kwargs)
+    explicit_result = explicit_model(
+        *inputs(),
+        warm_start_state=warm,
+        action_delta_gate_return_mode="anchor",
+        **kwargs,
+    )
+
+    torch.testing.assert_close(default_result[0], explicit_result[0], rtol=0, atol=0)
+    assert default_result[1:] == explicit_result[1:]
+    assert default_model.test_coda_calls == explicit_model.test_coda_calls == 1
+    for key in (
+        "K_t",
+        "stop_reason",
+        "action_delta_gate_score_trace",
+        "action_delta_gate_skipped_coda_count",
+        "coda_call_count",
+        "get_output_call_count",
+        "action_delta_gate_return_mode",
+        "action_delta_gate_returned_anchor",
+        "action_delta_gate_returned_predicted_correction",
+    ):
+        assert (
+            default_model.last_recurrence_debug[key]
+            == explicit_model.last_recurrence_debug[key]
+        )
+
+
+def test_predicted_correction_return_reuses_score_prediction_and_skips_terminal_coda(
+    monkeypatch,
+):
+    linear_call_count = 0
+    original_linear = action_delta_gate_module.F.linear
+
+    def linear_spy(*args, **kwargs):
+        nonlocal linear_call_count
+        linear_call_count += 1
+        return original_linear(*args, **kwargs)
+
+    monkeypatch.setattr(action_delta_gate_module.F, "linear", linear_spy)
+    model = make_model()
+    anchor_action = torch.ones(1, 2, 2, dtype=torch.bfloat16)
+    install_action_outputs(model, {1: anchor_action})
+
+    output, actual_iter, final_mse = model(
+        *inputs(),
+        warm_start_state=torch.zeros(1, 2, 4, dtype=torch.bfloat16),
+        action_delta_gate_return_mode="predicted_correction",
+        **gate_kwargs(make_gate(predicted_delta=0.5, threshold=1.0)),
+    )
+
+    assert linear_call_count == 1
+    assert actual_iter == 2
+    assert final_mse is None
+    assert model.test_coda_calls == 1
+    assert output.shape == anchor_action.shape
+    assert output.device == anchor_action.device
+    assert output.dtype == anchor_action.dtype
+    torch.testing.assert_close(
+        output,
+        torch.full_like(anchor_action, 1.5),
+        rtol=0,
+        atol=0,
+    )
+    debug = model.last_recurrence_debug
+    assert debug["action_delta_gate_return_mode"] == "predicted_correction"
+    assert debug["action_delta_gate_returned_predicted_correction"] is True
+    assert debug["action_delta_gate_returned_anchor"] is False
+    assert debug["action_delta_gate_returned_previous_coda"] is False
+    assert debug["action_delta_gate_triggered"] is True
+    assert debug["action_delta_gate_skipped_coda_count"] == 1
+    assert debug["stop_reason"] == "action_delta_gate"
+    assert debug["K_t"] == 2
+    assert debug["final_state_coda_executed"] is False
+    assert debug["coda_call_count"] == 1
+    assert debug["get_output_call_count"] == 1
+
+
+def test_nonfinite_predicted_correction_falls_back_to_exact_coda(monkeypatch):
+    def invalid_correction_result(
+        gate,
+        anchor_state,
+        current_state,
+        *,
+        return_pred_delta=False,
+    ):
+        assert return_pred_delta is True
+        pred_delta = torch.full(
+            (1, gate.action_chunk_len, gate.action_dim),
+            float("inf"),
+            device=anchor_state.device,
+        )
+        return 0.0, True, pred_delta
+
+    monkeypatch.setattr(
+        action_heads_module,
+        "evaluate_action_delta_gate",
+        invalid_correction_result,
+    )
+    model = make_model()
+    output, actual_iter, final_mse = model(
+        *inputs(),
+        warm_start_state=torch.zeros(1, 2, 4, dtype=torch.bfloat16),
+        kl_thresh=2.0,
+        action_delta_gate_return_mode="predicted_correction",
+        **gate_kwargs(make_gate()),
+    )
+
+    assert actual_iter == 2
+    assert final_mse == 1.0
+    assert model.test_coda_calls == 2
+    assert torch.all(output == 2)
+    debug = model.last_recurrence_debug
+    assert debug["action_delta_gate_triggered"] is False
+    assert debug["action_delta_gate_skipped_coda_count"] == 0
+    assert debug["action_delta_gate_returned_predicted_correction"] is False
+    assert debug["action_delta_gate_returned_anchor"] is False
+    assert "non-finite" in debug["action_delta_gate_fallback_reason"]
+    assert debug["coda_call_count"] == 2
+    assert debug["get_output_call_count"] == 2
 
 
 def test_cold_origin_uses_normal_coda_and_captures_midpoint_candidate():
@@ -237,6 +367,11 @@ def test_warm_below_threshold_skips_one_coda_and_returns_previous_exact_output()
     assert debug["action_delta_gate_exact_audit_error"] is None
     assert debug["action_delta_gate_exact_audit_anchor_action"] is None
     assert debug["action_delta_gate_exact_audit_terminal_action"] is None
+    assert debug["action_delta_gate_exact_audit_predicted_delta_action"] is None
+    assert debug[
+        "action_delta_gate_exact_audit_predicted_corrected_action"
+    ] is None
+    assert debug["action_delta_gate_exact_audit_correction_full_mse"] is None
     assert model.last_inference_metadata["warm_start"]["candidate_state_count"] == 2
     json.dumps(debug, allow_nan=False)
 
@@ -253,7 +388,7 @@ def test_exact_audit_trigger_metrics_and_production_accounting_are_isolated():
     enabled = make_model()
     install_action_outputs(disabled, outputs)
     install_action_outputs(enabled, outputs)
-    kwargs = gate_kwargs(make_gate(predicted_delta=0.0))
+    kwargs = gate_kwargs(make_gate(predicted_delta=0.5, threshold=1.0))
     warm = torch.zeros(1, 2, 4, dtype=torch.bfloat16)
 
     disabled_result = disabled(
@@ -337,7 +472,151 @@ def test_exact_audit_trigger_metrics_and_production_accounting_are_isolated():
     assert debug["action_delta_gate_exact_audit_delta_action"] == [
         [[1.0, 2.0], [3.0, 4.0]]
     ]
+    assert debug["action_delta_gate_exact_audit_predicted_delta_action"] == [
+        [[0.5, 0.5], [0.5, 0.5]]
+    ]
+    assert debug[
+        "action_delta_gate_exact_audit_predicted_corrected_action"
+    ] == [[[1.5, 2.5], [3.5, 4.5]]]
+    assert debug["action_delta_gate_exact_audit_correction_full_mse"] == pytest.approx(
+        5.25
+    )
+    assert debug["action_delta_gate_exact_audit_correction_l2"] == pytest.approx(
+        21.0 ** 0.5
+    )
+    assert debug["action_delta_gate_exact_audit_correction_max_abs"] == pytest.approx(
+        3.5
+    )
+    assert debug[
+        "action_delta_gate_exact_audit_correction_per_step_mse"
+    ] == pytest.approx([1.25, 9.25])
+    assert debug[
+        "action_delta_gate_exact_audit_correction_per_step_max_abs"
+    ] == pytest.approx([1.5, 3.5])
+    assert debug[
+        "action_delta_gate_exact_audit_correction_per_dim_mse"
+    ] == pytest.approx([3.25, 7.25])
+    assert debug[
+        "action_delta_gate_exact_audit_correction_per_dim_max_abs"
+    ] == pytest.approx([2.5, 3.5])
+    assert debug["action_delta_gate_exact_audit_prefix_step_count"] == 2
+    assert debug[
+        "action_delta_gate_exact_audit_anchor_reuse_prefix_mse"
+    ] == pytest.approx(7.5)
+    assert debug[
+        "action_delta_gate_exact_audit_correction_prefix_mse"
+    ] == pytest.approx(5.25)
+    assert debug[
+        "action_delta_gate_exact_audit_correction_full_mse_ratio"
+    ] == pytest.approx(0.7)
+    assert debug[
+        "action_delta_gate_exact_audit_correction_prefix_mse_ratio"
+    ] == pytest.approx(0.7)
     json.dumps(debug, allow_nan=False)
+
+
+def test_exact_audit_reuses_single_predictor_evaluation(monkeypatch):
+    linear_call_count = 0
+    original_linear = action_delta_gate_module.F.linear
+
+    def linear_spy(*args, **kwargs):
+        nonlocal linear_call_count
+        linear_call_count += 1
+        return original_linear(*args, **kwargs)
+
+    monkeypatch.setattr(action_delta_gate_module.F, "linear", linear_spy)
+    model = make_model()
+    anchor_action = torch.tensor(
+        [[[1.0, 2.0], [3.0, 4.0]]], dtype=torch.bfloat16
+    )
+    terminal_action = torch.tensor(
+        [[[2.0, 4.0], [6.0, 8.0]]], dtype=torch.bfloat16
+    )
+    install_action_outputs(model, {1: anchor_action, 2: terminal_action})
+
+    output, actual_iter, final_mse = model(
+        *inputs(),
+        warm_start_state=torch.zeros(1, 2, 4, dtype=torch.bfloat16),
+        action_delta_gate_exact_coda_audit=True,
+        **gate_kwargs(make_gate(predicted_delta=0.5, threshold=1.0)),
+    )
+
+    assert linear_call_count == 1
+    assert actual_iter == 2
+    assert final_mse is None
+    torch.testing.assert_close(output, anchor_action, rtol=0, atol=0)
+    assert model.last_recurrence_debug[
+        "action_delta_gate_exact_audit_predicted_delta_action"
+    ] == [[[0.5, 0.5], [0.5, 0.5]]]
+
+
+def test_exact_audit_compares_correction_without_replacing_corrected_return():
+    anchor_action = torch.tensor(
+        [[[1.0, 2.0], [3.0, 4.0]]], dtype=torch.bfloat16
+    )
+    terminal_action = torch.tensor(
+        [[[2.0, 4.0], [6.0, 8.0]]], dtype=torch.bfloat16
+    )
+    model = make_model()
+    install_action_outputs(model, {1: anchor_action, 2: terminal_action})
+
+    output, actual_iter, final_mse = model(
+        *inputs(),
+        warm_start_state=torch.zeros(1, 2, 4, dtype=torch.bfloat16),
+        action_delta_gate_exact_coda_audit=True,
+        action_delta_gate_return_mode="predicted_correction",
+        **gate_kwargs(make_gate(predicted_delta=0.5, threshold=1.0)),
+    )
+
+    expected_return = torch.tensor(
+        [[[1.5, 2.5], [3.5, 4.5]]], dtype=torch.bfloat16
+    )
+    assert actual_iter == 2
+    assert final_mse is None
+    torch.testing.assert_close(output, expected_return, rtol=0, atol=0)
+    assert model.test_coda_calls == 2
+    debug = model.last_recurrence_debug
+    assert debug["action_delta_gate_exact_audit_performed"] is True
+    assert debug[
+        "action_delta_gate_exact_audit_predicted_corrected_action"
+    ] == expected_return.float().tolist()
+    assert debug["action_delta_gate_exact_audit_correction_full_mse"] == pytest.approx(
+        5.25
+    )
+    assert debug["action_delta_gate_returned_predicted_correction"] is True
+    assert debug["action_delta_gate_returned_anchor"] is False
+    assert debug["coda_call_count"] == 1
+    assert debug["get_output_call_count"] == 1
+    assert debug["action_delta_gate_exact_audit_get_output_call_count"] == 1
+
+
+def test_exact_audit_ratios_handle_zero_anchor_reuse_mse():
+    action = torch.zeros(1, 2, 2)
+    both_zero = action_heads_module._action_delta_gate_exact_audit_metrics(
+        action,
+        action,
+        torch.zeros_like(action),
+    )
+    nonzero_correction = (
+        action_heads_module._action_delta_gate_exact_audit_metrics(
+            action,
+            action,
+            torch.ones_like(action),
+        )
+    )
+
+    assert both_zero[
+        "action_delta_gate_exact_audit_correction_full_mse_ratio"
+    ] == 1.0
+    assert both_zero[
+        "action_delta_gate_exact_audit_correction_prefix_mse_ratio"
+    ] == 1.0
+    assert nonzero_correction[
+        "action_delta_gate_exact_audit_correction_full_mse_ratio"
+    ] is None
+    assert nonzero_correction[
+        "action_delta_gate_exact_audit_correction_prefix_mse_ratio"
+    ] is None
 
 
 def test_exact_audit_nontrigger_does_not_run_diagnostic_coda():
@@ -581,6 +860,21 @@ def test_enabled_gate_rejects_nonboolean_exact_coda_audit_before_recurrence():
             *inputs(),
             warm_start_state=torch.zeros(1, 2, 4, dtype=torch.bfloat16),
             action_delta_gate_exact_coda_audit=1,
+            **gate_kwargs(make_gate()),
+        )
+    assert model.test_iteration == 0
+
+
+@pytest.mark.parametrize("return_mode", ["", "corrected", None, 1])
+def test_rejects_invalid_action_delta_gate_return_mode_before_recurrence(
+    return_mode,
+):
+    model = make_model()
+    with pytest.raises(ValueError, match="return mode"):
+        model(
+            *inputs(),
+            warm_start_state=torch.zeros(1, 2, 4, dtype=torch.bfloat16),
+            action_delta_gate_return_mode=return_mode,
             **gate_kwargs(make_gate()),
         )
     assert model.test_iteration == 0

@@ -6,7 +6,10 @@ import draccus
 import pytest
 
 from experiments.robot import openvla_utils
-from experiments.robot.libero.run_libero_eval import GenerateConfig
+from experiments.robot.libero.run_libero_eval import (
+    GenerateConfig,
+    build_action_delta_gate_log_fields,
+)
 
 
 def _snapshot(directory: Path):
@@ -160,6 +163,7 @@ def test_get_vla_passes_disabled_sync_setting(monkeypatch):
 
 def test_generate_config_and_draccus_boolean_contract():
     assert GenerateConfig().sync_checkpoint_source_config is True
+    assert GenerateConfig().action_delta_gate_return_mode == "anchor"
 
     parser = draccus.argparsing.ArgumentParser(
         config_class=GenerateConfig,
@@ -169,3 +173,17 @@ def test_generate_config_and_draccus_boolean_contract():
     )
 
     assert cfg.sync_checkpoint_source_config is False
+
+
+def test_action_delta_gate_return_metadata_is_extracted_for_step_logs():
+    fields = build_action_delta_gate_log_fields(
+        {
+            "action_delta_gate_return_mode": "predicted_correction",
+            "action_delta_gate_returned_predicted_correction": True,
+            "action_delta_gate_returned_anchor": False,
+        }
+    )
+
+    assert fields["action_delta_gate_return_mode"] == "predicted_correction"
+    assert fields["action_delta_gate_returned_predicted_correction"] is True
+    assert fields["action_delta_gate_returned_anchor"] is False

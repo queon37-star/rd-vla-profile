@@ -137,8 +137,21 @@ def test_scorer_requantizes_fp32_delta_through_bfloat16():
     pure_fp32_delta = current.float() - anchor.float()
     expected = quantized_delta.square().mean()
     score = score_action_delta_gate(gate, anchor, current)
+    exposed_score, pred_delta = score_action_delta_gate(
+        gate,
+        anchor,
+        current,
+        return_pred_delta=True,
+    )
 
     torch.testing.assert_close(score, expected, rtol=0, atol=0)
+    torch.testing.assert_close(exposed_score, score, rtol=0, atol=0)
+    torch.testing.assert_close(
+        exposed_score,
+        pred_delta.square().mean(),
+        rtol=0,
+        atol=0,
+    )
     assert not torch.equal(quantized_delta, pure_fp32_delta)
 
 

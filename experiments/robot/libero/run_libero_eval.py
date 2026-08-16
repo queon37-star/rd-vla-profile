@@ -220,6 +220,7 @@ class GenerateConfig:
     action_delta_gate_max_skip: int = 1
     action_delta_gate_min_terminal_iter: int = 2
     action_delta_gate_exact_coda_audit: bool = False
+    action_delta_gate_return_mode: str = "anchor"
 
     # Disabled-by-default warm-start inference settings.
     use_warm_start: bool = False
@@ -450,6 +451,14 @@ def validate_config(cfg: GenerateConfig) -> None:
         if not isinstance(cfg.action_delta_gate_exact_coda_audit, bool):
             raise ValueError(
                 "Action-Delta Gate exact Coda audit must be boolean"
+            )
+        if cfg.action_delta_gate_return_mode not in (
+            "anchor",
+            "predicted_correction",
+        ):
+            raise ValueError(
+                "Action-Delta Gate return mode must be 'anchor' or "
+                "'predicted_correction'"
             )
         if not cfg.use_cached_final_output:
             raise ValueError(
@@ -861,6 +870,9 @@ def build_action_delta_gate_log_fields(debug):
         "action_delta_gate_min_terminal_iter": _as_int(
             debug.get("action_delta_gate_min_terminal_iter")
         ),
+        "action_delta_gate_return_mode": debug.get(
+            "action_delta_gate_return_mode", "anchor"
+        ),
         "action_delta_gate_first_eligible_terminal_iteration": _as_int(
             debug.get(
                 "action_delta_gate_first_eligible_terminal_iteration"
@@ -907,6 +919,48 @@ def build_action_delta_gate_log_fields(debug):
         ),
         "action_delta_gate_exact_audit_delta_action": debug.get(
             "action_delta_gate_exact_audit_delta_action"
+        ),
+        "action_delta_gate_exact_audit_predicted_delta_action": debug.get(
+            "action_delta_gate_exact_audit_predicted_delta_action"
+        ),
+        "action_delta_gate_exact_audit_predicted_corrected_action": debug.get(
+            "action_delta_gate_exact_audit_predicted_corrected_action"
+        ),
+        "action_delta_gate_exact_audit_correction_full_mse": _as_float(
+            debug.get("action_delta_gate_exact_audit_correction_full_mse")
+        ),
+        "action_delta_gate_exact_audit_correction_l2": _as_float(
+            debug.get("action_delta_gate_exact_audit_correction_l2")
+        ),
+        "action_delta_gate_exact_audit_correction_max_abs": _as_float(
+            debug.get("action_delta_gate_exact_audit_correction_max_abs")
+        ),
+        "action_delta_gate_exact_audit_correction_per_step_mse": debug.get(
+            "action_delta_gate_exact_audit_correction_per_step_mse"
+        ),
+        "action_delta_gate_exact_audit_correction_per_step_max_abs": debug.get(
+            "action_delta_gate_exact_audit_correction_per_step_max_abs"
+        ),
+        "action_delta_gate_exact_audit_correction_per_dim_mse": debug.get(
+            "action_delta_gate_exact_audit_correction_per_dim_mse"
+        ),
+        "action_delta_gate_exact_audit_correction_per_dim_max_abs": debug.get(
+            "action_delta_gate_exact_audit_correction_per_dim_max_abs"
+        ),
+        "action_delta_gate_exact_audit_prefix_step_count": _as_int(
+            debug.get("action_delta_gate_exact_audit_prefix_step_count")
+        ),
+        "action_delta_gate_exact_audit_anchor_reuse_prefix_mse": _as_float(
+            debug.get("action_delta_gate_exact_audit_anchor_reuse_prefix_mse")
+        ),
+        "action_delta_gate_exact_audit_correction_prefix_mse": _as_float(
+            debug.get("action_delta_gate_exact_audit_correction_prefix_mse")
+        ),
+        "action_delta_gate_exact_audit_correction_full_mse_ratio": _as_float(
+            debug.get("action_delta_gate_exact_audit_correction_full_mse_ratio")
+        ),
+        "action_delta_gate_exact_audit_correction_prefix_mse_ratio": _as_float(
+            debug.get("action_delta_gate_exact_audit_correction_prefix_mse_ratio")
         ),
         "action_delta_gate_exact_audit_action_shape": debug.get(
             "action_delta_gate_exact_audit_action_shape"
@@ -959,6 +1013,15 @@ def build_action_delta_gate_log_fields(debug):
         ),
         "action_delta_gate_returned_previous_coda": bool(
             debug.get("action_delta_gate_returned_previous_coda", False)
+        ),
+        "action_delta_gate_returned_predicted_correction": bool(
+            debug.get(
+                "action_delta_gate_returned_predicted_correction",
+                False,
+            )
+        ),
+        "action_delta_gate_returned_anchor": bool(
+            debug.get("action_delta_gate_returned_anchor", False)
         ),
     }
 
@@ -2455,6 +2518,7 @@ def eval_libero(cfg: GenerateConfig) -> float:
             "max_skip": cfg.action_delta_gate_max_skip,
             "min_terminal_iter": cfg.action_delta_gate_min_terminal_iter,
             "exact_coda_audit": cfg.action_delta_gate_exact_coda_audit,
+            "return_mode": cfg.action_delta_gate_return_mode,
         }
 
     if cfg.evaluation_protocol_phase != "legacy":
