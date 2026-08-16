@@ -111,6 +111,21 @@ def gate_kwargs(gate):
     }
 
 
+def install_action_outputs(model, outputs_by_iteration):
+    def get_output(self, state, *args, profile=False):
+        self.test_coda_calls += 1
+        self.test_coda_states.append(state.detach().clone())
+        if profile:
+            self._last_get_output_timing = {
+                "get_output_ms": 0.3,
+                "coda_ms": 0.2,
+                "output_proj_ms": 0.1,
+            }
+        return outputs_by_iteration[self.test_iteration].detach().clone()
+
+    model._get_output = types.MethodType(get_output, model)
+
+
 def test_gate_disabled_preserves_baseline_and_does_not_score():
     baseline = make_model()
     supported = copy.deepcopy(baseline)
@@ -215,7 +230,189 @@ def test_warm_below_threshold_skips_one_coda_and_returns_previous_exact_output()
     assert debug["action_delta_gate_score_trace"][0]["score"] == 0.0
     assert len(debug["action_delta_gate_predictor_ms_list"]) == 1
     assert debug["action_delta_gate_predictor_ms_total"] >= 0.0
+    assert debug["action_delta_gate_exact_audit_enabled"] is False
+    assert debug["action_delta_gate_exact_audit_performed"] is False
+    assert debug["action_delta_gate_exact_audit_get_output_call_count"] == 0
+    assert debug["action_delta_gate_exact_audit_get_output_ms"] == 0.0
+    assert debug["action_delta_gate_exact_audit_error"] is None
+    assert debug["action_delta_gate_exact_audit_anchor_action"] is None
+    assert debug["action_delta_gate_exact_audit_terminal_action"] is None
     assert model.last_inference_metadata["warm_start"]["candidate_state_count"] == 2
+    json.dumps(debug, allow_nan=False)
+
+
+def test_exact_audit_trigger_metrics_and_production_accounting_are_isolated():
+    anchor_action = torch.tensor(
+        [[[1.0, 2.0], [3.0, 4.0]]], dtype=torch.bfloat16
+    )
+    terminal_action = torch.tensor(
+        [[[2.0, 4.0], [6.0, 8.0]]], dtype=torch.bfloat16
+    )
+    outputs = {1: anchor_action, 2: terminal_action}
+    disabled = make_model()
+    enabled = make_model()
+    install_action_outputs(disabled, outputs)
+    install_action_outputs(enabled, outputs)
+    kwargs = gate_kwargs(make_gate(predicted_delta=0.0))
+    warm = torch.zeros(1, 2, 4, dtype=torch.bfloat16)
+
+    disabled_result = disabled(
+        *inputs(),
+        warm_start_state=warm,
+        kl_thresh=0.001,
+        profile_coda_cost=True,
+        **kwargs,
+    )
+    enabled_result = enabled(
+        *inputs(),
+        warm_start_state=warm,
+        kl_thresh=0.001,
+        profile_coda_cost=True,
+        action_delta_gate_exact_coda_audit=True,
+        **kwargs,
+    )
+
+    torch.testing.assert_close(disabled_result[0], anchor_action, rtol=0, atol=0)
+    torch.testing.assert_close(enabled_result[0], anchor_action, rtol=0, atol=0)
+    assert disabled_result[1:] == enabled_result[1:] == (2, None)
+    assert disabled.test_coda_calls == 1
+    assert enabled.test_coda_calls == 2
+
+    disabled_debug = disabled.last_recurrence_debug
+    debug = enabled.last_recurrence_debug
+    for key in (
+        "coda_call_count",
+        "get_output_call_count",
+        "coda_ms_total",
+        "get_output_ms_total",
+        "iteration_mse",
+        "conv_score_list",
+        "final_mse",
+        "stop_reason",
+        "action_delta_gate_skipped_coda_count",
+        "action_delta_gate_anchor_iteration",
+        "action_delta_gate_terminal_iteration",
+        "action_delta_gate_returned_action_source_iteration",
+    ):
+        assert debug[key] == disabled_debug[key]
+    assert debug["coda_call_count"] == 1
+    assert debug["get_output_call_count"] == 1
+    assert debug["coda_ms_total"] == pytest.approx(0.2)
+    assert debug["get_output_ms_total"] == pytest.approx(0.3)
+    assert debug["iteration_mse"] == []
+    assert debug["conv_score_list"] == []
+    assert debug["final_mse"] is None
+    assert debug["action_delta_gate_anchor_iteration"] == 1
+    assert debug["action_delta_gate_returned_action_source_iteration"] == 1
+
+    assert debug["action_delta_gate_exact_audit_enabled"] is True
+    assert debug["action_delta_gate_exact_audit_performed"] is True
+    assert debug["action_delta_gate_exact_audit_anchor_iteration"] == 1
+    assert debug["action_delta_gate_exact_audit_terminal_iteration"] == 2
+    assert debug["action_delta_gate_exact_audit_get_output_call_count"] == 1
+    assert debug["action_delta_gate_exact_audit_get_output_ms"] >= 0.0
+    assert debug["action_delta_gate_exact_audit_error"] is None
+    assert debug["action_delta_gate_exact_audit_action_shape"] == [1, 2, 2]
+    assert debug["action_delta_gate_exact_audit_metric_action_shape"] == [2, 2]
+    assert debug[
+        "action_delta_gate_exact_audit_leading_batch_dim_squeezed"
+    ] is True
+    assert debug["action_delta_gate_exact_audit_full_mse"] == pytest.approx(7.5)
+    assert debug["action_delta_gate_exact_audit_l2"] == pytest.approx(30.0 ** 0.5)
+    assert debug["action_delta_gate_exact_audit_max_abs"] == pytest.approx(4.0)
+    assert debug["action_delta_gate_exact_audit_per_step_mse"] == pytest.approx(
+        [2.5, 12.5]
+    )
+    assert debug[
+        "action_delta_gate_exact_audit_per_step_max_abs"
+    ] == pytest.approx([2.0, 4.0])
+    assert debug["action_delta_gate_exact_audit_per_dim_mse"] == pytest.approx(
+        [5.0, 10.0]
+    )
+    assert debug[
+        "action_delta_gate_exact_audit_per_dim_max_abs"
+    ] == pytest.approx([3.0, 4.0])
+    assert debug["action_delta_gate_exact_audit_anchor_action"] == anchor_action.float().tolist()
+    assert debug["action_delta_gate_exact_audit_terminal_action"] == terminal_action.float().tolist()
+    assert debug["action_delta_gate_exact_audit_delta_action"] == [
+        [[1.0, 2.0], [3.0, 4.0]]
+    ]
+    json.dumps(debug, allow_nan=False)
+
+
+def test_exact_audit_nontrigger_does_not_run_diagnostic_coda():
+    model = make_model()
+    output, actual_iter, final_mse = model(
+        *inputs(),
+        warm_start_state=torch.zeros(1, 2, 4, dtype=torch.bfloat16),
+        kl_thresh=2.0,
+        action_delta_gate_exact_coda_audit=True,
+        **gate_kwargs(make_gate(predicted_delta=1.0, threshold=0.1)),
+    )
+
+    assert actual_iter == 2
+    assert final_mse == 1.0
+    assert model.test_coda_calls == 2
+    assert torch.all(output == 2)
+    debug = model.last_recurrence_debug
+    assert debug["action_delta_gate_triggered"] is False
+    assert debug["action_delta_gate_exact_audit_enabled"] is True
+    assert debug["action_delta_gate_exact_audit_performed"] is False
+    assert debug["action_delta_gate_exact_audit_get_output_call_count"] == 0
+    assert debug["action_delta_gate_exact_audit_get_output_ms"] == 0.0
+    assert debug["coda_call_count"] == model.test_coda_calls == 2
+    assert debug["get_output_call_count"] == model.test_coda_calls
+
+
+@pytest.mark.parametrize(
+    ("terminal_action", "error_text"),
+    [
+        (
+            torch.zeros(1, 2, 1, dtype=torch.bfloat16),
+            "shape mismatch",
+        ),
+        (
+            torch.tensor(
+                [[[float("nan"), 0.0], [0.0, 0.0]]],
+                dtype=torch.bfloat16,
+            ),
+            "non-finite",
+        ),
+    ],
+)
+def test_exact_audit_failure_records_error_without_changing_gate_return(
+    terminal_action, error_text
+):
+    anchor_action = torch.tensor(
+        [[[1.0, 2.0], [3.0, 4.0]]], dtype=torch.bfloat16
+    )
+    model = make_model()
+    install_action_outputs(model, {1: anchor_action, 2: terminal_action})
+    output, actual_iter, final_mse = model(
+        *inputs(),
+        warm_start_state=torch.zeros(1, 2, 4, dtype=torch.bfloat16),
+        kl_thresh=0.001,
+        action_delta_gate_exact_coda_audit=True,
+        **gate_kwargs(make_gate(predicted_delta=0.0)),
+    )
+
+    assert actual_iter == 2
+    assert final_mse is None
+    torch.testing.assert_close(output, anchor_action, rtol=0, atol=0)
+    assert model.test_coda_calls == 2
+    debug = model.last_recurrence_debug
+    assert debug["action_delta_gate_triggered"] is True
+    assert debug["action_delta_gate_exact_audit_performed"] is True
+    assert debug["action_delta_gate_exact_audit_get_output_call_count"] == 1
+    assert error_text in debug["action_delta_gate_exact_audit_error"]
+    assert debug["action_delta_gate_exact_audit_full_mse"] is None
+    assert debug["action_delta_gate_exact_audit_anchor_action"] is None
+    assert debug["action_delta_gate_exact_audit_terminal_action"] is None
+    assert debug["coda_call_count"] == 1
+    assert debug["get_output_call_count"] == 1
+    assert debug["action_delta_gate_skipped_coda_count"] == 1
+    assert debug["iteration_mse"] == []
+    assert debug["final_mse"] is None
     json.dumps(debug, allow_nan=False)
 
 
@@ -372,6 +569,18 @@ def test_enabled_gate_rejects_invalid_minimum_terminal_before_recurrence(minimum
             *inputs(),
             warm_start_state=torch.zeros(1, 2, 4, dtype=torch.bfloat16),
             action_delta_gate_min_terminal_iter=minimum,
+            **gate_kwargs(make_gate()),
+        )
+    assert model.test_iteration == 0
+
+
+def test_enabled_gate_rejects_nonboolean_exact_coda_audit_before_recurrence():
+    model = make_model()
+    with pytest.raises(ValueError, match="exact Coda audit must be boolean"):
+        model(
+            *inputs(),
+            warm_start_state=torch.zeros(1, 2, 4, dtype=torch.bfloat16),
+            action_delta_gate_exact_coda_audit=1,
             **gate_kwargs(make_gate()),
         )
     assert model.test_iteration == 0

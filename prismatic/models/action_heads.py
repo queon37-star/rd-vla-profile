@@ -124,6 +124,94 @@ def select_warm_start_candidate(states, actual_iter, source):
     return states[source_index], source_index, source_index + 1
 
 
+def _action_delta_gate_exact_audit_metrics(anchor_output, terminal_output):
+    """Build JSON-safe float32 diagnostics for one exact action transition."""
+
+    if not torch.is_tensor(anchor_output) or not torch.is_tensor(terminal_output):
+        raise ValueError("exact audit actions must be tensors")
+    if anchor_output.ndim not in (2, 3):
+        raise ValueError(
+            "exact audit anchor action must have rank 2 or rank 3 with "
+            "a leading batch dimension"
+        )
+    if terminal_output.ndim != anchor_output.ndim:
+        raise ValueError(
+            "exact audit action rank mismatch: "
+            f"anchor={anchor_output.ndim}, terminal={terminal_output.ndim}"
+        )
+    if tuple(terminal_output.shape) != tuple(anchor_output.shape):
+        raise ValueError(
+            "exact audit action shape mismatch: "
+            f"anchor={tuple(anchor_output.shape)}, "
+            f"terminal={tuple(terminal_output.shape)}"
+        )
+    has_leading_batch = anchor_output.ndim == 3
+    if has_leading_batch and anchor_output.shape[0] != 1:
+        raise ValueError(
+            "exact audit leading action batch dimension must have size 1"
+        )
+
+    anchor = anchor_output.detach().float()
+    terminal = terminal_output.detach().float()
+    if not bool(torch.isfinite(anchor).all().item()):
+        raise ValueError("exact audit anchor action is non-finite")
+    if not bool(torch.isfinite(terminal).all().item()):
+        raise ValueError("exact audit terminal action is non-finite")
+
+    delta = terminal - anchor
+    if not bool(torch.isfinite(delta).all().item()):
+        raise ValueError("exact audit delta action is non-finite")
+    metric_delta = delta.squeeze(0) if has_leading_batch else delta
+    squared = metric_delta.square()
+    absolute = metric_delta.abs()
+    full_mse = squared.mean()
+    l2 = torch.linalg.vector_norm(metric_delta)
+    max_abs = absolute.max()
+    per_step_mse = squared.mean(dim=-1)
+    per_step_max_abs = absolute.amax(dim=-1)
+    per_dim_mse = squared.mean(dim=-2)
+    per_dim_max_abs = absolute.amax(dim=-2)
+    metric_tensors = (
+        full_mse,
+        l2,
+        max_abs,
+        per_step_mse,
+        per_step_max_abs,
+        per_dim_mse,
+        per_dim_max_abs,
+    )
+    if not all(bool(torch.isfinite(value).all().item()) for value in metric_tensors):
+        raise ValueError("exact audit action metrics are non-finite")
+
+    return {
+        "action_delta_gate_exact_audit_action_shape": list(anchor.shape),
+        "action_delta_gate_exact_audit_metric_action_shape": list(
+            metric_delta.shape
+        ),
+        "action_delta_gate_exact_audit_leading_batch_dim_squeezed": bool(
+            has_leading_batch
+        ),
+        "action_delta_gate_exact_audit_full_mse": float(full_mse.item()),
+        "action_delta_gate_exact_audit_l2": float(l2.item()),
+        "action_delta_gate_exact_audit_max_abs": float(max_abs.item()),
+        "action_delta_gate_exact_audit_per_step_mse": (
+            per_step_mse.cpu().tolist()
+        ),
+        "action_delta_gate_exact_audit_per_step_max_abs": (
+            per_step_max_abs.cpu().tolist()
+        ),
+        "action_delta_gate_exact_audit_per_dim_mse": (
+            per_dim_mse.cpu().tolist()
+        ),
+        "action_delta_gate_exact_audit_per_dim_max_abs": (
+            per_dim_max_abs.cpu().tolist()
+        ),
+        "action_delta_gate_exact_audit_anchor_action": anchor.cpu().tolist(),
+        "action_delta_gate_exact_audit_terminal_action": terminal.cpu().tolist(),
+        "action_delta_gate_exact_audit_delta_action": delta.cpu().tolist(),
+    }
+
+
 class RecurrentLayer(nn.Module):
     """Recurrent layer: self-attention -> cross-attention (with gating) -> SwiGLU FFN."""
 
@@ -439,6 +527,7 @@ class VLARecurrent(nn.Module):
                 action_delta_gate=None,
                 action_delta_gate_max_skip: int = 1,
                 action_delta_gate_min_terminal_iter: int = 2,
+                action_delta_gate_exact_coda_audit: bool = False,
                 **kwargs) -> torch.Tensor:
         requested_recurrence_strategy = convergence_strategy
         canonical_recurrence_strategy = canonicalize_recurrence_strategy(convergence_strategy)
@@ -506,6 +595,7 @@ class VLARecurrent(nn.Module):
             use_cached_final_output=use_cached_final_output,
             max_skip=action_delta_gate_max_skip,
             min_terminal_iter=action_delta_gate_min_terminal_iter,
+            exact_coda_audit=action_delta_gate_exact_coda_audit,
         )
         if latent_precheck_mode == "origin_aware" and self.training:
             raise ValueError("latent_precheck_mode='origin_aware' is inference-only")
@@ -814,6 +904,30 @@ class VLARecurrent(nn.Module):
             action_delta_gate_fallback_reason = None
             action_delta_gate_score_trace = []
             action_delta_gate_predictor_ms_list = []
+            action_delta_gate_exact_audit = {
+                "action_delta_gate_exact_audit_enabled": bool(
+                    action_delta_gate_exact_coda_audit
+                ),
+                "action_delta_gate_exact_audit_performed": False,
+                "action_delta_gate_exact_audit_anchor_iteration": None,
+                "action_delta_gate_exact_audit_terminal_iteration": None,
+                "action_delta_gate_exact_audit_full_mse": None,
+                "action_delta_gate_exact_audit_l2": None,
+                "action_delta_gate_exact_audit_max_abs": None,
+                "action_delta_gate_exact_audit_per_step_mse": None,
+                "action_delta_gate_exact_audit_per_step_max_abs": None,
+                "action_delta_gate_exact_audit_per_dim_mse": None,
+                "action_delta_gate_exact_audit_per_dim_max_abs": None,
+                "action_delta_gate_exact_audit_anchor_action": None,
+                "action_delta_gate_exact_audit_terminal_action": None,
+                "action_delta_gate_exact_audit_delta_action": None,
+                "action_delta_gate_exact_audit_action_shape": None,
+                "action_delta_gate_exact_audit_metric_action_shape": None,
+                "action_delta_gate_exact_audit_leading_batch_dim_squeezed": None,
+                "action_delta_gate_exact_audit_get_output_ms": 0.0,
+                "action_delta_gate_exact_audit_get_output_call_count": 0,
+                "action_delta_gate_exact_audit_error": None,
+            }
 
             run_one_iteration_ms_list = []
             # Output timing lists include the final return-path call unless the
@@ -958,6 +1072,65 @@ class VLARecurrent(nn.Module):
                                     adaptive_stop = True
                                     stop_reason = "action_delta_gate"
                                     should_call_coda = False
+                                    if action_delta_gate_exact_coda_audit:
+                                        action_delta_gate_exact_audit.update(
+                                            {
+                                                "action_delta_gate_exact_audit_performed": True,
+                                                "action_delta_gate_exact_audit_anchor_iteration": int(
+                                                    action_delta_gate_anchor_iteration
+                                                ),
+                                                "action_delta_gate_exact_audit_terminal_iteration": int(
+                                                    actual_iter
+                                                ),
+                                                "action_delta_gate_exact_audit_get_output_call_count": 1,
+                                            }
+                                        )
+                                        audit_start = self._sync_time()
+                                        audit_output = None
+                                        try:
+                                            with rdvla_range(
+                                                "RDVLA/action_head/"
+                                                "action_delta_gate_exact_coda_audit"
+                                            ):
+                                                audit_output = self._get_output(
+                                                    state,
+                                                    h_a,
+                                                    h_t,
+                                                    p,
+                                                    profile=False,
+                                                )
+                                        except Exception as exc:
+                                            action_delta_gate_exact_audit[
+                                                "action_delta_gate_exact_audit_error"
+                                            ] = (
+                                                f"{type(exc).__name__}: {exc}"
+                                            )
+                                        finally:
+                                            audit_end = self._sync_time()
+                                            action_delta_gate_exact_audit[
+                                                "action_delta_gate_exact_audit_get_output_ms"
+                                            ] = (
+                                                (audit_end - audit_start) * 1000.0
+                                            )
+                                        if (
+                                            action_delta_gate_exact_audit[
+                                                "action_delta_gate_exact_audit_error"
+                                            ]
+                                            is None
+                                        ):
+                                            try:
+                                                action_delta_gate_exact_audit.update(
+                                                    _action_delta_gate_exact_audit_metrics(
+                                                        action_delta_gate_anchor_output,
+                                                        audit_output,
+                                                    )
+                                                )
+                                            except Exception as exc:
+                                                action_delta_gate_exact_audit[
+                                                    "action_delta_gate_exact_audit_error"
+                                                ] = (
+                                                    f"{type(exc).__name__}: {exc}"
+                                                )
 
                             if should_call_coda:
                                 with rdvla_range("RDVLA/action_head/coda_stop_get_output"):
@@ -1242,6 +1415,7 @@ class VLARecurrent(nn.Module):
                 "action_delta_gate_predictor_ms_total": sum(
                     action_delta_gate_predictor_ms_list
                 ),
+                **action_delta_gate_exact_audit,
                 "action_delta_gate_returned_previous_coda": bool(
                     action_delta_gate_triggered
                 ),
@@ -1704,6 +1878,7 @@ class ActionHeadRecurrent(nn.Module):
                        action_delta_gate=None,
                        action_delta_gate_max_skip=1,
                        action_delta_gate_min_terminal_iter=2,
+                       action_delta_gate_exact_coda_audit=False,
                        **kwargs):
         canonical_recurrence_strategy = canonicalize_recurrence_strategy(
             convergence_strategy
@@ -1815,6 +1990,9 @@ class ActionHeadRecurrent(nn.Module):
                                  ),
                                  action_delta_gate_min_terminal_iter=(
                                      action_delta_gate_min_terminal_iter
+                                 ),
+                                 action_delta_gate_exact_coda_audit=(
+                                     action_delta_gate_exact_coda_audit
                                  ))
             if capture_action_head_workload:
                 metadata = self.model.last_inference_metadata

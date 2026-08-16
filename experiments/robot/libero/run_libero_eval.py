@@ -219,6 +219,7 @@ class GenerateConfig:
     action_delta_gate_expected_sha256: str = ""
     action_delta_gate_max_skip: int = 1
     action_delta_gate_min_terminal_iter: int = 2
+    action_delta_gate_exact_coda_audit: bool = False
 
     # Disabled-by-default warm-start inference settings.
     use_warm_start: bool = False
@@ -445,6 +446,10 @@ def validate_config(cfg: GenerateConfig) -> None:
             raise ValueError(
                 "Action-Delta Gate minimum terminal iteration must be "
                 "an integer >= 2"
+            )
+        if not isinstance(cfg.action_delta_gate_exact_coda_audit, bool):
+            raise ValueError(
+                "Action-Delta Gate exact Coda audit must be boolean"
             )
         if not cfg.use_cached_final_output:
             raise ValueError(
@@ -861,6 +866,70 @@ def build_action_delta_gate_log_fields(debug):
                 "action_delta_gate_first_eligible_terminal_iteration"
             )
         ),
+        "action_delta_gate_exact_audit_enabled": bool(
+            debug.get("action_delta_gate_exact_audit_enabled", False)
+        ),
+        "action_delta_gate_exact_audit_performed": bool(
+            debug.get("action_delta_gate_exact_audit_performed", False)
+        ),
+        "action_delta_gate_exact_audit_anchor_iteration": _as_int(
+            debug.get("action_delta_gate_exact_audit_anchor_iteration")
+        ),
+        "action_delta_gate_exact_audit_terminal_iteration": _as_int(
+            debug.get("action_delta_gate_exact_audit_terminal_iteration")
+        ),
+        "action_delta_gate_exact_audit_full_mse": _as_float(
+            debug.get("action_delta_gate_exact_audit_full_mse")
+        ),
+        "action_delta_gate_exact_audit_l2": _as_float(
+            debug.get("action_delta_gate_exact_audit_l2")
+        ),
+        "action_delta_gate_exact_audit_max_abs": _as_float(
+            debug.get("action_delta_gate_exact_audit_max_abs")
+        ),
+        "action_delta_gate_exact_audit_per_step_mse": debug.get(
+            "action_delta_gate_exact_audit_per_step_mse"
+        ),
+        "action_delta_gate_exact_audit_per_step_max_abs": debug.get(
+            "action_delta_gate_exact_audit_per_step_max_abs"
+        ),
+        "action_delta_gate_exact_audit_per_dim_mse": debug.get(
+            "action_delta_gate_exact_audit_per_dim_mse"
+        ),
+        "action_delta_gate_exact_audit_per_dim_max_abs": debug.get(
+            "action_delta_gate_exact_audit_per_dim_max_abs"
+        ),
+        "action_delta_gate_exact_audit_anchor_action": debug.get(
+            "action_delta_gate_exact_audit_anchor_action"
+        ),
+        "action_delta_gate_exact_audit_terminal_action": debug.get(
+            "action_delta_gate_exact_audit_terminal_action"
+        ),
+        "action_delta_gate_exact_audit_delta_action": debug.get(
+            "action_delta_gate_exact_audit_delta_action"
+        ),
+        "action_delta_gate_exact_audit_action_shape": debug.get(
+            "action_delta_gate_exact_audit_action_shape"
+        ),
+        "action_delta_gate_exact_audit_metric_action_shape": debug.get(
+            "action_delta_gate_exact_audit_metric_action_shape"
+        ),
+        "action_delta_gate_exact_audit_leading_batch_dim_squeezed": (
+            debug.get(
+                "action_delta_gate_exact_audit_leading_batch_dim_squeezed"
+            )
+        ),
+        "action_delta_gate_exact_audit_get_output_ms": _as_float(
+            debug.get("action_delta_gate_exact_audit_get_output_ms")
+        ),
+        "action_delta_gate_exact_audit_get_output_call_count": _as_int(
+            debug.get(
+                "action_delta_gate_exact_audit_get_output_call_count"
+            )
+        ),
+        "action_delta_gate_exact_audit_error": debug.get(
+            "action_delta_gate_exact_audit_error"
+        ),
         "action_delta_gate_score_trace": debug.get(
             "action_delta_gate_score_trace", []
         ),
@@ -1263,6 +1332,41 @@ def summarize_action_delta_gate(records: List[Dict[str, Any]]) -> Dict[str, Any]
         ),
         "predictor_ms_total_stats": _numeric_stats(
             [r.get("action_delta_gate_predictor_ms_total") for r in requested]
+        ),
+        "exact_audit_enabled_prediction_count": sum(
+            1
+            for r in requested
+            if r.get("action_delta_gate_exact_audit_enabled")
+        ),
+        "exact_audit_performed_count": sum(
+            1
+            for r in requested
+            if r.get("action_delta_gate_exact_audit_performed")
+        ),
+        "exact_audit_get_output_call_count": int(
+            sum(
+                _as_int(
+                    r.get(
+                        "action_delta_gate_exact_audit_get_output_call_count"
+                    )
+                )
+                or 0
+                for r in requested
+            )
+        ),
+        "exact_audit_get_output_ms_total": float(
+            sum(
+                _as_float(
+                    r.get("action_delta_gate_exact_audit_get_output_ms")
+                )
+                or 0.0
+                for r in requested
+            )
+        ),
+        "exact_audit_error_count": sum(
+            1
+            for r in requested
+            if r.get("action_delta_gate_exact_audit_error") is not None
         ),
     }
 
@@ -2350,6 +2454,7 @@ def eval_libero(cfg: GenerateConfig) -> float:
             "threshold": action_delta_gate_manifest["threshold"],
             "max_skip": cfg.action_delta_gate_max_skip,
             "min_terminal_iter": cfg.action_delta_gate_min_terminal_iter,
+            "exact_coda_audit": cfg.action_delta_gate_exact_coda_audit,
         }
 
     if cfg.evaluation_protocol_phase != "legacy":

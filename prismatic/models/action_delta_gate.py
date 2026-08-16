@@ -336,6 +336,7 @@ def validate_action_delta_gate_runtime_configuration(
     use_cached_final_output: bool,
     max_skip: int,
     min_terminal_iter: int,
+    exact_coda_audit: bool,
 ) -> None:
     if not enabled:
         return
@@ -357,4 +358,8 @@ def validate_action_delta_gate_runtime_configuration(
         and not isinstance(min_terminal_iter, bool)
         and min_terminal_iter >= 2,
         "Action-Delta Gate minimum terminal iteration must be an integer >= 2",
+    )
+    _require(
+        isinstance(exact_coda_audit, bool),
+        "Action-Delta Gate exact Coda audit must be boolean",
     )

@@ -826,6 +826,7 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
         use_action_delta_gate=False,
         action_delta_gate_max_skip=1,
         action_delta_gate_min_terminal_iter=2,
+        action_delta_gate_exact_coda_audit=False,
     ):
         """Run L1 regression-based continuous action prediction or discrete action tokens prediction."""
 
@@ -924,6 +925,9 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
                     action_delta_gate_min_terminal_iter=(
                         action_delta_gate_min_terminal_iter
                     ),
+                    action_delta_gate_exact_coda_audit=(
+                        action_delta_gate_exact_coda_audit
+                    ),
                 )
             # Handle convergence-based return (output, num_iters, final_kl) vs fixed return (output)
             actual_iters = None
@@ -999,6 +1003,7 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
         use_action_delta_gate: bool = False,
         action_delta_gate_max_skip: int = 1,
         action_delta_gate_min_terminal_iter: int = 2,
+        action_delta_gate_exact_coda_audit: bool = False,
         **kwargs: str,
     ) -> np.ndarray:
 
@@ -1087,6 +1092,9 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
             action_delta_gate_max_skip=action_delta_gate_max_skip,
             action_delta_gate_min_terminal_iter=(
                 action_delta_gate_min_terminal_iter
+            ),
+            action_delta_gate_exact_coda_audit=(
+                action_delta_gate_exact_coda_audit
             ),
             )
 
