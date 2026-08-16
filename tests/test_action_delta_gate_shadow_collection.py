@@ -10,6 +10,9 @@ import prismatic.models.action_heads as action_heads_module
 from experiments.robot.libero.action_delta_gate_shadow_collection import (
     ActionDeltaGateShadowCollectionError,
     ActionDeltaGateShadowWriter,
+    _CROSS_DEVICE_FP32_REDUCTION_ATOL,
+    _CROSS_DEVICE_FP32_REDUCTION_RTOL,
+    _validate_transition,
     build_shadow_prediction_payload,
     globally_unique_trajectory_id,
     load_action_delta_gate_shadow_collection,
@@ -285,10 +288,14 @@ def test_collected_features_match_existing_offline_runtime_feature_builder():
                 assert actual == pytest.approx(float(expected), rel=1e-6, abs=1e-8)
 
 
-def _prediction_payload():
+def _prediction_payload(*, predicted_delta=0.0):
     model = make_model()
     warm = torch.zeros(1, 2, 4, dtype=torch.bfloat16)
-    model(*inputs(), warm_start_state=warm, **kwargs(make_gate(), collect=True))
+    model(
+        *inputs(),
+        warm_start_state=warm,
+        **kwargs(make_gate(predicted_delta=predicted_delta), collect=True),
+    )
     manifest_hash = "a" * 64
     return build_shadow_prediction_payload(
         model.last_inference_metadata["action_delta_gate_shadow"],
@@ -305,6 +312,120 @@ def _prediction_payload():
         warm_start_metadata={"source_iteration": 3, "source_K": 6},
         returned_action=np.zeros((2, 2), dtype=np.float32),
     )
+
+
+def _set_authoritative_score(row, score, *, threshold=None):
+    score = float(score)
+    if threshold is not None:
+        row["gate_threshold"] = float(threshold)
+    row["gate_score"] = score
+    row["predicted_full_mse"] = score
+    row["features"]["predicted_action_delta_mse"] = score
+    row["residual"] = float(row["exact_adjacent_action_mse"] - score)
+    row["predicted_trigger"] = bool(score <= row["gate_threshold"])
+    row["false_safe"] = bool(row["predicted_trigger"] and not row["exact_safe"])
+
+
+def _set_authoritative_exact_mse(row, exact_mse):
+    exact_mse = float(exact_mse)
+    row["exact_adjacent_action_mse"] = exact_mse
+    row["residual"] = float(exact_mse - row["gate_score"])
+    row["exact_safe"] = bool(exact_mse < row["recurrence_mse_threshold"])
+    row["false_safe"] = bool(row["predicted_trigger"] and not row["exact_safe"])
+
+
+def test_cpu_score_replay_accepts_tiny_difference_and_preserves_authoritative_decision():
+    row = copy.deepcopy(
+        _prediction_payload(predicted_delta=0.25)["transitions"][0]
+    )
+    cpu_replay = float(
+        row["tensors"]["predicted_delta_action"].float().square().mean().item()
+    )
+    difference = max(
+        _CROSS_DEVICE_FP32_REDUCTION_ATOL * 0.5,
+        abs(cpu_replay) * _CROSS_DEVICE_FP32_REDUCTION_RTOL * 0.5,
+    )
+    authoritative_score = cpu_replay + difference
+    threshold = cpu_replay + difference * 0.5
+    _set_authoritative_score(row, authoritative_score, threshold=threshold)
+
+    assert cpu_replay <= threshold < authoritative_score
+    assert row["predicted_trigger"] is False
+    _validate_transition(row)
+
+    assert row["gate_score"] == authoritative_score
+    assert row["predicted_trigger"] is False
+    assert cpu_replay <= row["gate_threshold"]
+
+
+def test_cpu_score_replay_rejects_material_difference_with_diagnostics():
+    row = copy.deepcopy(
+        _prediction_payload(predicted_delta=0.25)["transitions"][0]
+    )
+    cpu_replay = float(
+        row["tensors"]["predicted_delta_action"].float().square().mean().item()
+    )
+    _set_authoritative_score(row, cpu_replay + 1e-3, threshold=1.0)
+
+    with pytest.raises(
+        ActionDeltaGateShadowCollectionError,
+        match="predicted action-delta score CPU integrity replay mismatch",
+    ) as exc_info:
+        _validate_transition(row)
+
+    message = str(exc_info.value)
+    for field in (
+        "authoritative_runtime_value=",
+        "cpu_replay_value=",
+        "absolute_difference=",
+        "relative_difference=",
+        "tolerance=",
+        "rtol=",
+        "atol=",
+    ):
+        assert field in message
+
+
+def test_cpu_exact_mse_replay_accepts_tiny_difference():
+    row = copy.deepcopy(_prediction_payload()["transitions"][0])
+    cpu_replay = float(
+        (
+            row["tensors"]["exact_terminal_action"]
+            - row["tensors"]["anchor_action"]
+        )
+        .square()
+        .mean()
+        .item()
+    )
+    difference = max(
+        _CROSS_DEVICE_FP32_REDUCTION_ATOL * 0.5,
+        abs(cpu_replay) * _CROSS_DEVICE_FP32_REDUCTION_RTOL * 0.5,
+    )
+    authoritative_exact_mse = cpu_replay + difference
+    _set_authoritative_exact_mse(row, authoritative_exact_mse)
+
+    _validate_transition(row)
+    assert row["exact_adjacent_action_mse"] == authoritative_exact_mse
+
+
+def test_cpu_exact_mse_replay_rejects_material_difference():
+    row = copy.deepcopy(_prediction_payload()["transitions"][0])
+    cpu_replay = float(
+        (
+            row["tensors"]["exact_terminal_action"]
+            - row["tensors"]["anchor_action"]
+        )
+        .square()
+        .mean()
+        .item()
+    )
+    _set_authoritative_exact_mse(row, cpu_replay + 1e-3)
+
+    with pytest.raises(
+        ActionDeltaGateShadowCollectionError,
+        match="exact adjacent action MSE CPU integrity replay mismatch",
+    ):
+        _validate_transition(row)
 
 
 def test_writer_emits_phase_a_summary_provenance_and_global_identity(tmp_path):

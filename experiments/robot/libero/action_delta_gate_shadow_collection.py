@@ -22,6 +22,8 @@ from prismatic.models.action_head_workload import sha256_file
 
 
 ACTION_DELTA_GATE_SHADOW_COLLECTION_MODE = "deployment_matched_pre_coda_shadow"
+_CROSS_DEVICE_FP32_REDUCTION_RTOL = 1e-5
+_CROSS_DEVICE_FP32_REDUCTION_ATOL = 1e-10
 
 
 class ActionDeltaGateShadowCollectionError(ValueError):
@@ -31,6 +33,44 @@ class ActionDeltaGateShadowCollectionError(ValueError):
 def _require(condition: bool, message: str) -> None:
     if not condition:
         raise ActionDeltaGateShadowCollectionError(message)
+
+
+def _require_close_scalar(
+    authoritative_runtime_value: float,
+    cpu_replay_value: float,
+    *,
+    quantity_name: str,
+    rtol: float = _CROSS_DEVICE_FP32_REDUCTION_RTOL,
+    atol: float = _CROSS_DEVICE_FP32_REDUCTION_ATOL,
+) -> None:
+    """Validate a CPU replay without replacing its authoritative CUDA scalar."""
+
+    authoritative = float(authoritative_runtime_value)
+    replay = float(cpu_replay_value)
+    finite = math.isfinite(authoritative) and math.isfinite(replay)
+    if finite:
+        absolute_difference = abs(authoritative - replay)
+        scale = max(abs(authoritative), abs(replay))
+        relative_difference = absolute_difference / scale if scale else 0.0
+        tolerance = max(float(atol), float(rtol) * scale)
+        close = absolute_difference <= tolerance
+    else:
+        absolute_difference = math.nan
+        relative_difference = math.nan
+        tolerance = math.nan
+        close = False
+    _require(
+        close,
+        (
+            f"{quantity_name} CPU integrity replay mismatch: "
+            f"authoritative_runtime_value={authoritative:.17g}, "
+            f"cpu_replay_value={replay:.17g}, "
+            f"absolute_difference={absolute_difference:.17g}, "
+            f"relative_difference={relative_difference:.17g}, "
+            f"tolerance={tolerance:.17g} "
+            f"(rtol={rtol:.17g}, atol={atol:.17g})"
+        ),
+    )
 
 
 def canonical_json_sha256(value: Any) -> str:
@@ -167,11 +207,19 @@ def _validate_transition(record: Mapping[str, Any]) -> None:
     ).to(torch.bfloat16)
     _require(torch.equal(reproduced_delta, tensors["latent_delta_bfloat16"]), "BF16 latent delta mismatch")
     reproduced_score = float(tensors["predicted_delta_action"].float().square().mean().item())
-    _require(reproduced_score == score, "predicted delta does not reproduce score")
+    _require_close_scalar(
+        score,
+        reproduced_score,
+        quantity_name="predicted action-delta score",
+    )
     reproduced_exact = float(
         (tensors["exact_terminal_action"] - tensors["anchor_action"]).square().mean().item()
     )
-    _require(reproduced_exact == exact_mse, "exact action pair does not reproduce label")
+    _require_close_scalar(
+        exact_mse,
+        reproduced_exact,
+        quantity_name="exact adjacent action MSE",
+    )
 
 
 def build_shadow_prediction_payload(
