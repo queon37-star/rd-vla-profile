@@ -19,9 +19,9 @@ from prismatic.models.action_delta_gate import (
     ACTION_DELTA_GATE_CALIBRATION_METHOD,
     ACTION_DELTA_GATE_MODEL_TYPE,
     ACTION_DELTA_GATE_SCHEMA_VERSION,
+    evaluate_action_delta_gate,
     load_action_delta_gate_artifact,
     prepare_action_delta_gate,
-    score_action_delta_gate,
     sha256_file,
 )
 
@@ -62,7 +62,8 @@ def _runtime_scores(cache, row_indices, gate) -> np.ndarray:
         # re-quantization produce exactly that cached delta.
         current = cache["delta_states"][int(global_index)].unsqueeze(0).to(gate.x_mean.device)
         anchor = torch.zeros_like(current)
-        scores.append(float(score_action_delta_gate(gate, anchor, current).item()))
+        score, _ = evaluate_action_delta_gate(gate, anchor, current)
+        scores.append(score)
     return np.asarray(scores, dtype=np.float64)
 
 

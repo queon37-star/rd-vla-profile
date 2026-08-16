@@ -900,7 +900,7 @@ class VLARecurrent(nn.Module):
                                 and action_delta_gate_anchor_state is not None
                             ):
                                 predictor_start = (
-                                    self._sync_time()
+                                    time.perf_counter()
                                     if profile_coda_cost
                                     else None
                                 )
@@ -919,7 +919,11 @@ class VLARecurrent(nn.Module):
                                     action_delta_gate_fallback_reason = str(exc)
                                     action_delta_gate_enabled_for_prediction = False
                                 if profile_coda_cost:
-                                    predictor_end = self._sync_time()
+                                    # evaluate_action_delta_gate() has already
+                                    # synchronized its one-scalar decision
+                                    # payload. Avoid adding profiling-only CUDA
+                                    # synchronizations around the gate.
+                                    predictor_end = time.perf_counter()
                                     action_delta_gate_predictor_ms_list.append(
                                         (predictor_end - predictor_start) * 1000.0
                                     )

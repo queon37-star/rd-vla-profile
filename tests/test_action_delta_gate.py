@@ -11,6 +11,8 @@ from prismatic.models.action_delta_gate import (
     ACTION_DELTA_GATE_MODEL_TYPE,
     ActionDeltaGateError,
     PreparedActionDeltaGate,
+    NonFiniteActionDeltaGateError,
+    evaluate_action_delta_gate,
     load_action_delta_gate_artifact,
     prepare_action_delta_gate,
     score_action_delta_gate,
@@ -139,3 +141,57 @@ def test_scorer_requantizes_fp32_delta_through_bfloat16():
     torch.testing.assert_close(score, expected, rtol=0, atol=0)
     assert not torch.equal(quantized_delta, pure_fp32_delta)
 
+
+def test_runtime_decision_uses_exactly_one_tensor_item_sync(monkeypatch):
+    payload = artifact_payload()
+    gate = prepare_action_delta_gate(payload, device="cpu", task_id=4)
+    anchor = torch.zeros(1, 8, 896)
+    current = torch.ones_like(anchor)
+
+    item_calls = 0
+    original_item = torch.Tensor.item
+
+    def item_spy(tensor, *args, **kwargs):
+        nonlocal item_calls
+        item_calls += 1
+        return original_item(tensor, *args, **kwargs)
+
+    def forbidden_cpu(tensor, *args, **kwargs):
+        raise AssertionError("runtime decision must transfer only the score scalar")
+
+    monkeypatch.setattr(torch.Tensor, "item", item_spy)
+    monkeypatch.setattr(torch.Tensor, "cpu", forbidden_cpu)
+
+    score, triggered = evaluate_action_delta_gate(gate, anchor, current)
+    assert score == 0.0
+    assert triggered is True
+    assert item_calls == 1
+
+
+@pytest.mark.parametrize("bad_value", [float("nan"), float("inf"), float("-inf")])
+@pytest.mark.parametrize("state_name", ["anchor", "current"])
+def test_final_decision_fails_closed_for_nonfinite_state(state_name, bad_value):
+    gate = prepare_action_delta_gate(artifact_payload(), device="cpu", task_id=4)
+    anchor = torch.zeros(1, 8, 896)
+    current = torch.ones_like(anchor)
+    target = anchor if state_name == "anchor" else current
+    target[0, 0, 0] = bad_value
+
+    with pytest.raises(NonFiniteActionDeltaGateError, match="non-finite"):
+        evaluate_action_delta_gate(gate, anchor, current)
+
+
+def test_final_score_check_catches_nonfinite_intermediate_from_finite_states():
+    payload = artifact_payload()
+    payload["x_std"].fill_(torch.finfo(torch.float32).tiny)
+    payload["linear_weight"].fill_(1.0)
+    gate = prepare_action_delta_gate(payload, device="cpu", task_id=4)
+    anchor = torch.zeros(1, 8, 896)
+    current = torch.full_like(anchor, torch.finfo(torch.float32).max)
+
+    # Both states are finite, but normalization overflows. The final-score
+    # predicate must still reject the decision without intermediate host checks.
+    assert torch.isfinite(anchor).all()
+    assert torch.isfinite(current).all()
+    with pytest.raises(NonFiniteActionDeltaGateError, match="non-finite"):
+        evaluate_action_delta_gate(gate, anchor, current)

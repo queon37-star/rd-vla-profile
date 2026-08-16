@@ -262,7 +262,7 @@ def score_action_delta_gate(
     anchor_state: torch.Tensor,
     current_state: torch.Tensor,
 ) -> torch.Tensor:
-    """Return predicted next action-delta MSE with exact offline quantization."""
+    """Return the on-device predicted next action-delta MSE without synchronizing."""
 
     if not isinstance(gate, PreparedActionDeltaGate):
         raise ActionDeltaGateError("a prepared Action-Delta Gate is required")
@@ -277,9 +277,6 @@ def score_action_delta_gate(
             state.device == gate.x_mean.device,
             f"{name} and prepared Action-Delta Gate must share a device",
         )
-        if not bool(torch.isfinite(state).all().item()):
-            raise NonFiniteActionDeltaGateError(f"{name} is non-finite")
-
     with rdvla_range("RDVLA/action_head/action_delta_gate/delta_compute"):
         delta = (
             current_state.float() - anchor_state.float()
@@ -290,12 +287,6 @@ def score_action_delta_gate(
         pred_delta = pred_norm * gate.y_std + gate.y_mean
         score = pred_delta.square().mean()
 
-    if not bool(torch.isfinite(x).all().item()):
-        raise NonFiniteActionDeltaGateError("Action-Delta Gate normalized input is non-finite")
-    if not bool(torch.isfinite(pred_delta).all().item()):
-        raise NonFiniteActionDeltaGateError("Action-Delta Gate prediction is non-finite")
-    if not bool(torch.isfinite(score).item()):
-        raise NonFiniteActionDeltaGateError("Action-Delta Gate score is non-finite")
     return score
 
 
@@ -304,7 +295,27 @@ def evaluate_action_delta_gate(
     anchor_state: torch.Tensor,
     current_state: torch.Tensor,
 ) -> tuple[float, bool]:
-    score = float(score_action_delta_gate(gate, anchor_state, current_state).item())
+    """Return score and decision with exactly one device-to-host synchronization.
+
+    Artifact tensors are finite, and both normalization scales are finite and
+    positive. A non-finite state therefore remains non-finite through the BF16
+    transition, normalization, finite linear projection, positive finite output
+    scale, and final squared mean. Likewise, overflow in any intermediate makes
+    the final score non-finite. Checking the final score on the host is thus
+    sufficient for fail-closed behavior under the frozen artifact contract.
+    """
+
+    score_tensor = score_action_delta_gate(
+        gate,
+        anchor_state,
+        current_state,
+    )
+    # One scalar D2H transfer is the runtime decision's only sync point.
+    score = float(score_tensor.item())
+    if not math.isfinite(score):
+        raise NonFiniteActionDeltaGateError(
+            "Action-Delta Gate state or score is non-finite"
+        )
     return score, score <= gate.threshold
 
 
