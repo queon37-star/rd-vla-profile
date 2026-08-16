@@ -815,7 +815,20 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
         latent_precheck_confirmation_mode="next_iter",
         nonfinite_policy="legacy",
         shadow_full_depth=False,
+        collect_preconvergence_raw_shadow=False,
+        preconvergence_raw_shadow_max_depth=32,
         capture_action_head_workload=False,
+        latent_only_metric="raw_mse",
+        latent_only_cold_threshold=0.0,
+        latent_only_warm_threshold=0.0,
+        latent_only_min_iter=2,
+        latent_only_eps=1e-8,
+        use_action_delta_gate=False,
+        action_delta_gate_max_skip=1,
+        action_delta_gate_min_terminal_iter=2,
+        action_delta_gate_exact_coda_audit=False,
+        action_delta_gate_return_mode="anchor",
+        collect_action_delta_gate_shadow=False,
     ):
         """Run L1 regression-based continuous action prediction or discrete action tokens prediction."""
 
@@ -901,7 +914,28 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
                     latent_precheck_confirmation_mode=latent_precheck_confirmation_mode,
                     nonfinite_policy=nonfinite_policy,
                     shadow_full_depth=shadow_full_depth,
+                    collect_preconvergence_raw_shadow=collect_preconvergence_raw_shadow,
+                    preconvergence_raw_shadow_max_depth=preconvergence_raw_shadow_max_depth,
                     capture_action_head_workload=capture_action_head_workload,
+                    latent_only_metric=latent_only_metric,
+                    latent_only_cold_threshold=latent_only_cold_threshold,
+                    latent_only_warm_threshold=latent_only_warm_threshold,
+                    latent_only_min_iter=latent_only_min_iter,
+                    latent_only_eps=latent_only_eps,
+                    use_action_delta_gate=use_action_delta_gate,
+                    action_delta_gate_max_skip=action_delta_gate_max_skip,
+                    action_delta_gate_min_terminal_iter=(
+                        action_delta_gate_min_terminal_iter
+                    ),
+                    action_delta_gate_exact_coda_audit=(
+                        action_delta_gate_exact_coda_audit
+                    ),
+                    action_delta_gate_return_mode=(
+                        action_delta_gate_return_mode
+                    ),
+                    collect_action_delta_gate_shadow=(
+                        collect_action_delta_gate_shadow
+                    ),
                 )
             # Handle convergence-based return (output, num_iters, final_kl) vs fixed return (output)
             actual_iters = None
@@ -966,7 +1000,20 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
         latent_precheck_confirmation_mode: str = "next_iter",
         nonfinite_policy: str = "legacy",
         shadow_full_depth: bool = False,
+        collect_preconvergence_raw_shadow: bool = False,
+        preconvergence_raw_shadow_max_depth: int = 32,
         capture_action_head_workload: bool = False,
+        latent_only_metric: str = "raw_mse",
+        latent_only_cold_threshold: float = 0.0,
+        latent_only_warm_threshold: float = 0.0,
+        latent_only_min_iter: int = 2,
+        latent_only_eps: float = 1e-8,
+        use_action_delta_gate: bool = False,
+        action_delta_gate_max_skip: int = 1,
+        action_delta_gate_min_terminal_iter: int = 2,
+        action_delta_gate_exact_coda_audit: bool = False,
+        action_delta_gate_return_mode: str = "anchor",
+        collect_action_delta_gate_shadow: bool = False,
         **kwargs: str,
     ) -> np.ndarray:
 
@@ -1043,7 +1090,28 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
             latent_precheck_confirmation_mode=latent_precheck_confirmation_mode,
             nonfinite_policy=nonfinite_policy,
             shadow_full_depth=shadow_full_depth,
+            collect_preconvergence_raw_shadow=collect_preconvergence_raw_shadow,
+            preconvergence_raw_shadow_max_depth=preconvergence_raw_shadow_max_depth,
             capture_action_head_workload=capture_action_head_workload,
+            latent_only_metric=latent_only_metric,
+            latent_only_cold_threshold=latent_only_cold_threshold,
+            latent_only_warm_threshold=latent_only_warm_threshold,
+            latent_only_min_iter=latent_only_min_iter,
+            latent_only_eps=latent_only_eps,
+            use_action_delta_gate=use_action_delta_gate,
+            action_delta_gate_max_skip=action_delta_gate_max_skip,
+            action_delta_gate_min_terminal_iter=(
+                action_delta_gate_min_terminal_iter
+            ),
+            action_delta_gate_exact_coda_audit=(
+                action_delta_gate_exact_coda_audit
+            ),
+            action_delta_gate_return_mode=(
+                action_delta_gate_return_mode
+            ),
+            collect_action_delta_gate_shadow=(
+                collect_action_delta_gate_shadow
+            ),
             )
 
         # Unnormalize predicted actions

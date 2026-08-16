@@ -159,6 +159,20 @@ def test_raw_collection_public_plumbing_is_disabled_by_default(callable_obj):
     assert parameters["preconvergence_raw_shadow_max_depth"].default == 32
 
 
+@pytest.mark.parametrize(
+    "callable_obj",
+    [
+        VLARecurrent.forward,
+        ActionHeadRecurrent.predict_action,
+        OpenVLAForActionPrediction._regression_or_discrete_prediction,
+        OpenVLAForActionPrediction.predict_action,
+    ],
+)
+def test_action_delta_shadow_public_plumbing_is_disabled_by_default(callable_obj):
+    parameters = inspect.signature(callable_obj).parameters
+    assert parameters["collect_action_delta_gate_shadow"].default is False
+
+
 def _raw_model_payload():
     states = torch.arange(5 * 1 * 2 * 4, dtype=torch.float32).reshape(5, 1, 2, 4).to(torch.bfloat16)
     actions = torch.arange(5 * 1 * 2 * 2, dtype=torch.float32).reshape(5, 1, 2, 2).to(torch.bfloat16)

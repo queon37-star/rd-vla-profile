@@ -284,6 +284,268 @@ def test_nonfinite_predicted_correction_falls_back_to_exact_coda(monkeypatch):
     assert debug["get_output_call_count"] == 2
 
 
+def test_exact_terminal_returns_current_exact_coda_at_predicted_terminal(
+    monkeypatch,
+):
+    linear_call_count = 0
+    original_linear = action_delta_gate_module.F.linear
+
+    def linear_spy(*args, **kwargs):
+        nonlocal linear_call_count
+        linear_call_count += 1
+        return original_linear(*args, **kwargs)
+
+    monkeypatch.setattr(action_delta_gate_module.F, "linear", linear_spy)
+    model = make_model()
+    anchor_action = torch.zeros(1, 2, 2, dtype=torch.bfloat16)
+    terminal_action = torch.ones_like(anchor_action)
+    install_action_outputs(
+        model,
+        {1: anchor_action, 2: terminal_action},
+    )
+
+    output, actual_iter, final_mse = model(
+        *inputs(),
+        warm_start_state=torch.zeros(1, 2, 4, dtype=torch.bfloat16),
+        kl_thresh=0.001,
+        profile_coda_cost=True,
+        action_delta_gate_return_mode="exact_terminal",
+        **gate_kwargs(make_gate(predicted_delta=0.0, threshold=0.1)),
+    )
+
+    assert linear_call_count == 1
+    assert actual_iter == 2
+    assert final_mse == 1.0
+    torch.testing.assert_close(output, terminal_action, rtol=0, atol=0)
+    assert not torch.equal(output, anchor_action)
+    assert model.test_coda_calls == 2
+    debug = model.last_recurrence_debug
+    assert debug["action_delta_gate_return_mode"] == "exact_terminal"
+    assert debug["action_delta_gate_predicted_trigger_count"] == 1
+    assert debug[
+        "action_delta_gate_exact_terminal_accepted_trigger_count"
+    ] == 1
+    assert debug["action_delta_gate_oracle_confirm_accepted_count"] == 0
+    assert debug[
+        "action_delta_gate_oracle_confirm_rejected_false_safe_count"
+    ] == 0
+    assert debug["action_delta_gate_triggered"] is True
+    assert debug["action_delta_gate_anchor_iteration"] == 1
+    assert debug["action_delta_gate_terminal_iteration"] == 2
+    assert debug["action_delta_gate_returned_action_source_iteration"] == 2
+    assert debug["action_delta_gate_skipped_coda_count"] == 0
+    assert debug["action_delta_gate_mode_is_diagnostic"] is True
+    assert debug["action_delta_gate_efficiency_eligible"] is False
+    assert debug["action_delta_gate_diagnostic_coda_call_count"] == 1
+    assert debug["action_delta_gate_diagnostic_coda_iterations"] == [2]
+    assert debug["action_delta_gate_diagnostic_get_output_ms_list"] == [0.3]
+    assert debug["action_delta_gate_diagnostic_get_output_ms_total"] == 0.3
+    assert debug["action_delta_gate_returned_anchor"] is False
+    assert debug["action_delta_gate_returned_predicted_correction"] is False
+    assert debug["stop_reason"] == "action_delta_gate"
+    assert debug["coda_call_count"] == 2
+    assert debug["get_output_call_count"] == 2
+    assert debug["get_output_ms_total"] == pytest.approx(0.6)
+    assert debug["final_state_coda_executed"] is True
+    assert debug["iteration_mse"] == [1.0]
+    assert debug["final_mse"] == 1.0
+    assert debug["action_delta_gate_exact_confirmation_trace"] == [
+        {
+            "mode": "exact_terminal",
+            "anchor_iteration": 1,
+            "terminal_iteration": 2,
+            "exact_adjacent_mse": 1.0,
+            "exact_safe": False,
+            "accepted": True,
+        }
+    ]
+
+
+def test_oracle_confirm_exact_safe_stops_with_current_exact_coda(
+    monkeypatch,
+):
+    linear_call_count = 0
+    original_linear = action_delta_gate_module.F.linear
+
+    def linear_spy(*args, **kwargs):
+        nonlocal linear_call_count
+        linear_call_count += 1
+        return original_linear(*args, **kwargs)
+
+    monkeypatch.setattr(action_delta_gate_module.F, "linear", linear_spy)
+    model = make_model()
+    anchor_action = torch.zeros(1, 2, 2, dtype=torch.bfloat16)
+    terminal_action = torch.full_like(anchor_action, 0.015625)
+    install_action_outputs(
+        model,
+        {1: anchor_action, 2: terminal_action},
+    )
+
+    output, actual_iter, final_mse = model(
+        *inputs(),
+        warm_start_state=torch.zeros(1, 2, 4, dtype=torch.bfloat16),
+        kl_thresh=0.001,
+        action_delta_gate_return_mode="oracle_confirm",
+        **gate_kwargs(make_gate(predicted_delta=0.0, threshold=0.1)),
+    )
+
+    assert linear_call_count == 1
+    assert actual_iter == 2
+    assert final_mse == pytest.approx(0.015625 ** 2)
+    torch.testing.assert_close(output, terminal_action, rtol=0, atol=0)
+    assert model.test_coda_calls == 2
+    debug = model.last_recurrence_debug
+    assert debug["stop_reason"] == "adjacent_action_mse"
+    assert debug["canonical_stop_reason"] == "adjacent_action_mse"
+    assert debug["adaptive_stop"] is True
+    assert debug["action_delta_gate_triggered"] is True
+    assert debug["action_delta_gate_predicted_trigger_count"] == 1
+    assert debug["action_delta_gate_oracle_confirm_accepted_count"] == 1
+    assert debug[
+        "action_delta_gate_oracle_confirm_rejected_false_safe_count"
+    ] == 0
+    assert debug["action_delta_gate_terminal_iteration"] == 2
+    assert debug["action_delta_gate_returned_action_source_iteration"] == 2
+    assert debug["action_delta_gate_skipped_coda_count"] == 0
+    assert debug["action_delta_gate_diagnostic_coda_call_count"] == 1
+    assert debug["coda_call_count"] == 2
+    assert debug["iteration_mse"] == [pytest.approx(0.015625 ** 2)]
+    assert debug["final_mse"] == pytest.approx(0.015625 ** 2)
+    confirmation = debug["action_delta_gate_exact_confirmation_trace"][0]
+    assert confirmation["exact_safe"] is True
+    assert confirmation["accepted"] is True
+
+
+def test_oracle_confirm_rejection_updates_exact_state_and_continues(
+    monkeypatch,
+):
+    linear_call_count = 0
+    scored_anchor_states = []
+    original_linear = action_delta_gate_module.F.linear
+    original_evaluate = action_heads_module.evaluate_action_delta_gate
+
+    def linear_spy(*args, **kwargs):
+        nonlocal linear_call_count
+        linear_call_count += 1
+        return original_linear(*args, **kwargs)
+
+    def evaluate_spy(gate, anchor_state, current_state, **kwargs):
+        scored_anchor_states.append(anchor_state.detach().clone())
+        return original_evaluate(gate, anchor_state, current_state, **kwargs)
+
+    monkeypatch.setattr(action_delta_gate_module.F, "linear", linear_spy)
+    monkeypatch.setattr(
+        action_heads_module,
+        "evaluate_action_delta_gate",
+        evaluate_spy,
+    )
+    model = make_model()
+    anchor_action = torch.zeros(1, 2, 2, dtype=torch.bfloat16)
+    rejected_terminal_action = torch.ones_like(anchor_action)
+    accepted_terminal_action = rejected_terminal_action.clone()
+    install_action_outputs(
+        model,
+        {
+            1: anchor_action,
+            2: rejected_terminal_action,
+            3: accepted_terminal_action,
+        },
+    )
+
+    output, actual_iter, final_mse = model(
+        *inputs(),
+        warm_start_state=torch.zeros(1, 2, 4, dtype=torch.bfloat16),
+        kl_thresh=0.001,
+        action_delta_gate_return_mode="oracle_confirm",
+        **gate_kwargs(make_gate(predicted_delta=0.0, threshold=0.1)),
+    )
+
+    assert linear_call_count == 2
+    assert len(scored_anchor_states) == 2
+    torch.testing.assert_close(
+        scored_anchor_states[0],
+        torch.ones_like(scored_anchor_states[0]),
+        rtol=0,
+        atol=0,
+    )
+    torch.testing.assert_close(
+        scored_anchor_states[1],
+        torch.full_like(scored_anchor_states[1], 2),
+        rtol=0,
+        atol=0,
+    )
+    assert actual_iter == 3
+    assert final_mse == 0.0
+    torch.testing.assert_close(output, accepted_terminal_action, rtol=0, atol=0)
+    assert model.test_coda_calls == 3
+    debug = model.last_recurrence_debug
+    assert debug["stop_reason"] == "adjacent_action_mse"
+    assert debug["action_delta_gate_predicted_trigger_count"] == 2
+    assert debug["action_delta_gate_oracle_confirm_accepted_count"] == 1
+    assert debug[
+        "action_delta_gate_oracle_confirm_rejected_false_safe_count"
+    ] == 1
+    assert debug["action_delta_gate_diagnostic_coda_call_count"] == 2
+    assert debug["action_delta_gate_diagnostic_coda_iterations"] == [2, 3]
+    assert debug["action_delta_gate_skipped_coda_count"] == 0
+    assert debug["coda_call_count"] == 3
+    assert debug["get_output_call_count"] == 3
+    assert debug["iteration_mse"] == [1.0, 0.0]
+    assert debug["conv_score_list"] == [1.0, 0.0]
+    assert debug["final_mse"] == 0.0
+    assert debug["action_delta_gate_anchor_iteration"] == 2
+    assert debug["action_delta_gate_terminal_iteration"] == 3
+    assert debug["action_delta_gate_returned_action_source_iteration"] == 3
+    trace = debug["action_delta_gate_exact_confirmation_trace"]
+    assert [record["exact_adjacent_mse"] for record in trace] == [1.0, 0.0]
+    assert [record["accepted"] for record in trace] == [False, True]
+
+
+def test_exact_terminal_reuses_its_exact_coda_for_optional_audit(
+    monkeypatch,
+):
+    linear_call_count = 0
+    original_linear = action_delta_gate_module.F.linear
+
+    def linear_spy(*args, **kwargs):
+        nonlocal linear_call_count
+        linear_call_count += 1
+        return original_linear(*args, **kwargs)
+
+    monkeypatch.setattr(action_delta_gate_module.F, "linear", linear_spy)
+    model = make_model()
+    anchor_action = torch.ones(1, 2, 2, dtype=torch.bfloat16)
+    terminal_action = torch.full_like(anchor_action, 2.0)
+    install_action_outputs(model, {1: anchor_action, 2: terminal_action})
+
+    output, actual_iter, _ = model(
+        *inputs(),
+        warm_start_state=torch.zeros(1, 2, 4, dtype=torch.bfloat16),
+        kl_thresh=0.001,
+        action_delta_gate_exact_coda_audit=True,
+        action_delta_gate_return_mode="exact_terminal",
+        **gate_kwargs(make_gate(predicted_delta=0.5, threshold=1.0)),
+    )
+
+    assert linear_call_count == 1
+    assert actual_iter == 2
+    assert model.test_coda_calls == 2
+    torch.testing.assert_close(output, terminal_action, rtol=0, atol=0)
+    debug = model.last_recurrence_debug
+    assert debug["action_delta_gate_exact_audit_performed"] is True
+    assert debug["action_delta_gate_exact_audit_get_output_call_count"] == 0
+    assert debug["action_delta_gate_diagnostic_coda_call_count"] == 1
+    assert debug[
+        "action_delta_gate_exact_audit_predicted_delta_action"
+    ] == torch.full_like(anchor_action.float(), 0.5).tolist()
+    assert debug[
+        "action_delta_gate_exact_audit_predicted_corrected_action"
+    ] == torch.full_like(anchor_action.float(), 1.5).tolist()
+    assert debug["action_delta_gate_exact_audit_terminal_action"] == (
+        terminal_action.float().tolist()
+    )
+
+
 def test_cold_origin_uses_normal_coda_and_captures_midpoint_candidate():
     model = make_model()
     output, actual_iter, final_mse = model(

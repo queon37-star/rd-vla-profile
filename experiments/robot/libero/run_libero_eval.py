@@ -45,6 +45,11 @@ from experiments.robot.libero.raw_preconvergence_trace import (
     checkpoint_identity,
     current_source_commit,
 )
+from experiments.robot.libero.action_delta_gate_shadow_collection import (
+    ACTION_DELTA_GATE_SHADOW_COLLECTION_MODE,
+    ActionDeltaGateShadowWriter,
+    build_shadow_prediction_payload,
+)
 
 sys.path.append("../..")
 from experiments.robot.libero.libero_utils import (
@@ -82,8 +87,14 @@ from prismatic.models.scalar_stopping_policy import (
     prepare_scalar_task_policy,
 )
 from prismatic.models.action_delta_gate import (
+    ACTION_DELTA_GATE_RETURN_MODES,
     load_action_delta_gate_artifact,
     prepare_action_delta_gate,
+    prepare_action_delta_gate_shadow,
+)
+from prismatic.models.action_delta_gate_shadow import (
+    ACTION_DELTA_GATE_SHADOW_DEVELOPMENT_TASK_IDS,
+    ACTION_DELTA_GATE_SHADOW_SCHEMA_VERSION,
 )
 from prismatic.vla.constants import NUM_ACTIONS_CHUNK
 from prismatic.utils.rdvla_profiler import RDVLAProfiler
@@ -221,6 +232,9 @@ class GenerateConfig:
     action_delta_gate_min_terminal_iter: int = 2
     action_delta_gate_exact_coda_audit: bool = False
     action_delta_gate_return_mode: str = "anchor"
+    collect_action_delta_gate_shadow: bool = False
+    action_delta_gate_shadow_dir: str = ""
+    action_delta_gate_shadow_shard_size: int = 64
 
     # Disabled-by-default warm-start inference settings.
     use_warm_start: bool = False
@@ -392,6 +406,12 @@ def validate_config(cfg: GenerateConfig) -> None:
                 "recurrence_strategy='scalar_policy'"
             )
 
+    if cfg.use_action_delta_gate and cfg.collect_action_delta_gate_shadow:
+        raise ValueError(
+            "production Action-Delta Gate and diagnostic shadow collection "
+            "are mutually exclusive"
+        )
+
     if cfg.use_action_delta_gate:
         if not cfg.use_recurrent:
             raise ValueError("Action-Delta Gate requires use_recurrent=True")
@@ -452,24 +472,98 @@ def validate_config(cfg: GenerateConfig) -> None:
             raise ValueError(
                 "Action-Delta Gate exact Coda audit must be boolean"
             )
-        if cfg.action_delta_gate_return_mode not in (
-            "anchor",
-            "predicted_correction",
-        ):
+        if cfg.action_delta_gate_return_mode not in ACTION_DELTA_GATE_RETURN_MODES:
             raise ValueError(
-                "Action-Delta Gate return mode must be 'anchor' or "
-                "'predicted_correction'"
+                "Action-Delta Gate return mode must be 'anchor', "
+                "'predicted_correction', 'exact_terminal', or "
+                "'oracle_confirm'"
             )
         if not cfg.use_cached_final_output:
             raise ValueError(
                 "Action-Delta Gate Phase B requires use_cached_final_output=True"
             )
-    elif (
+    elif not cfg.collect_action_delta_gate_shadow and (
         cfg.action_delta_gate_artifact_path
         or cfg.action_delta_gate_expected_sha256
     ):
         raise ValueError(
             "Action-Delta Gate artifact settings require use_action_delta_gate=True"
+        )
+
+    if cfg.collect_action_delta_gate_shadow:
+        if not cfg.use_recurrent:
+            raise ValueError("Action-Delta Gate shadow collection requires use_recurrent=True")
+        if canonical_recurrence_strategy != "adjacent_action_mse":
+            raise ValueError(
+                "Action-Delta Gate shadow collection requires "
+                "adjacent action-MSE recurrence"
+            )
+        if cfg.task_suite_name != TaskSuite.LIBERO_SPATIAL:
+            raise ValueError("Action-Delta Gate shadow collection is LIBERO Spatial-only")
+        if cfg.task_id is not None and cfg.task_id not in ACTION_DELTA_GATE_SHADOW_DEVELOPMENT_TASK_IDS:
+            raise ValueError(
+                "Action-Delta Gate shadow calibration permits only development "
+                f"tasks {ACTION_DELTA_GATE_SHADOW_DEVELOPMENT_TASK_IDS}; Task 4/5 are forbidden"
+            )
+        if cfg.evaluation_protocol_phase != "calibration":
+            raise ValueError(
+                "Phase-A Action-Delta Gate shadow collection requires the "
+                "10-state official calibration manifest partition"
+            )
+        if not cfg.action_delta_gate_artifact_path:
+            raise ValueError("shadow collection requires action_delta_gate_artifact_path")
+        if not Path(cfg.action_delta_gate_artifact_path).exists():
+            raise ValueError(
+                "Action-Delta Gate artifact path does not exist: "
+                f"{cfg.action_delta_gate_artifact_path}"
+            )
+        expected_hash = cfg.action_delta_gate_expected_sha256
+        if (
+            len(expected_hash) != 64
+            or any(character not in "0123456789abcdef" for character in expected_hash.lower())
+        ):
+            raise ValueError(
+                "action_delta_gate_expected_sha256 must be a 64-character "
+                "hexadecimal SHA-256"
+            )
+        if not cfg.action_delta_gate_shadow_dir:
+            raise ValueError("action_delta_gate_shadow_dir is required")
+        if (
+            isinstance(cfg.action_delta_gate_shadow_shard_size, bool)
+            or not isinstance(cfg.action_delta_gate_shadow_shard_size, int)
+            or cfg.action_delta_gate_shadow_shard_size < 1
+        ):
+            raise ValueError("action_delta_gate_shadow_shard_size must be an integer >= 1")
+        if not cfg.use_warm_start or cfg.warm_start_source != "midpoint":
+            raise ValueError("shadow collection requires midpoint warm-start")
+        if cfg.warm_start_min_iter != 2:
+            raise ValueError("shadow collection requires warm_start_min_iter=2")
+        if cfg.use_latent_precheck or cfg.latent_precheck_mode != "off":
+            raise ValueError("shadow collection requires latent pre-check off")
+        if cfg.latent_precheck_trace_level != "off":
+            raise ValueError("shadow collection requires latent_precheck_trace_level='off'")
+        if cfg.shadow_full_depth or cfg.collect_preconvergence_raw_shadow:
+            raise ValueError("shadow collection cannot enable post-production shadow recurrence")
+        if not cfg.use_cached_final_output:
+            raise ValueError("shadow collection requires exact terminal-output reuse")
+        if cfg.action_delta_gate_min_terminal_iter != 5:
+            raise ValueError(
+                "deployment-matched Phase-A collection requires "
+                "action_delta_gate_min_terminal_iter=5"
+            )
+        if float(cfg.recurrence_kl_thresh) != 0.001:
+            raise ValueError(
+                "deployment-matched Phase-A collection requires "
+                "recurrence_kl_thresh=0.001"
+            )
+        if cfg.action_delta_gate_exact_coda_audit:
+            raise ValueError("shadow collection cannot enable exact-Coda trigger audit")
+        if cfg.action_delta_gate_return_mode != "anchor":
+            raise ValueError("shadow collection does not accept a production return policy")
+    elif cfg.action_delta_gate_shadow_dir:
+        raise ValueError(
+            "action_delta_gate_shadow_dir requires "
+            "collect_action_delta_gate_shadow=True"
         )
 
     validate_latent_only_configuration(
@@ -866,6 +960,43 @@ def build_action_delta_gate_log_fields(debug):
         ),
         "action_delta_gate_score_call_count": _as_int(
             debug.get("action_delta_gate_score_call_count")
+        ),
+        "action_delta_gate_predicted_trigger_count": _as_int(
+            debug.get("action_delta_gate_predicted_trigger_count")
+        ),
+        "action_delta_gate_exact_terminal_accepted_trigger_count": _as_int(
+            debug.get(
+                "action_delta_gate_exact_terminal_accepted_trigger_count"
+            )
+        ),
+        "action_delta_gate_oracle_confirm_accepted_count": _as_int(
+            debug.get("action_delta_gate_oracle_confirm_accepted_count")
+        ),
+        "action_delta_gate_oracle_confirm_rejected_false_safe_count": _as_int(
+            debug.get(
+                "action_delta_gate_oracle_confirm_rejected_false_safe_count"
+            )
+        ),
+        "action_delta_gate_exact_confirmation_trace": debug.get(
+            "action_delta_gate_exact_confirmation_trace", []
+        ),
+        "action_delta_gate_diagnostic_coda_call_count": _as_int(
+            debug.get("action_delta_gate_diagnostic_coda_call_count")
+        ),
+        "action_delta_gate_diagnostic_coda_iterations": debug.get(
+            "action_delta_gate_diagnostic_coda_iterations", []
+        ),
+        "action_delta_gate_diagnostic_get_output_ms_list": debug.get(
+            "action_delta_gate_diagnostic_get_output_ms_list", []
+        ),
+        "action_delta_gate_diagnostic_get_output_ms_total": _as_float(
+            debug.get("action_delta_gate_diagnostic_get_output_ms_total")
+        ),
+        "action_delta_gate_mode_is_diagnostic": bool(
+            debug.get("action_delta_gate_mode_is_diagnostic", False)
+        ),
+        "action_delta_gate_efficiency_eligible": bool(
+            debug.get("action_delta_gate_efficiency_eligible", True)
         ),
         "action_delta_gate_min_terminal_iter": _as_int(
             debug.get("action_delta_gate_min_terminal_iter")
@@ -1373,18 +1504,72 @@ def summarize_latent_precheck(records: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 def summarize_action_delta_gate(records: List[Dict[str, Any]]) -> Dict[str, Any]:
     requested = [r for r in records if r.get("action_delta_gate_requested")]
+    efficiency_eligible = [
+        r
+        for r in requested
+        if r.get("action_delta_gate_efficiency_eligible", True)
+    ]
     return {
         "requested_prediction_count": len(requested),
         "applied_prediction_count": sum(
             1 for r in requested if r.get("action_delta_gate_applied")
         ),
         "trigger_count": sum(
-            1 for r in requested if r.get("action_delta_gate_triggered")
+            1
+            for r in efficiency_eligible
+            if r.get("action_delta_gate_triggered")
+        ),
+        "predicted_gate_trigger_count": int(
+            sum(
+                _as_int(r.get("action_delta_gate_predicted_trigger_count"))
+                or 0
+                for r in requested
+            )
+        ),
+        "exact_terminal_accepted_trigger_count": int(
+            sum(
+                _as_int(
+                    r.get(
+                        "action_delta_gate_exact_terminal_accepted_trigger_count"
+                    )
+                )
+                or 0
+                for r in requested
+            )
+        ),
+        "oracle_confirm_accepted_count": int(
+            sum(
+                _as_int(
+                    r.get("action_delta_gate_oracle_confirm_accepted_count")
+                )
+                or 0
+                for r in requested
+            )
+        ),
+        "oracle_confirm_rejected_false_safe_count": int(
+            sum(
+                _as_int(
+                    r.get(
+                        "action_delta_gate_oracle_confirm_rejected_false_safe_count"
+                    )
+                )
+                or 0
+                for r in requested
+            )
+        ),
+        "diagnostic_mode_prediction_count": len(requested)
+        - len(efficiency_eligible),
+        "diagnostic_coda_call_count": int(
+            sum(
+                _as_int(r.get("action_delta_gate_diagnostic_coda_call_count"))
+                or 0
+                for r in requested
+            )
         ),
         "skipped_coda_count": int(
             sum(
                 _as_int(r.get("action_delta_gate_skipped_coda_count")) or 0
-                for r in requested
+                for r in efficiency_eligible
             )
         ),
         "score_call_count": int(
@@ -1599,6 +1784,7 @@ def run_episode(
     profile_state=None,
     timing_state=None,
     raw_shadow_writer=None,
+    action_delta_shadow_writer=None,
 ):
     """Run a single episode in the environment."""
     episode_protocol = dict(episode_protocol or {})
@@ -1648,6 +1834,8 @@ def run_episode(
     prediction_step = 0
     prev_action_vec = None
     prev_proprio_vec = None
+    action_delta_shadow_predictions = []
+    action_delta_shadow_episode_error = None
 
     success = False
     try:
@@ -1773,12 +1961,16 @@ def run_episode(
                     preconvergence_raw_shadow = inference_metadata.get(
                         "preconvergence_raw_shadow"
                     )
+                    action_delta_gate_shadow = inference_metadata.get(
+                        "action_delta_gate_shadow"
+                    )
                 else:
                     recurrence_debug = {}
                     warm_start_metadata = {}
                     next_warm_start_state = None
                     action_head_workload = None
                     preconvergence_raw_shadow = None
+                    action_delta_gate_shadow = None
 
                 warm_start_enabled = bool(
                     warm_start_metadata.get("enabled", getattr(cfg, "use_warm_start", False))
@@ -2081,6 +2273,59 @@ def run_episode(
                     )
                 else:
                     step_record["preconvergence_raw_shadow_collected"] = False
+                if cfg.collect_action_delta_gate_shadow:
+                    if action_delta_shadow_writer is None:
+                        raise RuntimeError(
+                            "Action-Delta shadow collection enabled without a writer"
+                        )
+                    if action_delta_gate_shadow is None:
+                        raise RuntimeError(
+                            "Action-Delta shadow collection was requested but "
+                            "the action head returned no payload"
+                        )
+                    action_delta_shadow_prediction = build_shadow_prediction_payload(
+                        action_delta_gate_shadow,
+                        task_id=int(task_id),
+                        task_name=task_description,
+                        episode_id=int(episode_idx),
+                        initial_state_id=int(
+                            protocol_log_metadata["initial_state_id"]
+                        ),
+                        paired_trial_id=int(
+                            protocol_log_metadata["paired_trial_id"]
+                        ),
+                        episode_seed=int(episode_seed),
+                        prediction_id=prediction_id,
+                        environment_timestep=int(t),
+                        initial_state_manifest_sha256=str(
+                            protocol_log_metadata[
+                                "initial_state_manifest_sha256"
+                            ]
+                        ),
+                        protocol_identity=protocol_log_metadata,
+                        warm_start_metadata=warm_start_metadata,
+                        returned_action=np.asarray(actions),
+                    )
+                    action_delta_shadow_predictions.append(
+                        action_delta_shadow_prediction
+                    )
+                    step_record.update(
+                        {
+                            "action_delta_gate_shadow_collected": True,
+                            "action_delta_gate_shadow_schema_version": (
+                                ACTION_DELTA_GATE_SHADOW_SCHEMA_VERSION
+                            ),
+                            "action_delta_gate_shadow_eligible_row_count": len(
+                                action_delta_shadow_prediction["transitions"]
+                            ),
+                            "action_delta_gate_shadow_prediction_id": (
+                                action_delta_shadow_prediction["prediction_id"]
+                            ),
+                            "action_delta_gate_shadow_influenced_control": False,
+                        }
+                    )
+                else:
+                    step_record["action_delta_gate_shadow_collected"] = False
                 step_record["profiling_enabled"] = bool(debug.get("profiling_enabled", False))
                 step_record["use_cached_final_output"] = bool(
                     debug.get("use_cached_final_output", getattr(cfg, "use_cached_final_output", False))
@@ -2154,6 +2399,8 @@ def run_episode(
 
     except Exception as e:
         log_message(f"Episode error: {e}", log_file)
+        if cfg.collect_action_delta_gate_shadow:
+            action_delta_shadow_episode_error = f"{type(e).__name__}: {e}"
 
     if episode_action_latencies_ms:
         lat = np.array(episode_action_latencies_ms, dtype=np.float64)
@@ -2184,6 +2431,17 @@ def run_episode(
     append_jsonl(get_step_log_file(cfg), episode_step_logs)
     if raw_shadow_writer is not None:
         raw_shadow_writer.flush()
+    if action_delta_shadow_writer is not None:
+        if action_delta_shadow_episode_error is not None:
+            raise RuntimeError(
+                "Action-Delta shadow Phase-A episode did not complete: "
+                f"{action_delta_shadow_episode_error}"
+            )
+        action_delta_shadow_writer.add_episode(
+            action_delta_shadow_predictions,
+            success=success,
+        )
+        action_delta_shadow_writer.flush()
 
     return success, replay_images, episode_iters, replay_stats, rollout_summary
 
@@ -2207,6 +2465,7 @@ def run_task(
     profile_state=None,
     timing_state=None,
     raw_shadow_writer=None,
+    action_delta_shadow_writer=None,
 ):
     """Run evaluation for a single task."""
     task = task_suite.get_task(task_id)
@@ -2293,6 +2552,7 @@ def run_task(
             profile_state=profile_state,
             timing_state=timing_state,
             raw_shadow_writer=raw_shadow_writer,
+            action_delta_shadow_writer=action_delta_shadow_writer,
         )
 
         if episode_iters:
@@ -2400,7 +2660,7 @@ def eval_libero(cfg: GenerateConfig) -> float:
             ),
         )
 
-    if cfg.use_action_delta_gate:
+    if cfg.use_action_delta_gate or cfg.collect_action_delta_gate_shadow:
         (
             action_delta_gate_manifest,
             action_delta_gate_payload,
@@ -2422,22 +2682,32 @@ def eval_libero(cfg: GenerateConfig) -> float:
         )
     if action_delta_gate_manifest is not None:
         log_message(
-            "Loaded fold-4 Action-Delta Gate artifact: "
-            f"sha256={action_delta_gate_manifest['artifact_sha256']}, "
+            (
+                "Loaded frozen fold-4 Action-Delta predictor for "
+                "development shadow collection: "
+                if cfg.collect_action_delta_gate_shadow
+                else "Loaded fold-4 Action-Delta Gate artifact: "
+            )
+            + f"sha256={action_delta_gate_manifest['artifact_sha256']}, "
             f"tasks={action_delta_gate_manifest['held_out_task_ids']}",
             log_file,
         )
 
     raw_shadow_writer = None
+    action_delta_shadow_writer = None
+    shared_source_commit = None
+    shared_checkpoint_identity = None
     if cfg.collect_preconvergence_raw_shadow:
-        source_commit = current_source_commit()
-        checkpoint = checkpoint_identity(Path(cfg.pretrained_checkpoint))
+        shared_source_commit = current_source_commit()
+        shared_checkpoint_identity = checkpoint_identity(
+            Path(cfg.pretrained_checkpoint)
+        )
         raw_shadow_writer = RawPreconvergenceShardWriter(
             Path(cfg.preconvergence_raw_shadow_dir),
             shard_size=cfg.preconvergence_raw_shadow_shard_size,
             maximum_shadow_depth=cfg.preconvergence_raw_shadow_max_depth,
-            source_commit=source_commit,
-            checkpoint=checkpoint,
+            source_commit=shared_source_commit,
+            checkpoint=shared_checkpoint_identity,
             run_identity={
                 "run_id": run_id,
                 "evaluation_protocol_phase": cfg.evaluation_protocol_phase,
@@ -2447,6 +2717,102 @@ def eval_libero(cfg: GenerateConfig) -> float:
         )
         log_message(
             f"Raw preconvergence shadow collection enabled: {raw_shadow_writer.output_dir}",
+            log_file,
+        )
+    if cfg.collect_action_delta_gate_shadow:
+        if shared_source_commit is None:
+            shared_source_commit = current_source_commit()
+        if shared_checkpoint_identity is None:
+            shared_checkpoint_identity = checkpoint_identity(
+                Path(cfg.pretrained_checkpoint)
+            )
+        protocol_manifest, protocol_manifest_sha256 = load_protocol_manifest(
+            cfg.initial_state_manifest_path,
+            require_source_file_hashes=True,
+        )
+        expected_shadow_tasks = (
+            (int(cfg.task_id),)
+            if cfg.task_id is not None
+            else ACTION_DELTA_GATE_SHADOW_DEVELOPMENT_TASK_IDS
+        )
+        action_delta_shadow_writer = ActionDeltaGateShadowWriter(
+            Path(cfg.action_delta_gate_shadow_dir),
+            shard_size=cfg.action_delta_gate_shadow_shard_size,
+            expected_task_ids=expected_shadow_tasks,
+            expected_trajectories_per_task=10,
+            source_commit=shared_source_commit,
+            artifact_identity={
+                "path": str(Path(cfg.action_delta_gate_artifact_path).resolve()),
+                "sha256": action_delta_gate_manifest["artifact_sha256"],
+                "outer_fold": action_delta_gate_manifest["outer_fold"],
+                "model_type": action_delta_gate_manifest["model_type"],
+                "calibration_method": action_delta_gate_manifest[
+                    "calibration_method"
+                ],
+                "threshold": action_delta_gate_manifest["threshold"],
+                "held_out_task_ids": action_delta_gate_manifest[
+                    "held_out_task_ids"
+                ],
+            },
+            checkpoint_identity=shared_checkpoint_identity,
+            initial_state_manifest_identity={
+                "path": str(Path(cfg.initial_state_manifest_path).resolve()),
+                "sha256": protocol_manifest_sha256,
+                "protocol": protocol_manifest["protocol"],
+                "partition": "calibration",
+            },
+            configuration={
+                "task_suite_name": cfg.task_suite_name,
+                "task_ids": list(expected_shadow_tasks),
+                "evaluation_protocol_phase": cfg.evaluation_protocol_phase,
+                "official_manifest_states_per_task": 10,
+                "seed": int(cfg.seed),
+                "reset_rng_each_episode": bool(cfg.reset_rng_each_episode),
+                "warm_start": {
+                    "enabled": bool(cfg.use_warm_start),
+                    "source": cfg.warm_start_source,
+                    "minimum_iteration": int(cfg.warm_start_min_iter),
+                },
+                "recurrence": {
+                    "strategy": canonicalize_recurrence_strategy(
+                        cfg.recurrence_strategy
+                    ),
+                    "adjacent_action_mse_threshold": float(
+                        cfg.recurrence_kl_thresh
+                    ),
+                    "maximum_iteration": int(cfg.recurrence_max_iter),
+                    "use_cached_final_output": bool(
+                        cfg.use_cached_final_output
+                    ),
+                },
+                "gate": {
+                    "production_enabled": False,
+                    "shadow_only": True,
+                    "min_terminal_iteration": int(
+                        cfg.action_delta_gate_min_terminal_iter
+                    ),
+                    "threshold": float(
+                        action_delta_gate_manifest["threshold"]
+                    ),
+                    "artifact_sha256": action_delta_gate_manifest[
+                        "artifact_sha256"
+                    ],
+                },
+                "collection_mode": ACTION_DELTA_GATE_SHADOW_COLLECTION_MODE,
+                "collector_schema_version": (
+                    ACTION_DELTA_GATE_SHADOW_SCHEMA_VERSION
+                ),
+            },
+            run_identity={
+                "run_id": run_id,
+                "evaluation_protocol_phase": cfg.evaluation_protocol_phase,
+                "task_suite_name": cfg.task_suite_name,
+                "seed": int(cfg.seed),
+            },
+        )
+        log_message(
+            "Deployment-matched Action-Delta shadow collection enabled: "
+            f"{action_delta_shadow_writer.output_dir}; tasks={list(expected_shadow_tasks)}",
             log_file,
         )
 
@@ -2520,6 +2886,9 @@ def eval_libero(cfg: GenerateConfig) -> float:
             "exact_coda_audit": cfg.action_delta_gate_exact_coda_audit,
             "return_mode": cfg.action_delta_gate_return_mode,
         }
+        if cfg.collect_action_delta_gate_shadow:
+            full_results["action_delta_gate"]["shadow_collection_only"] = True
+            full_results["action_delta_gate"]["production_gate_enabled"] = False
 
     if cfg.evaluation_protocol_phase != "legacy":
         protocol_manifest, manifest_sha256 = load_protocol_manifest(
@@ -2546,6 +2915,13 @@ def eval_libero(cfg: GenerateConfig) -> float:
     if cfg.task_id is not None:
         task_ids = [cfg.task_id]
         log_message(f"Running only task {cfg.task_id}", log_file)
+    elif cfg.collect_action_delta_gate_shadow:
+        task_ids = ACTION_DELTA_GATE_SHADOW_DEVELOPMENT_TASK_IDS
+        log_message(
+            "Running Action-Delta shadow development tasks only: "
+            f"{list(task_ids)}",
+            log_file,
+        )
     else:
         start_task = getattr(cfg, 'start_task_id', 0)
         task_ids = range(start_task, num_tasks)
@@ -2581,11 +2957,18 @@ def eval_libero(cfg: GenerateConfig) -> float:
 
         if action_delta_gate_payload is not None:
             action_head_device = next(action_head.parameters()).device
-            prepared_action_delta_gate = prepare_action_delta_gate(
-                action_delta_gate_payload,
-                device=action_head_device,
-                task_id=int(task_id),
-            )
+            if cfg.collect_action_delta_gate_shadow:
+                prepared_action_delta_gate = prepare_action_delta_gate_shadow(
+                    action_delta_gate_payload,
+                    device=action_head_device,
+                    task_id=int(task_id),
+                )
+            else:
+                prepared_action_delta_gate = prepare_action_delta_gate(
+                    action_delta_gate_payload,
+                    device=action_head_device,
+                    task_id=int(task_id),
+                )
             action_head.configure_action_delta_gate(prepared_action_delta_gate)
             log_message(
                 "Bound Action-Delta Gate: "
@@ -2612,6 +2995,7 @@ def eval_libero(cfg: GenerateConfig) -> float:
             profile_state,
             timing_state,
             raw_shadow_writer,
+            action_delta_shadow_writer,
         )
         task = task_suite.get_task(task_id)
         full_results["tasks"][task.name] = task_stats
@@ -2624,6 +3008,48 @@ def eval_libero(cfg: GenerateConfig) -> float:
         raw_manifest_path = raw_shadow_writer.finalize()
         full_results["preconvergence_raw_shadow_manifest"] = str(raw_manifest_path)
         log_message(f"Finalized raw shadow manifest: {raw_manifest_path}", log_file)
+    if action_delta_shadow_writer is not None:
+        action_delta_shadow_manifest_path = action_delta_shadow_writer.finalize()
+        full_results["action_delta_gate_shadow_manifest"] = str(
+            action_delta_shadow_manifest_path
+        )
+        action_delta_shadow_summary = json.loads(
+            action_delta_shadow_manifest_path.read_text(encoding="utf-8")
+        )["summary"]
+        full_results["action_delta_gate_shadow_summary"] = (
+            action_delta_shadow_summary
+        )
+        for shadow_task_id, task_summary in action_delta_shadow_summary[
+            "by_task"
+        ].items():
+            log_message(
+                "Action-Delta shadow Phase-A summary: "
+                f"task={shadow_task_id}, trajectories={task_summary['trajectories']}, "
+                f"eligible_rows={task_summary['eligible_rows']}, "
+                f"predicted_triggers={task_summary['predicted_triggers']}, "
+                f"exact_safe_triggers={task_summary['exact_safe_triggers']}, "
+                f"false_safe_triggers={task_summary['false_safe_triggers']}, "
+                "false_safe_rate="
+                f"{task_summary['false_safe_rate_among_predicted_triggers']}",
+                log_file,
+            )
+        aggregate_shadow = action_delta_shadow_summary["aggregate"]
+        log_message(
+            "Action-Delta shadow Phase-A aggregate: "
+            f"trajectories={aggregate_shadow['trajectories']}, "
+            f"eligible_rows={aggregate_shadow['eligible_rows']}, "
+            f"predicted_triggers={aggregate_shadow['predicted_triggers']}, "
+            f"exact_safe_triggers={aggregate_shadow['exact_safe_triggers']}, "
+            f"false_safe_triggers={aggregate_shadow['false_safe_triggers']}, "
+            "false_safe_rate="
+            f"{aggregate_shadow['false_safe_rate_among_predicted_triggers']}",
+            log_file,
+        )
+        log_message(
+            "Finalized deployment-matched Action-Delta shadow manifest: "
+            f"{action_delta_shadow_manifest_path}",
+            log_file,
+        )
 
     final_success_rate = float(total_successes) / float(total_episodes) if total_episodes > 0 else 0
 

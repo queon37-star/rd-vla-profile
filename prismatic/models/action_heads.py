@@ -20,12 +20,18 @@ from prismatic.models.scalar_stopping_policy import (
     validate_scalar_runtime_configuration,
 )
 from prismatic.models.action_delta_gate import (
+    ACTION_DELTA_GATE_DIAGNOSTIC_RETURN_MODES,
     ActionDeltaGateCorrectionError,
     NonFiniteActionDeltaGateError,
     PreparedActionDeltaGate,
     build_action_delta_gate_corrected_output,
     evaluate_action_delta_gate,
     validate_action_delta_gate_runtime_configuration,
+)
+from prismatic.models.action_delta_gate_shadow import (
+    ACTION_DELTA_GATE_SHADOW_SCHEMA_VERSION,
+    build_action_delta_gate_shadow_transition,
+    validate_action_delta_gate_shadow_configuration,
 )
 from prismatic.models.action_head_workload import build_action_head_workload
 from prismatic.models.origin_aware_scheduler import (
@@ -630,6 +636,7 @@ class VLARecurrent(nn.Module):
                 action_delta_gate_min_terminal_iter: int = 2,
                 action_delta_gate_exact_coda_audit: bool = False,
                 action_delta_gate_return_mode: str = "anchor",
+                collect_action_delta_gate_shadow: bool = False,
                 **kwargs) -> torch.Tensor:
         requested_recurrence_strategy = convergence_strategy
         canonical_recurrence_strategy = canonicalize_recurrence_strategy(convergence_strategy)
@@ -700,6 +707,23 @@ class VLARecurrent(nn.Module):
             exact_coda_audit=action_delta_gate_exact_coda_audit,
             return_mode=action_delta_gate_return_mode,
         )
+        validate_action_delta_gate_shadow_configuration(
+            enabled=collect_action_delta_gate_shadow,
+            production_gate_enabled=use_action_delta_gate,
+            canonical_recurrence_strategy=canonical_recurrence_strategy,
+            prepared_gate=action_delta_gate,
+            batch_size=h_a.size(0),
+            use_warm_start=enable_warm_start,
+            warm_start_source=warm_start_source,
+            warm_start_min_iter=warm_start_min_iter,
+            use_latent_precheck=use_latent_precheck,
+            latent_precheck_mode=latent_precheck_mode,
+            latent_precheck_trace_level=latent_precheck_trace_level,
+            shadow_full_depth=shadow_full_depth,
+            collect_preconvergence_raw_shadow=collect_preconvergence_raw_shadow,
+            use_cached_final_output=use_cached_final_output,
+            min_terminal_iter=action_delta_gate_min_terminal_iter,
+        )
         if latent_precheck_mode == "origin_aware" and self.training:
             raise ValueError("latent_precheck_mode='origin_aware' is inference-only")
         if shadow_full_depth and self.training:
@@ -723,6 +747,8 @@ class VLARecurrent(nn.Module):
             raise ValueError("recurrence_strategy='scalar_policy' is inference-only")
         if use_action_delta_gate and self.training:
             raise ValueError("Action-Delta Gate is inference-only")
+        if collect_action_delta_gate_shadow and self.training:
+            raise ValueError("Action-Delta Gate shadow collection is inference-only")
 
         B = h_a.size(0)
         device, dtype = h_a.device, h_a.dtype
@@ -1007,6 +1033,18 @@ class VLARecurrent(nn.Module):
             action_delta_gate_fallback_reason = None
             action_delta_gate_score_trace = []
             action_delta_gate_predictor_ms_list = []
+            action_delta_gate_predicted_trigger_count = 0
+            action_delta_gate_exact_terminal_accepted_trigger_count = 0
+            action_delta_gate_oracle_confirm_accepted_count = 0
+            action_delta_gate_oracle_confirm_rejected_false_safe_count = 0
+            action_delta_gate_exact_confirmation_trace = []
+            action_delta_gate_diagnostic_coda_call_count = 0
+            action_delta_gate_diagnostic_coda_iterations = []
+            action_delta_gate_diagnostic_get_output_ms_list = []
+            action_delta_gate_mode_is_diagnostic = (
+                action_delta_gate_return_mode
+                in ACTION_DELTA_GATE_DIAGNOSTIC_RETURN_MODES
+            )
             action_delta_gate_exact_audit = {
                 "action_delta_gate_exact_audit_enabled": bool(
                     action_delta_gate_exact_coda_audit
@@ -1045,6 +1083,17 @@ class VLARecurrent(nn.Module):
                 "action_delta_gate_exact_audit_get_output_call_count": 0,
                 "action_delta_gate_exact_audit_error": None,
             }
+            action_delta_gate_shadow_applied = bool(
+                collect_action_delta_gate_shadow and cached_state_used
+            )
+            action_delta_gate_shadow_anchor_state = None
+            action_delta_gate_shadow_anchor_output = None
+            action_delta_gate_shadow_anchor_iteration = None
+            action_delta_gate_shadow_previous_latent_delta = None
+            action_delta_gate_shadow_transitions = []
+            action_delta_gate_shadow_error = None
+            action_delta_gate_shadow_exact_outputs = []
+            action_delta_gate_shadow_exact_output_iterations = []
 
             run_one_iteration_ms_list = []
             # Output timing lists include the final return-path call unless the
@@ -1126,7 +1175,48 @@ class VLARecurrent(nn.Module):
 
                         action_mse = None
                         action_l2 = None
+                        action_delta_gate_diagnostic_trigger_pending = None
+                        gate_predicted_delta = None
+                        action_delta_gate_shadow_pending = None
                         with rdvla_range("RDVLA/action_head/coda_stop_check_total"):
+                            if (
+                                should_call_coda
+                                and action_delta_gate_shadow_applied
+                                and action_delta_gate_shadow_error is None
+                                and action_delta_gate_shadow_anchor_state is not None
+                                and actual_iter >= action_delta_gate_min_terminal_iter
+                            ):
+                                try:
+                                    (
+                                        shadow_gate_score,
+                                        _shadow_predicted_trigger,
+                                        shadow_predicted_delta,
+                                    ) = evaluate_action_delta_gate(
+                                        action_delta_gate,
+                                        action_delta_gate_shadow_anchor_state,
+                                        state,
+                                        return_pred_delta=True,
+                                    )
+                                    action_delta_gate_shadow_pending = {
+                                        "anchor_iteration": int(
+                                            action_delta_gate_shadow_anchor_iteration
+                                        ),
+                                        "terminal_iteration": int(actual_iter),
+                                        "anchor_state": action_delta_gate_shadow_anchor_state,
+                                        "current_state": state.detach(),
+                                        "anchor_output": action_delta_gate_shadow_anchor_output,
+                                        "predicted_delta": shadow_predicted_delta,
+                                        "score": float(shadow_gate_score),
+                                        "previous_latent_delta_bfloat16": (
+                                            action_delta_gate_shadow_previous_latent_delta
+                                        ),
+                                    }
+                                except Exception as exc:
+                                    # Shadow instrumentation must never alter the
+                                    # exact Warm-only recurrence path.
+                                    action_delta_gate_shadow_error = (
+                                        f"{type(exc).__name__}: {exc}"
+                                    )
                             if (
                                 should_call_coda
                                 and action_delta_gate_enabled_for_prediction
@@ -1138,7 +1228,6 @@ class VLARecurrent(nn.Module):
                                     if profile_coda_cost
                                     else None
                                 )
-                                gate_predicted_delta = None
                                 try:
                                     with rdvla_range(
                                         "RDVLA/action_head/action_delta_gate_total"
@@ -1193,7 +1282,15 @@ class VLARecurrent(nn.Module):
                                     }
                                 )
                                 if gate_triggered:
-                                    if (
+                                    action_delta_gate_predicted_trigger_count += 1
+                                    if action_delta_gate_mode_is_diagnostic:
+                                        # Diagnostic control modes deliberately
+                                        # execute the current exact Coda through
+                                        # the normal recurrence path below.
+                                        action_delta_gate_diagnostic_trigger_pending = (
+                                            action_delta_gate_return_mode
+                                        )
+                                    elif (
                                         action_delta_gate_return_mode
                                         == "predicted_correction"
                                     ):
@@ -1212,7 +1309,7 @@ class VLARecurrent(nn.Module):
                                         action_delta_gate_return_output = (
                                             action_delta_gate_anchor_output
                                         )
-                                if gate_triggered:
+                                if gate_triggered and not action_delta_gate_mode_is_diagnostic:
                                     action_delta_gate_triggered = True
                                     action_delta_gate_terminal_iteration = int(
                                         actual_iter
@@ -1295,9 +1392,30 @@ class VLARecurrent(nn.Module):
                                             profile=profile_coda_cost,
                                         )
                                         get_output_call_count += 1
+                                if collect_action_delta_gate_shadow:
+                                    action_delta_gate_shadow_exact_outputs.append(
+                                        curr_output.detach()
+                                    )
+                                    action_delta_gate_shadow_exact_output_iterations.append(
+                                        int(actual_iter)
+                                    )
                                 if profile_coda_cost:
                                     append_get_output_timing()
                                     convergence_check_start = self._sync_time()
+
+                                if action_delta_gate_diagnostic_trigger_pending is not None:
+                                    action_delta_gate_diagnostic_coda_call_count += 1
+                                    action_delta_gate_diagnostic_coda_iterations.append(
+                                        int(actual_iter)
+                                    )
+                                    if profile_coda_cost:
+                                        action_delta_gate_diagnostic_get_output_ms_list.append(
+                                            float(
+                                                self._last_get_output_timing[
+                                                    "get_output_ms"
+                                                ]
+                                            )
+                                        )
 
                                 if prev_output is not None:
                                     with rdvla_range("RDVLA/action_head/stop_check/mse_compute"):
@@ -1341,8 +1459,9 @@ class VLARecurrent(nn.Module):
                                                     with rdvla_range("RDVLA/action_head/stop_reason_update"):
                                                         adaptive_stop = True
                                                         stop_reason = "cosine_similarity"
-                                                else:
-                                                    min_iter_gate_block_count += 1
+                                            else:
+                                                min_iter_gate_block_count += 1
+
                                         elif canonical_recurrence_strategy == "adjacent_action_mse":
                                             final_kl = action_mse
                                             if action_mse < kl_thresh:
@@ -1358,6 +1477,140 @@ class VLARecurrent(nn.Module):
                                                         )
                                                 else:
                                                     min_iter_gate_block_count += 1
+
+                                if action_delta_gate_shadow_pending is not None:
+                                    try:
+                                        action_delta_gate_shadow_transitions.append(
+                                            build_action_delta_gate_shadow_transition(
+                                                action_delta_gate,
+                                                anchor_iteration=action_delta_gate_shadow_pending[
+                                                    "anchor_iteration"
+                                                ],
+                                                terminal_iteration=actual_iter,
+                                                anchor_state=action_delta_gate_shadow_pending[
+                                                    "anchor_state"
+                                                ],
+                                                current_state=action_delta_gate_shadow_pending[
+                                                    "current_state"
+                                                ],
+                                                anchor_output=action_delta_gate_shadow_pending[
+                                                    "anchor_output"
+                                                ],
+                                                current_output=curr_output,
+                                                predicted_delta=action_delta_gate_shadow_pending[
+                                                    "predicted_delta"
+                                                ],
+                                                score=action_delta_gate_shadow_pending[
+                                                    "score"
+                                                ],
+                                                exact_adjacent_action_mse=action_mse,
+                                                recurrence_mse_threshold=kl_thresh,
+                                                previous_transition=(
+                                                    action_delta_gate_shadow_transitions[-1]
+                                                    if action_delta_gate_shadow_transitions
+                                                    else None
+                                                ),
+                                                previous_latent_delta_bfloat16=(
+                                                    action_delta_gate_shadow_pending[
+                                                        "previous_latent_delta_bfloat16"
+                                                    ]
+                                                ),
+                                            )
+                                        )
+                                    except Exception as exc:
+                                        action_delta_gate_shadow_error = (
+                                            f"{type(exc).__name__}: {exc}"
+                                        )
+
+                                if action_delta_gate_diagnostic_trigger_pending is not None:
+                                    exact_safe = bool(
+                                        action_mse is not None
+                                        and action_mse < kl_thresh
+                                        and actual_iter >= effective_min_iter
+                                    )
+                                    confirmation_record = {
+                                        "mode": str(
+                                            action_delta_gate_diagnostic_trigger_pending
+                                        ),
+                                        "anchor_iteration": int(
+                                            action_delta_gate_anchor_iteration
+                                        ),
+                                        "terminal_iteration": int(actual_iter),
+                                        "exact_adjacent_mse": (
+                                            float(action_mse)
+                                            if action_mse is not None
+                                            else None
+                                        ),
+                                        "exact_safe": exact_safe,
+                                        "accepted": False,
+                                    }
+
+                                    if action_delta_gate_exact_coda_audit:
+                                        action_delta_gate_exact_audit.update(
+                                            {
+                                                "action_delta_gate_exact_audit_performed": True,
+                                                "action_delta_gate_exact_audit_anchor_iteration": int(
+                                                    action_delta_gate_anchor_iteration
+                                                ),
+                                                "action_delta_gate_exact_audit_terminal_iteration": int(
+                                                    actual_iter
+                                                ),
+                                                # The diagnostic control mode's
+                                                # exact Coda is reused; there is
+                                                # no additional audit-only call.
+                                                "action_delta_gate_exact_audit_get_output_call_count": 0,
+                                                "action_delta_gate_exact_audit_get_output_ms": 0.0,
+                                            }
+                                        )
+                                        try:
+                                            action_delta_gate_exact_audit.update(
+                                                _action_delta_gate_exact_audit_metrics(
+                                                    action_delta_gate_anchor_output,
+                                                    curr_output,
+                                                    gate_predicted_delta,
+                                                )
+                                            )
+                                        except Exception as exc:
+                                            action_delta_gate_exact_audit[
+                                                "action_delta_gate_exact_audit_error"
+                                            ] = f"{type(exc).__name__}: {exc}"
+
+                                    if (
+                                        action_delta_gate_diagnostic_trigger_pending
+                                        == "exact_terminal"
+                                    ):
+                                        confirmation_record["accepted"] = True
+                                        action_delta_gate_exact_terminal_accepted_trigger_count += 1
+                                        action_delta_gate_triggered = True
+                                        action_delta_gate_terminal_iteration = int(
+                                            actual_iter
+                                        )
+                                        action_delta_gate_returned_action_source_iteration = int(
+                                            actual_iter
+                                        )
+                                        action_delta_gate_return_output = curr_output
+                                        adaptive_stop = True
+                                        stop_reason = "action_delta_gate"
+                                    elif exact_safe:
+                                        confirmation_record["accepted"] = True
+                                        action_delta_gate_oracle_confirm_accepted_count += 1
+                                        action_delta_gate_triggered = True
+                                        action_delta_gate_terminal_iteration = int(
+                                            actual_iter
+                                        )
+                                        action_delta_gate_returned_action_source_iteration = int(
+                                            actual_iter
+                                        )
+                                        action_delta_gate_return_output = curr_output
+                                        # The normal adjacent-action-MSE branch
+                                        # above already applied the original
+                                        # adaptive-stop reason and semantics.
+                                    else:
+                                        action_delta_gate_oracle_confirm_rejected_false_safe_count += 1
+
+                                    action_delta_gate_exact_confirmation_trace.append(
+                                        confirmation_record
+                                    )
 
                                 if shadow_full_depth:
                                     shadow_trace_records.append(
@@ -1401,6 +1654,21 @@ class VLARecurrent(nn.Module):
                                     raw_production_actions.append(curr_output.detach())
 
                                 prev_output = curr_output.detach()
+                                if action_delta_gate_shadow_applied:
+                                    # This diagnostic anchor follows every exact
+                                    # Coda, including all iterations before
+                                    # eligibility.  It is independent of the
+                                    # production gate and legacy prev_state.
+                                    if action_delta_gate_shadow_anchor_state is not None:
+                                        action_delta_gate_shadow_previous_latent_delta = (
+                                            state.float()
+                                            - action_delta_gate_shadow_anchor_state.float()
+                                        ).to(torch.bfloat16).detach()
+                                    action_delta_gate_shadow_anchor_state = state.detach()
+                                    action_delta_gate_shadow_anchor_output = curr_output.detach()
+                                    action_delta_gate_shadow_anchor_iteration = int(
+                                        actual_iter
+                                    )
                                 if (
                                     action_delta_gate_enabled_for_prediction
                                     and not adaptive_stop
@@ -1550,10 +1818,46 @@ class VLARecurrent(nn.Module):
                     else None
                 ),
                 "action_delta_gate_score_trace": action_delta_gate_score_trace,
+                "action_delta_gate_predicted_trigger_count": int(
+                    action_delta_gate_predicted_trigger_count
+                ),
+                "action_delta_gate_exact_terminal_accepted_trigger_count": int(
+                    action_delta_gate_exact_terminal_accepted_trigger_count
+                ),
+                "action_delta_gate_oracle_confirm_accepted_count": int(
+                    action_delta_gate_oracle_confirm_accepted_count
+                ),
+                "action_delta_gate_oracle_confirm_rejected_false_safe_count": int(
+                    action_delta_gate_oracle_confirm_rejected_false_safe_count
+                ),
+                "action_delta_gate_exact_confirmation_trace": (
+                    action_delta_gate_exact_confirmation_trace
+                ),
+                "action_delta_gate_diagnostic_coda_call_count": int(
+                    action_delta_gate_diagnostic_coda_call_count
+                ),
+                "action_delta_gate_diagnostic_coda_iterations": (
+                    action_delta_gate_diagnostic_coda_iterations
+                ),
+                "action_delta_gate_diagnostic_get_output_ms_list": (
+                    action_delta_gate_diagnostic_get_output_ms_list
+                ),
+                "action_delta_gate_diagnostic_get_output_ms_total": sum(
+                    action_delta_gate_diagnostic_get_output_ms_list
+                ),
+                "action_delta_gate_mode_is_diagnostic": bool(
+                    action_delta_gate_mode_is_diagnostic
+                ),
+                "action_delta_gate_efficiency_eligible": bool(
+                    not action_delta_gate_mode_is_diagnostic
+                ),
                 "action_delta_gate_triggered": action_delta_gate_triggered,
                 "action_delta_gate_anchor_iteration": (
                     action_delta_gate_returned_action_source_iteration
-                    if action_delta_gate_triggered
+                    if (
+                        action_delta_gate_triggered
+                        and not action_delta_gate_mode_is_diagnostic
+                    )
                     else action_delta_gate_anchor_iteration
                 ),
                 "action_delta_gate_terminal_iteration": action_delta_gate_terminal_iteration,
@@ -1562,6 +1866,7 @@ class VLARecurrent(nn.Module):
                 ),
                 "action_delta_gate_skipped_coda_count": int(
                     action_delta_gate_triggered
+                    and not action_delta_gate_mode_is_diagnostic
                 ),
                 "action_delta_gate_returned_predicted_correction": bool(
                     action_delta_gate_triggered
@@ -1578,6 +1883,21 @@ class VLARecurrent(nn.Module):
                 "action_delta_gate_predictor_ms_total": sum(
                     action_delta_gate_predictor_ms_list
                 ),
+                "collect_action_delta_gate_shadow": bool(
+                    collect_action_delta_gate_shadow
+                ),
+                "action_delta_gate_shadow_applied": bool(
+                    action_delta_gate_shadow_applied
+                ),
+                "action_delta_gate_shadow_schema_version": (
+                    ACTION_DELTA_GATE_SHADOW_SCHEMA_VERSION
+                    if collect_action_delta_gate_shadow
+                    else None
+                ),
+                "action_delta_gate_shadow_eligible_row_count": len(
+                    action_delta_gate_shadow_transitions
+                ),
+                "action_delta_gate_shadow_error": action_delta_gate_shadow_error,
                 **action_delta_gate_exact_audit,
                 "action_delta_gate_returned_previous_coda": bool(
                     action_delta_gate_triggered
@@ -1624,7 +1944,10 @@ class VLARecurrent(nn.Module):
                 "stop_reason": stop_reason,
                 "canonical_stop_reason": (
                     "action_delta_gate"
-                    if action_delta_gate_triggered
+                    if (
+                        action_delta_gate_triggered
+                        and action_delta_gate_return_mode != "oracle_confirm"
+                    )
                     else (
                         canonical_recurrence_strategy
                         if adaptive_stop
@@ -1634,8 +1957,14 @@ class VLARecurrent(nn.Module):
                 "coda_call_count": int(get_output_call_count),
                 "get_output_call_count": int(get_output_call_count),
                 "final_state_coda_executed": bool(
-                    not action_delta_gate_triggered
-                    and not reuse_terminal_output
+                    (
+                        action_delta_gate_triggered
+                        and action_delta_gate_mode_is_diagnostic
+                    )
+                    or (
+                        not action_delta_gate_triggered
+                        and not reuse_terminal_output
+                    )
                 ),
                 "returned_cached_final_output": reuse_terminal_output,
                 "profiling_enabled": bool(profile_coda_cost),
@@ -1689,6 +2018,47 @@ class VLARecurrent(nn.Module):
                         coda_ms_total / profiled_recurrent_ms_total if profiled_recurrent_ms_total else 0.0
                     ),
                 })
+
+            if collect_action_delta_gate_shadow:
+                exact_outputs = [
+                    capture_raw_shadow_tensor(value)
+                    for value in action_delta_gate_shadow_exact_outputs
+                ]
+                self.last_inference_metadata["action_delta_gate_shadow"] = {
+                    "schema_version": ACTION_DELTA_GATE_SHADOW_SCHEMA_VERSION,
+                    "collection_applied": bool(action_delta_gate_shadow_applied),
+                    "ineligible_reason": (
+                        None
+                        if action_delta_gate_shadow_applied
+                        else "cold_origin"
+                    ),
+                    "min_terminal_iteration": int(
+                        action_delta_gate_min_terminal_iter
+                    ),
+                    "gate_threshold": float(action_delta_gate.threshold),
+                    "transitions": action_delta_gate_shadow_transitions,
+                    "error": action_delta_gate_shadow_error,
+                    "production_trace": {
+                        "K_t": int(actual_iter),
+                        "stop_reason": stop_reason,
+                        "adaptive_stop": bool(adaptive_stop),
+                        "returned_normalized_action": capture_raw_shadow_tensor(
+                            final_output
+                        ),
+                        "exact_coda_output_iterations": (
+                            action_delta_gate_shadow_exact_output_iterations
+                        ),
+                        "exact_coda_outputs": (
+                            torch.stack(exact_outputs, dim=0)
+                            if exact_outputs
+                            else torch.empty(0)
+                        ),
+                        "exact_coda_call_count": int(get_output_call_count),
+                        "iteration_mse": [
+                            float(value) for value in conv_score_list
+                        ],
+                    },
+                }
 
             if shadow_full_depth and shadow_error is None:
                 shadow_start_output = (
@@ -2044,6 +2414,7 @@ class ActionHeadRecurrent(nn.Module):
                        action_delta_gate_min_terminal_iter=2,
                        action_delta_gate_exact_coda_audit=False,
                        action_delta_gate_return_mode="anchor",
+                       collect_action_delta_gate_shadow=False,
                        **kwargs):
         canonical_recurrence_strategy = canonicalize_recurrence_strategy(
             convergence_strategy
@@ -2061,7 +2432,9 @@ class ActionHeadRecurrent(nn.Module):
             scalar_task_policy,
             scalar_policy_execution_mode,
         )
-        if use_action_delta_gate and action_delta_gate is None:
+        if (
+            use_action_delta_gate or collect_action_delta_gate_shadow
+        ) and action_delta_gate is None:
             action_delta_gate = self._action_delta_gate
         validate_latent_only_configuration(
             convergence_strategy,
@@ -2161,6 +2534,9 @@ class ActionHeadRecurrent(nn.Module):
                                  ),
                                  action_delta_gate_return_mode=(
                                      action_delta_gate_return_mode
+                                 ),
+                                 collect_action_delta_gate_shadow=(
+                                     collect_action_delta_gate_shadow
                                  ))
             if capture_action_head_workload:
                 metadata = self.model.last_inference_metadata

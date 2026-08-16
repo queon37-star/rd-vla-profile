@@ -26,7 +26,19 @@ ACTION_DELTA_GATE_ACTION_DIM = 7
 ACTION_DELTA_GATE_CHUNK_LEN = 8
 ACTION_DELTA_GATE_OUTER_FOLD = 4
 ACTION_DELTA_GATE_HELD_OUT_TASK_IDS = (4, 5)
-ACTION_DELTA_GATE_RETURN_MODES = ("anchor", "predicted_correction")
+ACTION_DELTA_GATE_SHADOW_CALIBRATION_TASK_IDS = (0, 1, 2, 3, 6, 7, 8, 9)
+ACTION_DELTA_GATE_PRODUCTION_RETURN_MODES = (
+    "anchor",
+    "predicted_correction",
+)
+ACTION_DELTA_GATE_DIAGNOSTIC_RETURN_MODES = (
+    "exact_terminal",
+    "oracle_confirm",
+)
+ACTION_DELTA_GATE_RETURN_MODES = (
+    ACTION_DELTA_GATE_PRODUCTION_RETURN_MODES
+    + ACTION_DELTA_GATE_DIAGNOSTIC_RETURN_MODES
+)
 
 
 class ActionDeltaGateError(ValueError):
@@ -248,6 +260,62 @@ def prepare_action_delta_gate(
         action_dim=int(payload["action_dim"]),
         action_chunk_len=int(payload["action_chunk_len"]),
         held_out_task_ids=held_out,
+        outer_fold=int(payload["outer_fold"]),
+        threshold=float(payload["threshold"]),
+        x_mean=move("x_mean"),
+        x_std=move("x_std"),
+        y_mean=move("y_mean"),
+        y_std=move("y_std"),
+        linear_weight=move("linear_weight"),
+        linear_bias=move("linear_bias"),
+        delta_quantization_dtype=str(payload["delta_quantization_dtype"]),
+        training_seed=int(payload["training_seed"]),
+        calibration_method=str(payload["calibration_method"]),
+    )
+
+
+def prepare_action_delta_gate_shadow(
+    payload: Mapping[str, Any],
+    *,
+    device: torch.device | str,
+    task_id: int,
+) -> PreparedActionDeltaGate:
+    """Prepare the frozen fold-4 predictor for development-task shadow data.
+
+    Production preparation remains restricted to the artifact's held-out tasks
+    4 and 5.  This separate diagnostic entry point does the inverse: it accepts
+    only the eight development tasks and can never authorize production gate
+    inference.
+    """
+
+    _require(
+        isinstance(task_id, int) and not isinstance(task_id, bool),
+        "Action-Delta Gate shadow task_id must be an integer",
+    )
+    _require(
+        task_id in ACTION_DELTA_GATE_SHADOW_CALIBRATION_TASK_IDS,
+        "Action-Delta Gate shadow collection permits only development tasks "
+        f"{ACTION_DELTA_GATE_SHADOW_CALIBRATION_TASK_IDS}",
+    )
+    # Reuse the exact artifact validation and tensor materialization contract.
+    # The task identity check above is the only intentional difference from
+    # prepare_action_delta_gate().
+    validate_action_delta_gate_artifact(payload)
+    target_device = torch.device(device)
+
+    def move(name: str) -> torch.Tensor:
+        return payload[name].detach().to(
+            device=target_device, dtype=torch.float32
+        ).contiguous().clone()
+
+    return PreparedActionDeltaGate(
+        schema_version=int(payload["schema_version"]),
+        artifact_type=str(payload["artifact_type"]),
+        model_type=str(payload["model_type"]),
+        hidden_dim=int(payload["hidden_dim"]),
+        action_dim=int(payload["action_dim"]),
+        action_chunk_len=int(payload["action_chunk_len"]),
+        held_out_task_ids=tuple(int(value) for value in payload["held_out_task_ids"]),
         outer_fold=int(payload["outer_fold"]),
         threshold=float(payload["threshold"]),
         x_mean=move("x_mean"),

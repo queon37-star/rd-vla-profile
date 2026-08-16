@@ -495,6 +495,13 @@ def get_vla_action(
                             "action_delta_gate_return_mode",
                             "anchor",
                         ),
+                        collect_action_delta_gate_shadow=bool(
+                            getattr(
+                                cfg,
+                                "collect_action_delta_gate_shadow",
+                                False,
+                            )
+                        ),
                     )
                     recurrence_debug = getattr(getattr(action_head, "model", None), "last_recurrence_debug", None)
                     action_head_inference_metadata = (
@@ -510,6 +517,9 @@ def get_vla_action(
             "action_head_workload": action_head_inference_metadata.get("action_head_workload"),
             "preconvergence_raw_shadow": action_head_inference_metadata.get(
                 "preconvergence_raw_shadow"
+            ),
+            "action_delta_gate_shadow": action_head_inference_metadata.get(
+                "action_delta_gate_shadow"
             ),
             "warm_start": {
                 "enabled": bool(getattr(cfg, "use_warm_start", False)),

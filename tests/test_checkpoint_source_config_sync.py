@@ -9,6 +9,7 @@ from experiments.robot import openvla_utils
 from experiments.robot.libero.run_libero_eval import (
     GenerateConfig,
     build_action_delta_gate_log_fields,
+    summarize_action_delta_gate,
 )
 
 
@@ -164,6 +165,7 @@ def test_get_vla_passes_disabled_sync_setting(monkeypatch):
 def test_generate_config_and_draccus_boolean_contract():
     assert GenerateConfig().sync_checkpoint_source_config is True
     assert GenerateConfig().action_delta_gate_return_mode == "anchor"
+    assert GenerateConfig().collect_action_delta_gate_shadow is False
 
     parser = draccus.argparsing.ArgumentParser(
         config_class=GenerateConfig,
@@ -187,3 +189,50 @@ def test_action_delta_gate_return_metadata_is_extracted_for_step_logs():
     assert fields["action_delta_gate_return_mode"] == "predicted_correction"
     assert fields["action_delta_gate_returned_predicted_correction"] is True
     assert fields["action_delta_gate_returned_anchor"] is False
+
+
+def test_action_delta_gate_diagnostic_metadata_cannot_report_coda_savings():
+    fields = build_action_delta_gate_log_fields(
+        {
+            "action_delta_gate_requested": True,
+            "action_delta_gate_applied": True,
+            "action_delta_gate_return_mode": "oracle_confirm",
+            "action_delta_gate_triggered": True,
+            "action_delta_gate_predicted_trigger_count": 2,
+            "action_delta_gate_oracle_confirm_accepted_count": 1,
+            "action_delta_gate_oracle_confirm_rejected_false_safe_count": 1,
+            "action_delta_gate_diagnostic_coda_call_count": 2,
+            "action_delta_gate_skipped_coda_count": 0,
+            "action_delta_gate_mode_is_diagnostic": True,
+            "action_delta_gate_efficiency_eligible": False,
+            "action_delta_gate_exact_confirmation_trace": [
+                {
+                    "terminal_iteration": 2,
+                    "exact_adjacent_mse": 1.0,
+                    "accepted": False,
+                },
+                {
+                    "terminal_iteration": 3,
+                    "exact_adjacent_mse": 0.0,
+                    "accepted": True,
+                },
+            ],
+        }
+    )
+
+    assert fields["action_delta_gate_return_mode"] == "oracle_confirm"
+    assert fields["action_delta_gate_predicted_trigger_count"] == 2
+    assert fields["action_delta_gate_oracle_confirm_accepted_count"] == 1
+    assert fields[
+        "action_delta_gate_oracle_confirm_rejected_false_safe_count"
+    ] == 1
+    assert fields["action_delta_gate_diagnostic_coda_call_count"] == 2
+    assert fields["action_delta_gate_efficiency_eligible"] is False
+    summary = summarize_action_delta_gate([fields])
+    assert summary["trigger_count"] == 0
+    assert summary["skipped_coda_count"] == 0
+    assert summary["predicted_gate_trigger_count"] == 2
+    assert summary["oracle_confirm_accepted_count"] == 1
+    assert summary["oracle_confirm_rejected_false_safe_count"] == 1
+    assert summary["diagnostic_mode_prediction_count"] == 1
+    assert summary["diagnostic_coda_call_count"] == 2
