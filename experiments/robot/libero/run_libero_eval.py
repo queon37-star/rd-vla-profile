@@ -218,6 +218,7 @@ class GenerateConfig:
     action_delta_gate_artifact_path: str = ""
     action_delta_gate_expected_sha256: str = ""
     action_delta_gate_max_skip: int = 1
+    action_delta_gate_min_terminal_iter: int = 2
 
     # Disabled-by-default warm-start inference settings.
     use_warm_start: bool = False
@@ -436,6 +437,15 @@ def validate_config(cfg: GenerateConfig) -> None:
             raise ValueError("Action-Delta Gate cannot collect shadow trajectories")
         if cfg.action_delta_gate_max_skip != 1:
             raise ValueError("Action-Delta Gate Phase B requires max_skip=1")
+        if (
+            not isinstance(cfg.action_delta_gate_min_terminal_iter, int)
+            or isinstance(cfg.action_delta_gate_min_terminal_iter, bool)
+            or cfg.action_delta_gate_min_terminal_iter < 2
+        ):
+            raise ValueError(
+                "Action-Delta Gate minimum terminal iteration must be "
+                "an integer >= 2"
+            )
         if not cfg.use_cached_final_output:
             raise ValueError(
                 "Action-Delta Gate Phase B requires use_cached_final_output=True"
@@ -842,6 +852,14 @@ def build_action_delta_gate_log_fields(debug):
         ),
         "action_delta_gate_score_call_count": _as_int(
             debug.get("action_delta_gate_score_call_count")
+        ),
+        "action_delta_gate_min_terminal_iter": _as_int(
+            debug.get("action_delta_gate_min_terminal_iter")
+        ),
+        "action_delta_gate_first_eligible_terminal_iteration": _as_int(
+            debug.get(
+                "action_delta_gate_first_eligible_terminal_iteration"
+            )
         ),
         "action_delta_gate_score_trace": debug.get(
             "action_delta_gate_score_trace", []
@@ -2331,6 +2349,7 @@ def eval_libero(cfg: GenerateConfig) -> float:
             "calibration_method": action_delta_gate_manifest["calibration_method"],
             "threshold": action_delta_gate_manifest["threshold"],
             "max_skip": cfg.action_delta_gate_max_skip,
+            "min_terminal_iter": cfg.action_delta_gate_min_terminal_iter,
         }
 
     if cfg.evaluation_protocol_phase != "legacy":

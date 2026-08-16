@@ -335,6 +335,7 @@ def validate_action_delta_gate_runtime_configuration(
     collect_preconvergence_raw_shadow: bool,
     use_cached_final_output: bool,
     max_skip: int,
+    min_terminal_iter: int,
 ) -> None:
     if not enabled:
         return
@@ -351,3 +352,9 @@ def validate_action_delta_gate_runtime_configuration(
     _require(not collect_preconvergence_raw_shadow, "Action-Delta Gate cannot collect raw shadow trajectories")
     _require(use_cached_final_output, "Action-Delta Gate Phase B requires use_cached_final_output=True")
     _require(max_skip == 1, "Action-Delta Gate Phase B requires max_skip=1")
+    _require(
+        isinstance(min_terminal_iter, int)
+        and not isinstance(min_terminal_iter, bool)
+        and min_terminal_iter >= 2,
+        "Action-Delta Gate minimum terminal iteration must be an integer >= 2",
+    )

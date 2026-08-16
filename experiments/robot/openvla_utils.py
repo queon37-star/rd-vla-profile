@@ -480,6 +480,9 @@ def get_vla_action(
                         action_delta_gate_max_skip=getattr(
                             cfg, "action_delta_gate_max_skip", 1
                         ),
+                        action_delta_gate_min_terminal_iter=getattr(
+                            cfg, "action_delta_gate_min_terminal_iter", 2
+                        ),
                     )
                     recurrence_debug = getattr(getattr(action_head, "model", None), "last_recurrence_debug", None)
                     action_head_inference_metadata = (

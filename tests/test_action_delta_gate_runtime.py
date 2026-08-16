@@ -5,6 +5,7 @@ import types
 import pytest
 import torch
 
+import prismatic.models.action_heads as action_heads_module
 from prismatic.models.action_delta_gate import (
     ACTION_DELTA_GATE_ARTIFACT_TYPE,
     ACTION_DELTA_GATE_CALIBRATION_METHOD,
@@ -55,6 +56,7 @@ def make_model(*, nonfinite_iteration=None):
     )
     model = VLARecurrent(cfg).eval()
     model.test_coda_calls = 0
+    model.test_coda_states = []
     model.test_iteration = 0
 
     def init_state(self, batch_size, device, dtype):
@@ -70,6 +72,7 @@ def make_model(*, nonfinite_iteration=None):
 
     def get_output(self, state, *args, profile=False):
         self.test_coda_calls += 1
+        self.test_coda_states.append(state.detach().clone())
         if profile:
             self._last_get_output_timing = {
                 "get_output_ms": 0.3,
@@ -113,14 +116,27 @@ def test_gate_disabled_preserves_baseline_and_does_not_score():
     supported = copy.deepcopy(baseline)
     warm = torch.zeros(1, 2, 4, dtype=torch.bfloat16)
     kwargs = gate_kwargs(make_gate())
-    kwargs.update(use_action_delta_gate=False, action_delta_gate=None, kl_thresh=2.0)
+    kwargs.update(
+        use_action_delta_gate=False,
+        action_delta_gate=None,
+        kl_thresh=2.0,
+    )
 
     first = baseline(*inputs(), warm_start_state=warm, **kwargs)
-    second = supported(*inputs(), warm_start_state=warm, **kwargs)
+    second = supported(
+        *inputs(),
+        warm_start_state=warm,
+        action_delta_gate_min_terminal_iter=5,
+        **kwargs,
+    )
     torch.testing.assert_close(first[0], second[0], rtol=0, atol=0)
     assert first[1:] == second[1:]
     assert baseline.test_coda_calls == supported.test_coda_calls == 2
     assert baseline.last_recurrence_debug["action_delta_gate_score_call_count"] == 0
+    assert supported.last_recurrence_debug["action_delta_gate_score_call_count"] == 0
+    assert supported.last_recurrence_debug[
+        "action_delta_gate_first_eligible_terminal_iteration"
+    ] is None
 
 
 def test_cold_origin_uses_normal_coda_and_captures_midpoint_candidate():
@@ -139,6 +155,8 @@ def test_cold_origin_uses_normal_coda_and_captures_midpoint_candidate():
     assert debug["action_delta_gate_requested"] is True
     assert debug["action_delta_gate_applied"] is False
     assert debug["action_delta_gate_score_call_count"] == 0
+    assert debug["action_delta_gate_min_terminal_iter"] == 2
+    assert debug["action_delta_gate_first_eligible_terminal_iteration"] is None
     assert model.last_inference_metadata["warm_start"]["candidate_state_count"] == 2
 
 
@@ -185,6 +203,8 @@ def test_warm_below_threshold_skips_one_coda_and_returns_previous_exact_output()
     assert debug["action_delta_gate_returned_action_source_iteration"] == 1
     assert debug["action_delta_gate_skipped_coda_count"] == 1
     assert debug["action_delta_gate_returned_previous_coda"] is True
+    assert debug["action_delta_gate_min_terminal_iter"] == 2
+    assert debug["action_delta_gate_first_eligible_terminal_iteration"] == 2
     assert debug["final_state_coda_executed"] is False
     assert debug["returned_cached_final_output"] is False
     assert debug["coda_call_count"] == model.test_coda_calls
@@ -197,6 +217,164 @@ def test_warm_below_threshold_skips_one_coda_and_returns_previous_exact_output()
     assert debug["action_delta_gate_predictor_ms_total"] >= 0.0
     assert model.last_inference_metadata["warm_start"]["candidate_state_count"] == 2
     json.dumps(debug, allow_nan=False)
+
+
+def test_min_terminal_two_matches_default_gate_behavior():
+    default_model = make_model()
+    explicit_model = make_model()
+    warm = torch.zeros(1, 2, 4, dtype=torch.bfloat16)
+    kwargs = gate_kwargs(make_gate(predicted_delta=0.0))
+
+    default_result = default_model(
+        *inputs(), warm_start_state=warm, kl_thresh=0.001, **kwargs
+    )
+    explicit_result = explicit_model(
+        *inputs(),
+        warm_start_state=warm,
+        kl_thresh=0.001,
+        action_delta_gate_min_terminal_iter=2,
+        **kwargs,
+    )
+
+    torch.testing.assert_close(default_result[0], explicit_result[0], rtol=0, atol=0)
+    assert default_result[1:] == explicit_result[1:]
+    for key in (
+        "K_t",
+        "stop_reason",
+        "action_delta_gate_score_call_count",
+        "action_delta_gate_anchor_iteration",
+        "action_delta_gate_terminal_iteration",
+        "action_delta_gate_returned_action_source_iteration",
+        "action_delta_gate_skipped_coda_count",
+        "coda_call_count",
+        "get_output_call_count",
+    ):
+        assert default_model.last_recurrence_debug[key] == explicit_model.last_recurrence_debug[key]
+
+
+def test_min_terminal_five_uses_immediately_preceding_exact_anchor(monkeypatch):
+    score_inputs = []
+
+    def score_spy(gate, anchor_state, current_state):
+        score_inputs.append(
+            (anchor_state.detach().clone(), current_state.detach().clone())
+        )
+        return 0.0, True
+
+    monkeypatch.setattr(
+        action_heads_module,
+        "evaluate_action_delta_gate",
+        score_spy,
+    )
+    model = make_model()
+    kwargs = gate_kwargs(make_gate())
+    kwargs.update(
+        max_iter=6,
+        action_delta_gate_min_terminal_iter=5,
+    )
+    output, actual_iter, final_mse = model(
+        *inputs(),
+        warm_start_state=torch.zeros(1, 2, 4, dtype=torch.bfloat16),
+        kl_thresh=0.001,
+        **kwargs,
+    )
+
+    assert actual_iter == 5
+    assert final_mse == 1.0
+    assert len(score_inputs) == 1
+    anchor_state, current_state = score_inputs[0]
+    assert torch.all(anchor_state == 4)
+    assert torch.all(current_state == 5)
+    assert [int(state[0, 0, 0]) for state in model.test_coda_states] == [1, 2, 3, 4]
+    assert model.test_coda_calls == 4
+    assert torch.all(output == 4)
+
+    debug = model.last_recurrence_debug
+    assert debug["action_delta_gate_min_terminal_iter"] == 5
+    assert debug["action_delta_gate_first_eligible_terminal_iteration"] == 5
+    assert debug["action_delta_gate_score_call_count"] == 1
+    assert debug["action_delta_gate_score_trace"] == [
+        {
+            "anchor_iteration": 4,
+            "terminal_iteration": 5,
+            "score": 0.0,
+            "triggered": True,
+        }
+    ]
+    assert debug["action_delta_gate_anchor_iteration"] == 4
+    assert debug["action_delta_gate_terminal_iteration"] == 5
+    assert debug["action_delta_gate_returned_action_source_iteration"] == 4
+    assert debug["action_delta_gate_skipped_coda_count"] == 1
+    assert debug["final_state_coda_executed"] is False
+    assert debug["returned_cached_final_output"] is False
+    assert debug["coda_call_count"] == model.test_coda_calls == 4
+    assert debug["get_output_call_count"] == model.test_coda_calls
+    assert debug["iteration_mse"] == [1.0, 1.0, 1.0]
+    assert debug["conv_score_list"] == [1.0, 1.0, 1.0]
+
+
+def test_min_terminal_five_nontrigger_executes_terminal_coda_once():
+    model = make_model()
+    kwargs = gate_kwargs(make_gate(predicted_delta=1.0, threshold=0.1))
+    kwargs.update(
+        max_iter=5,
+        action_delta_gate_min_terminal_iter=5,
+    )
+    output, actual_iter, final_mse = model(
+        *inputs(),
+        warm_start_state=torch.zeros(1, 2, 4, dtype=torch.bfloat16),
+        kl_thresh=0.001,
+        **kwargs,
+    )
+
+    assert actual_iter == 5
+    assert final_mse == 1.0
+    assert model.test_coda_calls == 5
+    assert torch.all(output == 5)
+    debug = model.last_recurrence_debug
+    assert debug["action_delta_gate_triggered"] is False
+    assert debug["action_delta_gate_score_call_count"] == 1
+    assert debug["action_delta_gate_score_trace"][0]["anchor_iteration"] == 4
+    assert debug["action_delta_gate_score_trace"][0]["terminal_iteration"] == 5
+    assert debug["coda_call_count"] == model.test_coda_calls
+    assert debug["get_output_call_count"] == model.test_coda_calls
+
+
+def test_delayed_gate_fails_closed_on_nonfinite_preeligibility_anchor():
+    model = make_model(nonfinite_iteration=3)
+    kwargs = gate_kwargs(make_gate(predicted_delta=0.0))
+    kwargs.update(
+        max_iter=5,
+        action_delta_gate_min_terminal_iter=5,
+    )
+    output, actual_iter, _ = model(
+        *inputs(),
+        warm_start_state=torch.zeros(1, 2, 4, dtype=torch.bfloat16),
+        kl_thresh=0.001,
+        **kwargs,
+    )
+
+    assert actual_iter == 5
+    assert torch.isnan(output).any()
+    assert model.test_coda_calls == 5
+    debug = model.last_recurrence_debug
+    assert debug["action_delta_gate_triggered"] is False
+    assert debug["action_delta_gate_score_call_count"] == 0
+    assert "anchor output is non-finite" in debug["action_delta_gate_fallback_reason"]
+    assert debug["coda_call_count"] == model.test_coda_calls
+
+
+@pytest.mark.parametrize("minimum", [1, True, 2.5])
+def test_enabled_gate_rejects_invalid_minimum_terminal_before_recurrence(minimum):
+    model = make_model()
+    with pytest.raises(ValueError, match="minimum terminal iteration"):
+        model(
+            *inputs(),
+            warm_start_state=torch.zeros(1, 2, 4, dtype=torch.bfloat16),
+            action_delta_gate_min_terminal_iter=minimum,
+            **gate_kwargs(make_gate()),
+        )
+    assert model.test_iteration == 0
 
 
 def test_nonfinite_gate_state_fails_closed_and_executes_exact_coda():

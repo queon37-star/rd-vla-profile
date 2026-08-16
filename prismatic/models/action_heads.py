@@ -438,6 +438,7 @@ class VLARecurrent(nn.Module):
                 use_action_delta_gate: bool = False,
                 action_delta_gate=None,
                 action_delta_gate_max_skip: int = 1,
+                action_delta_gate_min_terminal_iter: int = 2,
                 **kwargs) -> torch.Tensor:
         requested_recurrence_strategy = convergence_strategy
         canonical_recurrence_strategy = canonicalize_recurrence_strategy(convergence_strategy)
@@ -504,6 +505,7 @@ class VLARecurrent(nn.Module):
             collect_preconvergence_raw_shadow=collect_preconvergence_raw_shadow,
             use_cached_final_output=use_cached_final_output,
             max_skip=action_delta_gate_max_skip,
+            min_terminal_iter=action_delta_gate_min_terminal_iter,
         )
         if latent_precheck_mode == "origin_aware" and self.training:
             raise ValueError("latent_precheck_mode='origin_aware' is inference-only")
@@ -898,6 +900,7 @@ class VLARecurrent(nn.Module):
                                 should_call_coda
                                 and action_delta_gate_enabled_for_prediction
                                 and action_delta_gate_anchor_state is not None
+                                and actual_iter >= action_delta_gate_min_terminal_iter
                             ):
                                 predictor_start = (
                                     time.perf_counter()
@@ -1209,6 +1212,14 @@ class VLARecurrent(nn.Module):
                 ),
                 "action_delta_gate_score_call_count": len(
                     action_delta_gate_score_trace
+                ),
+                "action_delta_gate_min_terminal_iter": int(
+                    action_delta_gate_min_terminal_iter
+                ),
+                "action_delta_gate_first_eligible_terminal_iteration": (
+                    int(action_delta_gate_min_terminal_iter)
+                    if action_delta_gate_applied
+                    else None
                 ),
                 "action_delta_gate_score_trace": action_delta_gate_score_trace,
                 "action_delta_gate_triggered": action_delta_gate_triggered,
@@ -1692,6 +1703,7 @@ class ActionHeadRecurrent(nn.Module):
                        use_action_delta_gate=False,
                        action_delta_gate=None,
                        action_delta_gate_max_skip=1,
+                       action_delta_gate_min_terminal_iter=2,
                        **kwargs):
         canonical_recurrence_strategy = canonicalize_recurrence_strategy(
             convergence_strategy
@@ -1800,6 +1812,9 @@ class ActionHeadRecurrent(nn.Module):
                                  action_delta_gate=action_delta_gate,
                                  action_delta_gate_max_skip=(
                                      action_delta_gate_max_skip
+                                 ),
+                                 action_delta_gate_min_terminal_iter=(
+                                     action_delta_gate_min_terminal_iter
                                  ))
             if capture_action_head_workload:
                 metadata = self.model.last_inference_metadata
