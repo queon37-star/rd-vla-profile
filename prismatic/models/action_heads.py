@@ -19,6 +19,12 @@ from prismatic.models.scalar_stopping_policy import (
     SUPPORTED_SCALAR_EXECUTION_MODES,
     validate_scalar_runtime_configuration,
 )
+from prismatic.models.action_delta_gate import (
+    NonFiniteActionDeltaGateError,
+    PreparedActionDeltaGate,
+    evaluate_action_delta_gate,
+    validate_action_delta_gate_runtime_configuration,
+)
 from prismatic.models.action_head_workload import build_action_head_workload
 from prismatic.models.origin_aware_scheduler import (
     NonFiniteOriginAwareInferenceError,
@@ -429,6 +435,9 @@ class VLARecurrent(nn.Module):
                 latent_only_eps: float = 1e-8,
                 scalar_task_policy=None,
                 scalar_policy_execution_mode: str = "direct",
+                use_action_delta_gate: bool = False,
+                action_delta_gate=None,
+                action_delta_gate_max_skip: int = 1,
                 **kwargs) -> torch.Tensor:
         requested_recurrence_strategy = convergence_strategy
         canonical_recurrence_strategy = canonicalize_recurrence_strategy(convergence_strategy)
@@ -480,6 +489,22 @@ class VLARecurrent(nn.Module):
             use_cached_final_output=use_cached_final_output,
             max_iter=max_iter,
         )
+        validate_action_delta_gate_runtime_configuration(
+            enabled=use_action_delta_gate,
+            canonical_recurrence_strategy=canonical_recurrence_strategy,
+            prepared_gate=action_delta_gate,
+            batch_size=h_a.size(0),
+            use_warm_start=enable_warm_start,
+            warm_start_source=warm_start_source,
+            warm_start_min_iter=warm_start_min_iter,
+            use_latent_precheck=use_latent_precheck,
+            latent_precheck_mode=latent_precheck_mode,
+            latent_precheck_trace_level=latent_precheck_trace_level,
+            shadow_full_depth=shadow_full_depth,
+            collect_preconvergence_raw_shadow=collect_preconvergence_raw_shadow,
+            use_cached_final_output=use_cached_final_output,
+            max_skip=action_delta_gate_max_skip,
+        )
         if latent_precheck_mode == "origin_aware" and self.training:
             raise ValueError("latent_precheck_mode='origin_aware' is inference-only")
         if shadow_full_depth and self.training:
@@ -501,6 +526,8 @@ class VLARecurrent(nn.Module):
             raise ValueError("recurrence_strategy='latent_only' is inference-only")
         if canonical_recurrence_strategy == "scalar_policy" and self.training:
             raise ValueError("recurrence_strategy='scalar_policy' is inference-only")
+        if use_action_delta_gate and self.training:
+            raise ValueError("Action-Delta Gate is inference-only")
 
         B = h_a.size(0)
         device, dtype = h_a.device, h_a.dtype
@@ -770,6 +797,21 @@ class VLARecurrent(nn.Module):
             raw_production_states = []
             raw_production_actions = []
             get_output_call_count = 0
+            action_delta_gate_requested = bool(use_action_delta_gate)
+            action_delta_gate_applied = bool(
+                action_delta_gate_requested and cached_state_used
+            )
+            action_delta_gate_enabled_for_prediction = action_delta_gate_applied
+            action_delta_gate_anchor_state = None
+            action_delta_gate_anchor_output = None
+            action_delta_gate_anchor_iteration = None
+            action_delta_gate_return_output = None
+            action_delta_gate_triggered = False
+            action_delta_gate_terminal_iteration = None
+            action_delta_gate_returned_action_source_iteration = None
+            action_delta_gate_fallback_reason = None
+            action_delta_gate_score_trace = []
+            action_delta_gate_predictor_ms_list = []
 
             run_one_iteration_ms_list = []
             # Output timing lists include the final return-path call unless the
@@ -852,6 +894,64 @@ class VLARecurrent(nn.Module):
                         action_mse = None
                         action_l2 = None
                         with rdvla_range("RDVLA/action_head/coda_stop_check_total"):
+                            if (
+                                should_call_coda
+                                and action_delta_gate_enabled_for_prediction
+                                and action_delta_gate_anchor_state is not None
+                            ):
+                                predictor_start = (
+                                    self._sync_time()
+                                    if profile_coda_cost
+                                    else None
+                                )
+                                try:
+                                    with rdvla_range(
+                                        "RDVLA/action_head/action_delta_gate_total"
+                                    ):
+                                        gate_score, gate_triggered = evaluate_action_delta_gate(
+                                            action_delta_gate,
+                                            action_delta_gate_anchor_state,
+                                            state,
+                                        )
+                                except NonFiniteActionDeltaGateError as exc:
+                                    gate_score = None
+                                    gate_triggered = False
+                                    action_delta_gate_fallback_reason = str(exc)
+                                    action_delta_gate_enabled_for_prediction = False
+                                if profile_coda_cost:
+                                    predictor_end = self._sync_time()
+                                    action_delta_gate_predictor_ms_list.append(
+                                        (predictor_end - predictor_start) * 1000.0
+                                    )
+                                action_delta_gate_score_trace.append(
+                                    {
+                                        "anchor_iteration": int(
+                                            action_delta_gate_anchor_iteration
+                                        ),
+                                        "terminal_iteration": int(actual_iter),
+                                        "score": (
+                                            float(gate_score)
+                                            if gate_score is not None
+                                            else None
+                                        ),
+                                        "triggered": bool(gate_triggered),
+                                    }
+                                )
+                                if gate_triggered:
+                                    action_delta_gate_triggered = True
+                                    action_delta_gate_terminal_iteration = int(
+                                        actual_iter
+                                    )
+                                    action_delta_gate_returned_action_source_iteration = int(
+                                        action_delta_gate_anchor_iteration
+                                    )
+                                    action_delta_gate_return_output = (
+                                        action_delta_gate_anchor_output
+                                    )
+                                    adaptive_stop = True
+                                    stop_reason = "action_delta_gate"
+                                    should_call_coda = False
+
                             if should_call_coda:
                                 with rdvla_range("RDVLA/action_head/coda_stop_get_output"):
                                     with rdvla_range("RDVLA/action_head/get_output_each_iter"):
@@ -969,6 +1069,21 @@ class VLARecurrent(nn.Module):
                                     raw_production_actions.append(curr_output.detach())
 
                                 prev_output = curr_output.detach()
+                                if (
+                                    action_delta_gate_enabled_for_prediction
+                                    and not adaptive_stop
+                                ):
+                                    if not bool(
+                                        torch.isfinite(curr_output).all().item()
+                                    ):
+                                        action_delta_gate_fallback_reason = (
+                                            "Action-Delta Gate anchor output is non-finite"
+                                        )
+                                        action_delta_gate_enabled_for_prediction = False
+                                    else:
+                                        action_delta_gate_anchor_state = state.detach()
+                                        action_delta_gate_anchor_output = curr_output.detach()
+                                        action_delta_gate_anchor_iteration = int(actual_iter)
                                 if profile_coda_cost:
                                     convergence_check_end = self._sync_time()
                                     convergence_check_ms_list.append((convergence_check_end - convergence_check_start) * 1000.0)
@@ -990,6 +1105,8 @@ class VLARecurrent(nn.Module):
                     stop_reason = "max_iter"
 
             reuse_terminal_output = bool(
+                not action_delta_gate_triggered
+                and
                 curr_output is not None
                 and (
                     use_cached_final_output
@@ -998,7 +1115,9 @@ class VLARecurrent(nn.Module):
             )
 
             with rdvla_range("RDVLA/action_head/final_get_output"):
-                if reuse_terminal_output:
+                if action_delta_gate_triggered:
+                    final_output = action_delta_gate_return_output
+                elif reuse_terminal_output:
                     final_output = curr_output
                 else:
                     final_output = self._get_output(
@@ -1066,6 +1185,51 @@ class VLARecurrent(nn.Module):
                 "scalar_policy_terminal_iteration": None,
                 "scalar_policy_score_call_count": 0,
                 "scalar_policy_score_trace": [],
+                "use_action_delta_gate": bool(use_action_delta_gate),
+                "action_delta_gate_requested": action_delta_gate_requested,
+                "action_delta_gate_applied": action_delta_gate_applied,
+                "action_delta_gate_threshold": (
+                    float(action_delta_gate.threshold)
+                    if action_delta_gate_requested
+                    else None
+                ),
+                "action_delta_gate_outer_fold": (
+                    int(action_delta_gate.outer_fold)
+                    if action_delta_gate_requested
+                    else None
+                ),
+                "action_delta_gate_held_out_task_ids": (
+                    list(action_delta_gate.held_out_task_ids)
+                    if action_delta_gate_requested
+                    else []
+                ),
+                "action_delta_gate_score_call_count": len(
+                    action_delta_gate_score_trace
+                ),
+                "action_delta_gate_score_trace": action_delta_gate_score_trace,
+                "action_delta_gate_triggered": action_delta_gate_triggered,
+                "action_delta_gate_anchor_iteration": (
+                    action_delta_gate_returned_action_source_iteration
+                    if action_delta_gate_triggered
+                    else action_delta_gate_anchor_iteration
+                ),
+                "action_delta_gate_terminal_iteration": action_delta_gate_terminal_iteration,
+                "action_delta_gate_returned_action_source_iteration": (
+                    action_delta_gate_returned_action_source_iteration
+                ),
+                "action_delta_gate_skipped_coda_count": int(
+                    action_delta_gate_triggered
+                ),
+                "action_delta_gate_fallback_reason": action_delta_gate_fallback_reason,
+                "action_delta_gate_predictor_ms_list": (
+                    action_delta_gate_predictor_ms_list
+                ),
+                "action_delta_gate_predictor_ms_total": sum(
+                    action_delta_gate_predictor_ms_list
+                ),
+                "action_delta_gate_returned_previous_coda": bool(
+                    action_delta_gate_triggered
+                ),
                 "action_mse_threshold": float(kl_thresh) if canonical_recurrence_strategy == "adjacent_action_mse" else None,
                 "threshold": float(kl_thresh) if canonical_recurrence_strategy == "adjacent_action_mse" else float(cos_thresh),
                 "fixed_K": None,
@@ -1105,10 +1269,21 @@ class VLARecurrent(nn.Module):
                 "final_mse": conv_score_list[-1] if conv_score_list else None,
                 "final_conv_score": final_kl,
                 "stop_reason": stop_reason,
-                "canonical_stop_reason": canonical_recurrence_strategy if adaptive_stop else stop_reason,
+                "canonical_stop_reason": (
+                    "action_delta_gate"
+                    if action_delta_gate_triggered
+                    else (
+                        canonical_recurrence_strategy
+                        if adaptive_stop
+                        else stop_reason
+                    )
+                ),
                 "coda_call_count": int(get_output_call_count),
                 "get_output_call_count": int(get_output_call_count),
-                "final_state_coda_executed": not reuse_terminal_output,
+                "final_state_coda_executed": bool(
+                    not action_delta_gate_triggered
+                    and not reuse_terminal_output
+                ),
                 "returned_cached_final_output": reuse_terminal_output,
                 "profiling_enabled": bool(profile_coda_cost),
                 "use_cached_final_output": bool(use_cached_final_output),
@@ -1390,6 +1565,9 @@ class ActionHeadRecurrent(nn.Module):
         self.model = VLARecurrent(cfg)
         self._scalar_task_policy = None
         self._scalar_policy_execution_mode = None
+        # Plain prepared runtime data, deliberately not an nn.Module or
+        # registered buffer, so legacy checkpoint state_dict keys are stable.
+        self._action_delta_gate = None
 
     def configure_scalar_task_policy(
         self,
@@ -1415,6 +1593,34 @@ class ActionHeadRecurrent(nn.Module):
     def clear_scalar_task_policy(self) -> None:
         self._scalar_task_policy = None
         self._scalar_policy_execution_mode = None
+
+    def configure_action_delta_gate(
+        self,
+        gate: PreparedActionDeltaGate,
+    ) -> None:
+        if not isinstance(gate, PreparedActionDeltaGate):
+            raise TypeError(
+                "configure_action_delta_gate requires PreparedActionDeltaGate"
+            )
+        expected = (
+            self.cfg.hidden_dim,
+            self.cfg.action_dim,
+            self.cfg.action_chunk_len,
+        )
+        actual = (
+            gate.hidden_dim,
+            gate.action_dim,
+            gate.action_chunk_len,
+        )
+        if actual != expected:
+            raise ValueError(
+                "Action-Delta Gate/action-head dimension mismatch: "
+                f"expected={expected}, actual={actual}"
+            )
+        self._action_delta_gate = gate
+
+    def clear_action_delta_gate(self) -> None:
+        self._action_delta_gate = None
 
     def _resolve_scalar_runtime_policy(
         self,
@@ -1479,6 +1685,9 @@ class ActionHeadRecurrent(nn.Module):
                        latent_only_eps=1e-8,
                        scalar_task_policy=None,
                        scalar_policy_execution_mode=None,
+                       use_action_delta_gate=False,
+                       action_delta_gate=None,
+                       action_delta_gate_max_skip=1,
                        **kwargs):
         canonical_recurrence_strategy = canonicalize_recurrence_strategy(
             convergence_strategy
@@ -1496,6 +1705,8 @@ class ActionHeadRecurrent(nn.Module):
             scalar_task_policy,
             scalar_policy_execution_mode,
         )
+        if use_action_delta_gate and action_delta_gate is None:
+            action_delta_gate = self._action_delta_gate
         validate_latent_only_configuration(
             convergence_strategy,
             metric=latent_only_metric,
@@ -1580,6 +1791,11 @@ class ActionHeadRecurrent(nn.Module):
                                  scalar_task_policy=scalar_task_policy,
                                  scalar_policy_execution_mode=(
                                      scalar_policy_execution_mode
+                                 ),
+                                 use_action_delta_gate=use_action_delta_gate,
+                                 action_delta_gate=action_delta_gate,
+                                 action_delta_gate_max_skip=(
+                                     action_delta_gate_max_skip
                                  ))
             if capture_action_head_workload:
                 metadata = self.model.last_inference_metadata

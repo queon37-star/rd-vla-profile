@@ -81,6 +81,10 @@ from prismatic.models.scalar_stopping_policy import (
     load_scalar_policy_artifact,
     prepare_scalar_task_policy,
 )
+from prismatic.models.action_delta_gate import (
+    load_action_delta_gate_artifact,
+    prepare_action_delta_gate,
+)
 from prismatic.vla.constants import NUM_ACTIONS_CHUNK
 from prismatic.utils.rdvla_profiler import RDVLAProfiler
 
@@ -208,6 +212,12 @@ class GenerateConfig:
     scalar_policy_artifact_path: str = ""
     scalar_policy_expected_sha256: str = ""
     scalar_policy_execution_mode: str = "direct"
+
+    # Fold-4 Phase-B Action-Delta Gate (LIBERO Spatial tasks 4 and 5 only).
+    use_action_delta_gate: bool = False
+    action_delta_gate_artifact_path: str = ""
+    action_delta_gate_expected_sha256: str = ""
+    action_delta_gate_max_skip: int = 1
 
     # Disabled-by-default warm-start inference settings.
     use_warm_start: bool = False
@@ -378,6 +388,65 @@ def validate_config(cfg: GenerateConfig) -> None:
                 "scalar policy artifact settings require "
                 "recurrence_strategy='scalar_policy'"
             )
+
+    if cfg.use_action_delta_gate:
+        if not cfg.use_recurrent:
+            raise ValueError("Action-Delta Gate requires use_recurrent=True")
+        if canonical_recurrence_strategy != "adjacent_action_mse":
+            raise ValueError(
+                "Action-Delta Gate requires recurrence_strategy="
+                "'adjacent_action_mse' or legacy alias 'kl_divergence'"
+            )
+        if cfg.task_suite_name != TaskSuite.LIBERO_SPATIAL:
+            raise ValueError("fold-4 Action-Delta Gate is LIBERO Spatial-only")
+        if cfg.task_id not in {4, 5}:
+            raise ValueError("fold-4 Action-Delta Gate requires explicit task_id 4 or 5")
+        if not cfg.action_delta_gate_artifact_path:
+            raise ValueError("action_delta_gate_artifact_path is required")
+        if not Path(cfg.action_delta_gate_artifact_path).exists():
+            raise ValueError(
+                "Action-Delta Gate artifact path does not exist: "
+                f"{cfg.action_delta_gate_artifact_path}"
+            )
+        expected_hash = cfg.action_delta_gate_expected_sha256
+        if (
+            len(expected_hash) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in expected_hash.lower()
+            )
+        ):
+            raise ValueError(
+                "action_delta_gate_expected_sha256 must be a "
+                "64-character hexadecimal SHA-256"
+            )
+        if not cfg.use_warm_start or cfg.warm_start_source != "midpoint":
+            raise ValueError("Action-Delta Gate requires midpoint warm-start")
+        if cfg.warm_start_min_iter != 2:
+            raise ValueError("Action-Delta Gate requires warm_start_min_iter=2")
+        if cfg.use_latent_precheck:
+            raise ValueError("Action-Delta Gate cannot use latent pre-check")
+        if cfg.latent_precheck_mode != "off":
+            raise ValueError("Action-Delta Gate requires latent_precheck_mode='off'")
+        if cfg.latent_precheck_trace_level != "off":
+            raise ValueError(
+                "Action-Delta Gate requires latent_precheck_trace_level='off'"
+            )
+        if cfg.shadow_full_depth or cfg.collect_preconvergence_raw_shadow:
+            raise ValueError("Action-Delta Gate cannot collect shadow trajectories")
+        if cfg.action_delta_gate_max_skip != 1:
+            raise ValueError("Action-Delta Gate Phase B requires max_skip=1")
+        if not cfg.use_cached_final_output:
+            raise ValueError(
+                "Action-Delta Gate Phase B requires use_cached_final_output=True"
+            )
+    elif (
+        cfg.action_delta_gate_artifact_path
+        or cfg.action_delta_gate_expected_sha256
+    ):
+        raise ValueError(
+            "Action-Delta Gate artifact settings require use_action_delta_gate=True"
+        )
 
     validate_latent_only_configuration(
         cfg.recurrence_strategy,
@@ -748,6 +817,65 @@ def build_scalar_policy_log_fields(debug):
     }
 
 
+def build_action_delta_gate_log_fields(debug):
+    """Extract compact JSON-safe Action-Delta Gate runtime metadata."""
+
+    debug = debug or {}
+    return {
+        "use_action_delta_gate": bool(
+            debug.get("use_action_delta_gate", False)
+        ),
+        "action_delta_gate_requested": bool(
+            debug.get("action_delta_gate_requested", False)
+        ),
+        "action_delta_gate_applied": bool(
+            debug.get("action_delta_gate_applied", False)
+        ),
+        "action_delta_gate_threshold": _as_float(
+            debug.get("action_delta_gate_threshold")
+        ),
+        "action_delta_gate_outer_fold": _as_int(
+            debug.get("action_delta_gate_outer_fold")
+        ),
+        "action_delta_gate_held_out_task_ids": debug.get(
+            "action_delta_gate_held_out_task_ids", []
+        ),
+        "action_delta_gate_score_call_count": _as_int(
+            debug.get("action_delta_gate_score_call_count")
+        ),
+        "action_delta_gate_score_trace": debug.get(
+            "action_delta_gate_score_trace", []
+        ),
+        "action_delta_gate_triggered": bool(
+            debug.get("action_delta_gate_triggered", False)
+        ),
+        "action_delta_gate_anchor_iteration": _as_int(
+            debug.get("action_delta_gate_anchor_iteration")
+        ),
+        "action_delta_gate_terminal_iteration": _as_int(
+            debug.get("action_delta_gate_terminal_iteration")
+        ),
+        "action_delta_gate_returned_action_source_iteration": _as_int(
+            debug.get("action_delta_gate_returned_action_source_iteration")
+        ),
+        "action_delta_gate_skipped_coda_count": _as_int(
+            debug.get("action_delta_gate_skipped_coda_count")
+        ),
+        "action_delta_gate_fallback_reason": debug.get(
+            "action_delta_gate_fallback_reason"
+        ),
+        "action_delta_gate_predictor_ms_list": debug.get(
+            "action_delta_gate_predictor_ms_list", []
+        ),
+        "action_delta_gate_predictor_ms_total": _as_float(
+            debug.get("action_delta_gate_predictor_ms_total")
+        ),
+        "action_delta_gate_returned_previous_coda": bool(
+            debug.get("action_delta_gate_returned_previous_coda", False)
+        ),
+    }
+
+
 def build_decode_call_log_fields(debug):
     """Extract JSON-safe terminal decode metadata independent of profiling."""
 
@@ -842,6 +970,7 @@ def _build_timing_summary_record(timing_record, result):
         **build_scalar_policy_log_fields(
             recurrence_debug
         ),
+        **build_action_delta_gate_log_fields(recurrence_debug),
         "latent_metric_call_count": recurrence_debug.get("latent_metric_call_count"),
         "latent_precheck_mode": recurrence_debug.get("latent_precheck_mode", "legacy"),
         "latent_precheck_trace_level_requested": recurrence_debug.get("latent_precheck_trace_level_requested", "off"),
@@ -1092,6 +1221,34 @@ def summarize_latent_precheck(records: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
+def summarize_action_delta_gate(records: List[Dict[str, Any]]) -> Dict[str, Any]:
+    requested = [r for r in records if r.get("action_delta_gate_requested")]
+    return {
+        "requested_prediction_count": len(requested),
+        "applied_prediction_count": sum(
+            1 for r in requested if r.get("action_delta_gate_applied")
+        ),
+        "trigger_count": sum(
+            1 for r in requested if r.get("action_delta_gate_triggered")
+        ),
+        "skipped_coda_count": int(
+            sum(
+                _as_int(r.get("action_delta_gate_skipped_coda_count")) or 0
+                for r in requested
+            )
+        ),
+        "score_call_count": int(
+            sum(
+                _as_int(r.get("action_delta_gate_score_call_count")) or 0
+                for r in requested
+            )
+        ),
+        "predictor_ms_total_stats": _numeric_stats(
+            [r.get("action_delta_gate_predictor_ms_total") for r in requested]
+        ),
+    }
+
+
 def save_recurrent_convergence_summary(cfg, full_results, log_file=None):
     """Write run-level success/failure comparison for recurrent convergence metrics."""
     step_log_path = get_step_log_file(cfg)
@@ -1128,6 +1285,7 @@ def save_recurrent_convergence_summary(cfg, full_results, log_file=None):
                 "adaptive_stop_count": sum(1 for r in prediction_records if r.get("adaptive_stop")),
                 "coda_profiling": summarize_coda_profiling(prediction_records),
                 "latent_precheck": summarize_latent_precheck(prediction_records),
+                "action_delta_gate": summarize_action_delta_gate(prediction_records),
             },
             "success": {
                 "iteration_stats": _numeric_stats([r.get("recurrent_iteration_count") for r in success_records]),
@@ -1135,6 +1293,7 @@ def save_recurrent_convergence_summary(cfg, full_results, log_file=None):
                 "adaptive_stop_count": sum(1 for r in success_records if r.get("adaptive_stop")),
                 "coda_profiling": summarize_coda_profiling(success_records),
                 "latent_precheck": summarize_latent_precheck(success_records),
+                "action_delta_gate": summarize_action_delta_gate(success_records),
             },
             "failure": {
                 "iteration_stats": _numeric_stats([r.get("recurrent_iteration_count") for r in failure_records]),
@@ -1142,6 +1301,7 @@ def save_recurrent_convergence_summary(cfg, full_results, log_file=None):
                 "adaptive_stop_count": sum(1 for r in failure_records if r.get("adaptive_stop")),
                 "coda_profiling": summarize_coda_profiling(failure_records),
                 "latent_precheck": summarize_latent_precheck(failure_records),
+                "action_delta_gate": summarize_action_delta_gate(failure_records),
             },
         },
         "rollout_level": {
@@ -1563,6 +1723,7 @@ def run_episode(
                     **build_scalar_policy_log_fields(
                         debug
                     ),
+                    **build_action_delta_gate_log_fields(debug),
                     "latent_metric_call_count": debug.get("latent_metric_call_count"),
                     "latent_metric_trace_enabled": debug.get(
                         "latent_metric_trace_enabled", False
@@ -2035,6 +2196,8 @@ def eval_libero(cfg: GenerateConfig) -> float:
 
     scalar_policy_manifest = None
     scalar_policy_payload = None
+    action_delta_gate_manifest = None
+    action_delta_gate_payload = None
 
     if (
         canonicalize_recurrence_strategy(
@@ -2052,6 +2215,15 @@ def eval_libero(cfg: GenerateConfig) -> float:
             ),
         )
 
+    if cfg.use_action_delta_gate:
+        (
+            action_delta_gate_manifest,
+            action_delta_gate_payload,
+        ) = load_action_delta_gate_artifact(
+            cfg.action_delta_gate_artifact_path,
+            expected_sha256=cfg.action_delta_gate_expected_sha256.lower(),
+        )
+
     model, action_head, proprio_projector, processor = initialize_model(cfg)
     resize_size = get_image_resize_size(cfg)
     log_file, local_log_filepath, run_id = setup_logging(cfg)
@@ -2061,6 +2233,13 @@ def eval_libero(cfg: GenerateConfig) -> float:
             "Loaded scalar OOF policy artifact: "
             f"sha256={scalar_policy_manifest['artifact_sha256']}, "
             f"mode={cfg.scalar_policy_execution_mode}",
+            log_file,
+        )
+    if action_delta_gate_manifest is not None:
+        log_message(
+            "Loaded fold-4 Action-Delta Gate artifact: "
+            f"sha256={action_delta_gate_manifest['artifact_sha256']}, "
+            f"tasks={action_delta_gate_manifest['held_out_task_ids']}",
             log_file,
         )
 
@@ -2143,6 +2322,16 @@ def eval_libero(cfg: GenerateConfig) -> float:
             ),
             "task_level_oof": True,
         }
+    if action_delta_gate_manifest is not None:
+        full_results["action_delta_gate"] = {
+            "artifact_path": cfg.action_delta_gate_artifact_path,
+            "artifact_sha256": action_delta_gate_manifest["artifact_sha256"],
+            "outer_fold": action_delta_gate_manifest["outer_fold"],
+            "held_out_task_ids": action_delta_gate_manifest["held_out_task_ids"],
+            "calibration_method": action_delta_gate_manifest["calibration_method"],
+            "threshold": action_delta_gate_manifest["threshold"],
+            "max_skip": cfg.action_delta_gate_max_skip,
+        }
 
     if cfg.evaluation_protocol_phase != "legacy":
         protocol_manifest, manifest_sha256 = load_protocol_manifest(
@@ -2201,6 +2390,23 @@ def eval_libero(cfg: GenerateConfig) -> float:
             )
         else:
             action_head.clear_scalar_task_policy()
+
+        if action_delta_gate_payload is not None:
+            action_head_device = next(action_head.parameters()).device
+            prepared_action_delta_gate = prepare_action_delta_gate(
+                action_delta_gate_payload,
+                device=action_head_device,
+                task_id=int(task_id),
+            )
+            action_head.configure_action_delta_gate(prepared_action_delta_gate)
+            log_message(
+                "Bound Action-Delta Gate: "
+                f"task={task_id}, fold={prepared_action_delta_gate.outer_fold}, "
+                f"threshold={prepared_action_delta_gate.threshold:.12f}",
+                log_file,
+            )
+        else:
+            action_head.clear_action_delta_gate()
 
         total_episodes, total_successes, task_stats = run_task(
             cfg,
