@@ -87,6 +87,8 @@ from prismatic.models.scalar_stopping_policy import (
     prepare_scalar_task_policy,
 )
 from prismatic.models.action_delta_gate import (
+    ACTION_DELTA_NONCONVERGENCE_MIN_TERMINAL_ITER,
+    ACTION_DELTA_NONCONVERGENCE_THRESHOLD,
     ACTION_DELTA_GATE_RETURN_MODES,
     load_action_delta_gate_artifact,
     prepare_action_delta_gate,
@@ -233,6 +235,8 @@ class GenerateConfig:
     action_delta_gate_exact_coda_audit: bool = False
     action_delta_gate_return_mode: str = "anchor"
     collect_action_delta_gate_shadow: bool = False
+    # Development-only high-side predictor filter; never a convergence gate.
+    use_action_delta_nonconvergence_filter: bool = False
     action_delta_gate_shadow_dir: str = ""
     action_delta_gate_shadow_shard_size: int = 64
 
@@ -406,10 +410,18 @@ def validate_config(cfg: GenerateConfig) -> None:
                 "recurrence_strategy='scalar_policy'"
             )
 
-    if cfg.use_action_delta_gate and cfg.collect_action_delta_gate_shadow:
+    action_delta_mode_count = sum(
+        bool(value)
+        for value in (
+            cfg.use_action_delta_gate,
+            cfg.collect_action_delta_gate_shadow,
+            cfg.use_action_delta_nonconvergence_filter,
+        )
+    )
+    if action_delta_mode_count > 1:
         raise ValueError(
-            "production Action-Delta Gate and diagnostic shadow collection "
-            "are mutually exclusive"
+            "production Action-Delta Gate, diagnostic shadow collection, and "
+            "the diagnostic non-convergence filter are mutually exclusive"
         )
 
     if cfg.use_action_delta_gate:
@@ -482,7 +494,10 @@ def validate_config(cfg: GenerateConfig) -> None:
             raise ValueError(
                 "Action-Delta Gate Phase B requires use_cached_final_output=True"
             )
-    elif not cfg.collect_action_delta_gate_shadow and (
+    elif not (
+        cfg.collect_action_delta_gate_shadow
+        or cfg.use_action_delta_nonconvergence_filter
+    ) and (
         cfg.action_delta_gate_artifact_path
         or cfg.action_delta_gate_expected_sha256
     ):
@@ -565,6 +580,75 @@ def validate_config(cfg: GenerateConfig) -> None:
             "action_delta_gate_shadow_dir requires "
             "collect_action_delta_gate_shadow=True"
         )
+
+    if cfg.use_action_delta_nonconvergence_filter:
+        if not cfg.use_recurrent:
+            raise ValueError("non-convergence filter requires use_recurrent=True")
+        if canonical_recurrence_strategy != "adjacent_action_mse":
+            raise ValueError(
+                "non-convergence filter requires adjacent action-MSE recurrence"
+            )
+        if cfg.task_suite_name != TaskSuite.LIBERO_SPATIAL:
+            raise ValueError("non-convergence filter is LIBERO Spatial-only")
+        if (
+            cfg.task_id is not None
+            and cfg.task_id not in ACTION_DELTA_GATE_SHADOW_DEVELOPMENT_TASK_IDS
+        ):
+            raise ValueError(
+                "non-convergence filter permits only development tasks "
+                f"{ACTION_DELTA_GATE_SHADOW_DEVELOPMENT_TASK_IDS}; Task 4/5 are forbidden"
+            )
+        if not cfg.action_delta_gate_artifact_path:
+            raise ValueError("non-convergence filter requires action_delta_gate_artifact_path")
+        if not Path(cfg.action_delta_gate_artifact_path).exists():
+            raise ValueError(
+                "Action-Delta artifact path does not exist: "
+                f"{cfg.action_delta_gate_artifact_path}"
+            )
+        expected_hash = cfg.action_delta_gate_expected_sha256
+        if (
+            len(expected_hash) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in expected_hash.lower()
+            )
+        ):
+            raise ValueError(
+                "action_delta_gate_expected_sha256 must be a 64-character "
+                "hexadecimal SHA-256"
+            )
+        if not cfg.use_warm_start or cfg.warm_start_source != "midpoint":
+            raise ValueError("non-convergence filter requires midpoint warm-start")
+        if cfg.warm_start_min_iter != 2:
+            raise ValueError("non-convergence filter requires warm_start_min_iter=2")
+        if cfg.use_latent_precheck or cfg.latent_precheck_mode != "off":
+            raise ValueError("non-convergence filter requires latent pre-check off")
+        if cfg.latent_precheck_trace_level != "off":
+            raise ValueError(
+                "non-convergence filter requires latent_precheck_trace_level='off'"
+            )
+        if cfg.shadow_full_depth or cfg.collect_preconvergence_raw_shadow:
+            raise ValueError("non-convergence filter cannot collect shadow recurrence")
+        if not cfg.use_cached_final_output:
+            raise ValueError("non-convergence filter requires exact terminal-output reuse")
+        if not cfg.profile_coda_cost:
+            raise ValueError("non-convergence filter requires profile_coda_cost=True")
+        if (
+            cfg.action_delta_gate_min_terminal_iter
+            != ACTION_DELTA_NONCONVERGENCE_MIN_TERMINAL_ITER
+        ):
+            raise ValueError(
+                "non-convergence filter requires action_delta_gate_min_terminal_iter="
+                f"{ACTION_DELTA_NONCONVERGENCE_MIN_TERMINAL_ITER}"
+            )
+        if cfg.action_delta_gate_max_skip != 1:
+            raise ValueError("non-convergence filter requires max_skip=1")
+        if float(cfg.recurrence_kl_thresh) != 0.001:
+            raise ValueError("non-convergence filter requires recurrence_kl_thresh=0.001")
+        if cfg.action_delta_gate_exact_coda_audit:
+            raise ValueError("non-convergence filter cannot enable exact-Coda gate audit")
+        if cfg.action_delta_gate_return_mode != "anchor":
+            raise ValueError("non-convergence filter does not use an Action-Delta return mode")
 
     validate_latent_only_configuration(
         cfg.recurrence_strategy,
@@ -1169,6 +1253,55 @@ def build_decode_call_log_fields(debug):
     }
 
 
+def build_action_delta_nonconvergence_log_fields(debug):
+    """Extract development-only high-side filter accounting."""
+
+    debug = debug or {}
+    prefix = "action_delta_nonconvergence_filter_"
+    names = (
+        "requested",
+        "applied",
+        "development_only",
+        "efficiency_eligible",
+        "threshold",
+        "min_terminal_iter",
+        "max_skip",
+        "score_call_count",
+        "score_trace",
+        "predicted_event_count",
+        "actual_coda_skip_count",
+        "forced_next_coda_call_count",
+        "consecutive_skip_prevention_count",
+        "max_iter_skip_prevention_count",
+        "exact_coda_call_count",
+        "recurrent_K",
+        "first_trajectory_divergence_terminal_iteration",
+        "events",
+        "fallback_reason",
+        "predictor_ms_list",
+        "predictor_ms_total",
+        "recurrent_ms_total",
+        "coda_ms_total",
+        "get_output_ms_total",
+        "estimate_scorer_cost_ms_per_call",
+        "estimate_coda_cost_ms_per_call",
+        "estimated_gross_coda_savings_ms",
+        "estimated_scorer_cost_ms",
+        "estimated_net_savings_ms",
+        "measured_gross_coda_savings_proxy_ms",
+        "measured_net_savings_proxy_ms",
+        "measured_net_savings_ms",
+        "measured_net_savings_status",
+    )
+    fields = {
+        "use_action_delta_nonconvergence_filter": bool(
+            debug.get("use_action_delta_nonconvergence_filter", False)
+        )
+    }
+    fields.update({prefix + name: debug.get(prefix + name) for name in names})
+    return fields
+
+
 def resolve_fixed_k_log_value(debug, recurrence_strategy, recurrent_num_iter):
     """Resolve fixed depth for legacy and terminal-only step records."""
 
@@ -1252,6 +1385,7 @@ def _build_timing_summary_record(timing_record, result):
             recurrence_debug
         ),
         **build_action_delta_gate_log_fields(recurrence_debug),
+        **build_action_delta_nonconvergence_log_fields(recurrence_debug),
         "latent_metric_call_count": recurrence_debug.get("latent_metric_call_count"),
         "latent_precheck_mode": recurrence_debug.get("latent_precheck_mode", "legacy"),
         "latent_precheck_trace_level_requested": recurrence_debug.get("latent_precheck_trace_level_requested", "off"),
@@ -1619,6 +1753,78 @@ def summarize_action_delta_gate(records: List[Dict[str, Any]]) -> Dict[str, Any]
     }
 
 
+def summarize_action_delta_nonconvergence_filter(
+    records: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    requested = [
+        record
+        for record in records
+        if record.get("action_delta_nonconvergence_filter_requested")
+    ]
+    prefix = "action_delta_nonconvergence_filter_"
+
+    def total(name):
+        return sum(_as_float(record.get(prefix + name)) or 0.0 for record in requested)
+
+    first_divergence_record = next(
+        (
+            record
+            for record in requested
+            if (_as_int(record.get(prefix + "actual_coda_skip_count")) or 0) > 0
+        ),
+        None,
+    )
+    first_divergence = None
+    if first_divergence_record is not None:
+        first_divergence = {
+            "task_id": _as_int(first_divergence_record.get("task_id")),
+            "episode_id": _as_int(first_divergence_record.get("episode_id")),
+            "episode_seed": _as_int(first_divergence_record.get("episode_seed")),
+            "action_prediction_index": _as_int(
+                first_divergence_record.get("action_prediction_index")
+            ),
+            "environment_timestep": _as_int(
+                first_divergence_record.get("timestep")
+            ),
+            "terminal_iteration": _as_int(
+                first_divergence_record.get(
+                    prefix + "first_trajectory_divergence_terminal_iteration"
+                )
+            ),
+        }
+
+    return {
+        "development_only": True,
+        "excluded_from_production_efficiency_claims": True,
+        "requested_prediction_count": len(requested),
+        "applied_prediction_count": sum(
+            bool(record.get(prefix + "applied")) for record in requested
+        ),
+        "score_call_count": int(total("score_call_count")),
+        "predicted_nonconvergence_event_count": int(total("predicted_event_count")),
+        "actual_coda_skip_count": int(total("actual_coda_skip_count")),
+        "forced_next_coda_call_count": int(total("forced_next_coda_call_count")),
+        "consecutive_skip_prevention_count": int(
+            total("consecutive_skip_prevention_count")
+        ),
+        "exact_coda_call_count": int(total("exact_coda_call_count")),
+        "first_trajectory_divergence_point": first_divergence,
+        "predictor_ms_total": float(total("predictor_ms_total")),
+        "recurrent_ms_total": float(total("recurrent_ms_total")),
+        "coda_ms_total": float(total("coda_ms_total")),
+        "get_output_ms_total": float(total("get_output_ms_total")),
+        "estimated_gross_coda_savings_ms": float(
+            total("estimated_gross_coda_savings_ms")
+        ),
+        "estimated_scorer_cost_ms": float(total("estimated_scorer_cost_ms")),
+        "estimated_net_savings_ms": float(total("estimated_net_savings_ms")),
+        "measured_net_savings_proxy_ms": float(
+            total("measured_net_savings_proxy_ms")
+        ),
+        "measured_net_savings_status": "requires_paired_warm_only_counterfactual",
+    }
+
+
 def save_recurrent_convergence_summary(cfg, full_results, log_file=None):
     """Write run-level success/failure comparison for recurrent convergence metrics."""
     step_log_path = get_step_log_file(cfg)
@@ -1656,6 +1862,9 @@ def save_recurrent_convergence_summary(cfg, full_results, log_file=None):
                 "coda_profiling": summarize_coda_profiling(prediction_records),
                 "latent_precheck": summarize_latent_precheck(prediction_records),
                 "action_delta_gate": summarize_action_delta_gate(prediction_records),
+                "action_delta_nonconvergence_filter": summarize_action_delta_nonconvergence_filter(
+                    prediction_records
+                ),
             },
             "success": {
                 "iteration_stats": _numeric_stats([r.get("recurrent_iteration_count") for r in success_records]),
@@ -1664,6 +1873,9 @@ def save_recurrent_convergence_summary(cfg, full_results, log_file=None):
                 "coda_profiling": summarize_coda_profiling(success_records),
                 "latent_precheck": summarize_latent_precheck(success_records),
                 "action_delta_gate": summarize_action_delta_gate(success_records),
+                "action_delta_nonconvergence_filter": summarize_action_delta_nonconvergence_filter(
+                    success_records
+                ),
             },
             "failure": {
                 "iteration_stats": _numeric_stats([r.get("recurrent_iteration_count") for r in failure_records]),
@@ -1672,6 +1884,9 @@ def save_recurrent_convergence_summary(cfg, full_results, log_file=None):
                 "coda_profiling": summarize_coda_profiling(failure_records),
                 "latent_precheck": summarize_latent_precheck(failure_records),
                 "action_delta_gate": summarize_action_delta_gate(failure_records),
+                "action_delta_nonconvergence_filter": summarize_action_delta_nonconvergence_filter(
+                    failure_records
+                ),
             },
         },
         "rollout_level": {
@@ -2101,6 +2316,7 @@ def run_episode(
                         debug
                     ),
                     **build_action_delta_gate_log_fields(debug),
+                    **build_action_delta_nonconvergence_log_fields(debug),
                     "latent_metric_call_count": debug.get("latent_metric_call_count"),
                     "latent_metric_trace_enabled": debug.get(
                         "latent_metric_trace_enabled", False
@@ -2660,7 +2876,11 @@ def eval_libero(cfg: GenerateConfig) -> float:
             ),
         )
 
-    if cfg.use_action_delta_gate or cfg.collect_action_delta_gate_shadow:
+    if (
+        cfg.use_action_delta_gate
+        or cfg.collect_action_delta_gate_shadow
+        or cfg.use_action_delta_nonconvergence_filter
+    ):
         (
             action_delta_gate_manifest,
             action_delta_gate_payload,
@@ -2889,6 +3109,18 @@ def eval_libero(cfg: GenerateConfig) -> float:
         if cfg.collect_action_delta_gate_shadow:
             full_results["action_delta_gate"]["shadow_collection_only"] = True
             full_results["action_delta_gate"]["production_gate_enabled"] = False
+        if cfg.use_action_delta_nonconvergence_filter:
+            full_results["action_delta_nonconvergence_filter"] = {
+                "development_only": True,
+                "excluded_from_production_efficiency_claims": True,
+                "production_convergence_gate_unchanged": True,
+                "threshold": ACTION_DELTA_NONCONVERGENCE_THRESHOLD,
+                "min_terminal_iter": ACTION_DELTA_NONCONVERGENCE_MIN_TERMINAL_ITER,
+                "max_skip": 1,
+                "allowed_task_ids": list(
+                    ACTION_DELTA_GATE_SHADOW_DEVELOPMENT_TASK_IDS
+                ),
+            }
 
     if cfg.evaluation_protocol_phase != "legacy":
         protocol_manifest, manifest_sha256 = load_protocol_manifest(
@@ -2915,10 +3147,13 @@ def eval_libero(cfg: GenerateConfig) -> float:
     if cfg.task_id is not None:
         task_ids = [cfg.task_id]
         log_message(f"Running only task {cfg.task_id}", log_file)
-    elif cfg.collect_action_delta_gate_shadow:
+    elif (
+        cfg.collect_action_delta_gate_shadow
+        or cfg.use_action_delta_nonconvergence_filter
+    ):
         task_ids = ACTION_DELTA_GATE_SHADOW_DEVELOPMENT_TASK_IDS
         log_message(
-            "Running Action-Delta shadow development tasks only: "
+            "Running Action-Delta development tasks only: "
             f"{list(task_ids)}",
             log_file,
         )
@@ -2957,7 +3192,10 @@ def eval_libero(cfg: GenerateConfig) -> float:
 
         if action_delta_gate_payload is not None:
             action_head_device = next(action_head.parameters()).device
-            if cfg.collect_action_delta_gate_shadow:
+            if (
+                cfg.collect_action_delta_gate_shadow
+                or cfg.use_action_delta_nonconvergence_filter
+            ):
                 prepared_action_delta_gate = prepare_action_delta_gate_shadow(
                     action_delta_gate_payload,
                     device=action_head_device,
@@ -2973,7 +3211,8 @@ def eval_libero(cfg: GenerateConfig) -> float:
             log_message(
                 "Bound Action-Delta Gate: "
                 f"task={task_id}, fold={prepared_action_delta_gate.outer_fold}, "
-                f"threshold={prepared_action_delta_gate.threshold:.12f}",
+                f"threshold={prepared_action_delta_gate.threshold:.12f}, "
+                f"nonconvergence_q={ACTION_DELTA_NONCONVERGENCE_THRESHOLD:.12f}",
                 log_file,
             )
         else:

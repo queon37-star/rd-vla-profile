@@ -21,11 +21,16 @@ from prismatic.models.scalar_stopping_policy import (
 )
 from prismatic.models.action_delta_gate import (
     ACTION_DELTA_GATE_DIAGNOSTIC_RETURN_MODES,
+    ACTION_DELTA_NONCONVERGENCE_CODA_COST_MS,
+    ACTION_DELTA_NONCONVERGENCE_MIN_TERMINAL_ITER,
+    ACTION_DELTA_NONCONVERGENCE_SCORER_COST_MS,
+    ACTION_DELTA_NONCONVERGENCE_THRESHOLD,
     ActionDeltaGateCorrectionError,
     NonFiniteActionDeltaGateError,
     PreparedActionDeltaGate,
     build_action_delta_gate_corrected_output,
     evaluate_action_delta_gate,
+    validate_action_delta_nonconvergence_filter_configuration,
     validate_action_delta_gate_runtime_configuration,
 )
 from prismatic.models.action_delta_gate_shadow import (
@@ -637,6 +642,7 @@ class VLARecurrent(nn.Module):
                 action_delta_gate_exact_coda_audit: bool = False,
                 action_delta_gate_return_mode: str = "anchor",
                 collect_action_delta_gate_shadow: bool = False,
+                use_action_delta_nonconvergence_filter: bool = False,
                 **kwargs) -> torch.Tensor:
         requested_recurrence_strategy = convergence_strategy
         canonical_recurrence_strategy = canonicalize_recurrence_strategy(convergence_strategy)
@@ -724,6 +730,24 @@ class VLARecurrent(nn.Module):
             use_cached_final_output=use_cached_final_output,
             min_terminal_iter=action_delta_gate_min_terminal_iter,
         )
+        validate_action_delta_nonconvergence_filter_configuration(
+            enabled=use_action_delta_nonconvergence_filter,
+            production_gate_enabled=use_action_delta_gate,
+            shadow_collection_enabled=collect_action_delta_gate_shadow,
+            canonical_recurrence_strategy=canonical_recurrence_strategy,
+            prepared_gate=action_delta_gate,
+            batch_size=h_a.size(0),
+            use_warm_start=enable_warm_start,
+            warm_start_source=warm_start_source,
+            warm_start_min_iter=warm_start_min_iter,
+            use_latent_precheck=use_latent_precheck,
+            latent_precheck_mode=latent_precheck_mode,
+            latent_precheck_trace_level=latent_precheck_trace_level,
+            shadow_full_depth=shadow_full_depth,
+            collect_preconvergence_raw_shadow=collect_preconvergence_raw_shadow,
+            use_cached_final_output=use_cached_final_output,
+            profile_coda_cost=profile_coda_cost,
+        )
         if latent_precheck_mode == "origin_aware" and self.training:
             raise ValueError("latent_precheck_mode='origin_aware' is inference-only")
         if shadow_full_depth and self.training:
@@ -749,6 +773,8 @@ class VLARecurrent(nn.Module):
             raise ValueError("Action-Delta Gate is inference-only")
         if collect_action_delta_gate_shadow and self.training:
             raise ValueError("Action-Delta Gate shadow collection is inference-only")
+        if use_action_delta_nonconvergence_filter and self.training:
+            raise ValueError("Action-Delta non-convergence filter is inference-only")
 
         B = h_a.size(0)
         device, dtype = h_a.device, h_a.dtype
@@ -1094,6 +1120,30 @@ class VLARecurrent(nn.Module):
             action_delta_gate_shadow_error = None
             action_delta_gate_shadow_exact_outputs = []
             action_delta_gate_shadow_exact_output_iterations = []
+            action_delta_nonconvergence_requested = bool(
+                use_action_delta_nonconvergence_filter
+            )
+            action_delta_nonconvergence_applied = bool(
+                action_delta_nonconvergence_requested and cached_state_used
+            )
+            action_delta_nonconvergence_enabled_for_prediction = (
+                action_delta_nonconvergence_applied
+            )
+            action_delta_nonconvergence_anchor_state = None
+            action_delta_nonconvergence_anchor_output = None
+            action_delta_nonconvergence_anchor_iteration = None
+            action_delta_nonconvergence_force_exact_next = False
+            action_delta_nonconvergence_pending_event = None
+            action_delta_nonconvergence_events = []
+            action_delta_nonconvergence_score_trace = []
+            action_delta_nonconvergence_predictor_ms_list = []
+            action_delta_nonconvergence_predicted_event_count = 0
+            action_delta_nonconvergence_skip_count = 0
+            action_delta_nonconvergence_forced_coda_count = 0
+            action_delta_nonconvergence_consecutive_skip_prevention_count = 0
+            action_delta_nonconvergence_max_iter_skip_prevention_count = 0
+            action_delta_nonconvergence_first_divergence_iteration = None
+            action_delta_nonconvergence_fallback_reason = None
 
             run_one_iteration_ms_list = []
             # Output timing lists include the final return-path call unless the
@@ -1178,6 +1228,15 @@ class VLARecurrent(nn.Module):
                         action_delta_gate_diagnostic_trigger_pending = None
                         gate_predicted_delta = None
                         action_delta_gate_shadow_pending = None
+                        action_delta_nonconvergence_forced_confirmation = False
+                        if action_delta_nonconvergence_force_exact_next:
+                            # max_skip=1: the iteration immediately following a
+                            # diagnostic skip is always routed through the normal
+                            # exact-Coda path, with no predictor evaluation.
+                            should_call_coda = True
+                            action_delta_nonconvergence_forced_confirmation = True
+                            action_delta_nonconvergence_forced_coda_count += 1
+                            action_delta_nonconvergence_consecutive_skip_prevention_count += 1
                         with rdvla_range("RDVLA/action_head/coda_stop_check_total"):
                             if (
                                 should_call_coda
@@ -1217,6 +1276,106 @@ class VLARecurrent(nn.Module):
                                     action_delta_gate_shadow_error = (
                                         f"{type(exc).__name__}: {exc}"
                                     )
+                            if (
+                                should_call_coda
+                                and action_delta_nonconvergence_enabled_for_prediction
+                                and not action_delta_nonconvergence_forced_confirmation
+                                and action_delta_nonconvergence_anchor_state is not None
+                                and actual_iter
+                                >= ACTION_DELTA_NONCONVERGENCE_MIN_TERMINAL_ITER
+                            ):
+                                predictor_start = time.perf_counter()
+                                nonconvergence_score = None
+                                predicted_nonconvergence = False
+                                try:
+                                    with rdvla_range(
+                                        "RDVLA/action_head/"
+                                        "action_delta_nonconvergence_filter_total"
+                                    ):
+                                        (
+                                            nonconvergence_score,
+                                            _unused_convergence_decision,
+                                        ) = evaluate_action_delta_gate(
+                                            action_delta_gate,
+                                            action_delta_nonconvergence_anchor_state,
+                                            state,
+                                        )
+                                    predicted_nonconvergence = bool(
+                                        nonconvergence_score
+                                        >= ACTION_DELTA_NONCONVERGENCE_THRESHOLD
+                                    )
+                                except NonFiniteActionDeltaGateError as exc:
+                                    # Fail closed: execute exact Coda now and
+                                    # disable later diagnostic skips.
+                                    action_delta_nonconvergence_fallback_reason = str(
+                                        exc
+                                    )
+                                    action_delta_nonconvergence_enabled_for_prediction = (
+                                        False
+                                    )
+                                predictor_end = time.perf_counter()
+                                action_delta_nonconvergence_predictor_ms_list.append(
+                                    (predictor_end - predictor_start) * 1000.0
+                                )
+                                action_delta_nonconvergence_score_trace.append(
+                                    {
+                                        "last_exact_anchor_iteration": int(
+                                            action_delta_nonconvergence_anchor_iteration
+                                        ),
+                                        "terminal_iteration": int(actual_iter),
+                                        "score": (
+                                            float(nonconvergence_score)
+                                            if nonconvergence_score is not None
+                                            else None
+                                        ),
+                                        "predicted_nonconvergence": bool(
+                                            predicted_nonconvergence
+                                        ),
+                                        "coda_skipped": False,
+                                        "fallback_reason": (
+                                            action_delta_nonconvergence_fallback_reason
+                                            if nonconvergence_score is None
+                                            else None
+                                        ),
+                                    }
+                                )
+                                if predicted_nonconvergence:
+                                    action_delta_nonconvergence_predicted_event_count += 1
+                                    if actual_iter < max_iter:
+                                        # Never end a prediction on a skipped
+                                        # Coda: reserve the next iteration for
+                                        # mandatory exact confirmation.
+                                        should_call_coda = False
+                                        action_delta_nonconvergence_force_exact_next = True
+                                        action_delta_nonconvergence_skip_count += 1
+                                        action_delta_nonconvergence_score_trace[-1][
+                                            "coda_skipped"
+                                        ] = True
+                                        event = {
+                                            "last_exact_anchor_iteration": int(
+                                                action_delta_nonconvergence_anchor_iteration
+                                            ),
+                                            "skipped_terminal_iteration": int(
+                                                actual_iter
+                                            ),
+                                            "forced_exact_terminal_iteration": None,
+                                            "score": float(nonconvergence_score),
+                                            "exact_mse_at_forced_confirmation": None,
+                                            "stopping_occurred_at_forced_confirmation": None,
+                                            "extra_recurrent_iterations_after_skip": None,
+                                            "iterations_from_skip_to_prediction_end": None,
+                                        }
+                                        action_delta_nonconvergence_events.append(event)
+                                        action_delta_nonconvergence_pending_event = event
+                                        if (
+                                            action_delta_nonconvergence_first_divergence_iteration
+                                            is None
+                                        ):
+                                            action_delta_nonconvergence_first_divergence_iteration = int(
+                                                actual_iter
+                                            )
+                                    else:
+                                        action_delta_nonconvergence_max_iter_skip_prevention_count += 1
                             if (
                                 should_call_coda
                                 and action_delta_gate_enabled_for_prediction
@@ -1478,6 +1637,36 @@ class VLARecurrent(nn.Module):
                                                 else:
                                                     min_iter_gate_block_count += 1
 
+                                if action_delta_nonconvergence_forced_confirmation:
+                                    if action_delta_nonconvergence_pending_event is None:
+                                        raise RuntimeError(
+                                            "forced Action-Delta non-convergence Coda "
+                                            "has no pending skip event"
+                                        )
+                                    action_delta_nonconvergence_pending_event.update(
+                                        {
+                                            "forced_exact_terminal_iteration": int(
+                                                actual_iter
+                                            ),
+                                            "exact_mse_at_forced_confirmation": (
+                                                float(action_mse)
+                                                if action_mse is not None
+                                                else None
+                                            ),
+                                            "stopping_occurred_at_forced_confirmation": bool(
+                                                adaptive_stop
+                                            ),
+                                            "extra_recurrent_iterations_after_skip": int(
+                                                actual_iter
+                                                - action_delta_nonconvergence_pending_event[
+                                                    "skipped_terminal_iteration"
+                                                ]
+                                            ),
+                                        }
+                                    )
+                                    action_delta_nonconvergence_force_exact_next = False
+                                    action_delta_nonconvergence_pending_event = None
+
                                 if action_delta_gate_shadow_pending is not None:
                                     try:
                                         action_delta_gate_shadow_transitions.append(
@@ -1684,6 +1873,31 @@ class VLARecurrent(nn.Module):
                                         action_delta_gate_anchor_state = state.detach()
                                         action_delta_gate_anchor_output = curr_output.detach()
                                         action_delta_gate_anchor_iteration = int(actual_iter)
+                                if action_delta_nonconvergence_enabled_for_prediction:
+                                    if not bool(
+                                        torch.isfinite(curr_output).all().item()
+                                    ):
+                                        action_delta_nonconvergence_fallback_reason = (
+                                            "Action-Delta non-convergence exact anchor "
+                                            "output is non-finite"
+                                        )
+                                        action_delta_nonconvergence_enabled_for_prediction = (
+                                            False
+                                        )
+                                    else:
+                                        # Update after every executed exact Coda,
+                                        # including all pre-eligibility calls and
+                                        # forced confirmations. Skipped states are
+                                        # never installed as anchors.
+                                        action_delta_nonconvergence_anchor_state = (
+                                            state.detach()
+                                        )
+                                        action_delta_nonconvergence_anchor_output = (
+                                            curr_output.detach()
+                                        )
+                                        action_delta_nonconvergence_anchor_iteration = int(
+                                            actual_iter
+                                        )
                                 if profile_coda_cost:
                                     convergence_check_end = self._sync_time()
                                     convergence_check_ms_list.append((convergence_check_end - convergence_check_start) * 1000.0)
@@ -1703,6 +1917,31 @@ class VLARecurrent(nn.Module):
             if stop_reason is None and actual_iter >= max_iter:
                 with rdvla_range("RDVLA/action_head/stop_reason_update"):
                     stop_reason = "max_iter"
+
+            if action_delta_nonconvergence_force_exact_next:
+                raise RuntimeError(
+                    "Action-Delta non-convergence prediction ended without its "
+                    "mandatory exact-Coda confirmation"
+                )
+            if (
+                action_delta_nonconvergence_forced_coda_count
+                != action_delta_nonconvergence_skip_count
+            ):
+                raise RuntimeError(
+                    "Action-Delta non-convergence skip/forced-Coda accounting "
+                    "is inconsistent"
+                )
+            if (
+                len(action_delta_nonconvergence_events)
+                != action_delta_nonconvergence_skip_count
+            ):
+                raise RuntimeError(
+                    "Action-Delta non-convergence event/skip accounting is inconsistent"
+                )
+            for event in action_delta_nonconvergence_events:
+                event["iterations_from_skip_to_prediction_end"] = int(
+                    actual_iter - event["skipped_terminal_iteration"]
+                )
 
             reuse_terminal_output = bool(
                 not action_delta_gate_triggered
@@ -1749,6 +1988,15 @@ class VLARecurrent(nn.Module):
             else:
                 production_snapshot = None
 
+            action_delta_nonconvergence_estimated_gross_ms = (
+                action_delta_nonconvergence_skip_count
+                * ACTION_DELTA_NONCONVERGENCE_CODA_COST_MS
+            )
+            action_delta_nonconvergence_estimated_scorer_ms = (
+                len(action_delta_nonconvergence_score_trace)
+                * ACTION_DELTA_NONCONVERGENCE_SCORER_COST_MS
+            )
+
             self.last_recurrence_debug = {
                 "strategy": convergence_strategy,
                 "requested_recurrence_strategy": requested_recurrence_strategy,
@@ -1785,6 +2033,84 @@ class VLARecurrent(nn.Module):
                 "scalar_policy_terminal_iteration": None,
                 "scalar_policy_score_call_count": 0,
                 "scalar_policy_score_trace": [],
+                "use_action_delta_nonconvergence_filter": bool(
+                    use_action_delta_nonconvergence_filter
+                ),
+                "action_delta_nonconvergence_filter_requested": bool(
+                    action_delta_nonconvergence_requested
+                ),
+                "action_delta_nonconvergence_filter_applied": bool(
+                    action_delta_nonconvergence_applied
+                ),
+                "action_delta_nonconvergence_filter_development_only": True,
+                "action_delta_nonconvergence_filter_efficiency_eligible": False,
+                "action_delta_nonconvergence_filter_threshold": float(
+                    ACTION_DELTA_NONCONVERGENCE_THRESHOLD
+                ),
+                "action_delta_nonconvergence_filter_min_terminal_iter": int(
+                    ACTION_DELTA_NONCONVERGENCE_MIN_TERMINAL_ITER
+                ),
+                "action_delta_nonconvergence_filter_max_skip": 1,
+                "action_delta_nonconvergence_filter_score_call_count": len(
+                    action_delta_nonconvergence_score_trace
+                ),
+                "action_delta_nonconvergence_filter_score_trace": (
+                    action_delta_nonconvergence_score_trace
+                ),
+                "action_delta_nonconvergence_filter_predicted_event_count": int(
+                    action_delta_nonconvergence_predicted_event_count
+                ),
+                "action_delta_nonconvergence_filter_actual_coda_skip_count": int(
+                    action_delta_nonconvergence_skip_count
+                ),
+                "action_delta_nonconvergence_filter_forced_next_coda_call_count": int(
+                    action_delta_nonconvergence_forced_coda_count
+                ),
+                "action_delta_nonconvergence_filter_consecutive_skip_prevention_count": int(
+                    action_delta_nonconvergence_consecutive_skip_prevention_count
+                ),
+                "action_delta_nonconvergence_filter_max_iter_skip_prevention_count": int(
+                    action_delta_nonconvergence_max_iter_skip_prevention_count
+                ),
+                "action_delta_nonconvergence_filter_exact_coda_call_count": int(
+                    get_output_call_count
+                ),
+                "action_delta_nonconvergence_filter_recurrent_K": int(actual_iter),
+                "action_delta_nonconvergence_filter_first_trajectory_divergence_terminal_iteration": (
+                    action_delta_nonconvergence_first_divergence_iteration
+                ),
+                "action_delta_nonconvergence_filter_events": (
+                    action_delta_nonconvergence_events
+                ),
+                "action_delta_nonconvergence_filter_fallback_reason": (
+                    action_delta_nonconvergence_fallback_reason
+                ),
+                "action_delta_nonconvergence_filter_predictor_ms_list": (
+                    action_delta_nonconvergence_predictor_ms_list
+                ),
+                "action_delta_nonconvergence_filter_predictor_ms_total": sum(
+                    action_delta_nonconvergence_predictor_ms_list
+                ),
+                "action_delta_nonconvergence_filter_estimate_scorer_cost_ms_per_call": float(
+                    ACTION_DELTA_NONCONVERGENCE_SCORER_COST_MS
+                ),
+                "action_delta_nonconvergence_filter_estimate_coda_cost_ms_per_call": float(
+                    ACTION_DELTA_NONCONVERGENCE_CODA_COST_MS
+                ),
+                "action_delta_nonconvergence_filter_estimated_gross_coda_savings_ms": float(
+                    action_delta_nonconvergence_estimated_gross_ms
+                ),
+                "action_delta_nonconvergence_filter_estimated_scorer_cost_ms": float(
+                    action_delta_nonconvergence_estimated_scorer_ms
+                ),
+                "action_delta_nonconvergence_filter_estimated_net_savings_ms": float(
+                    action_delta_nonconvergence_estimated_gross_ms
+                    - action_delta_nonconvergence_estimated_scorer_ms
+                ),
+                "action_delta_nonconvergence_filter_measured_net_savings_ms": None,
+                "action_delta_nonconvergence_filter_measured_net_savings_status": (
+                    "requires_paired_warm_only_counterfactual"
+                ),
                 "use_action_delta_gate": bool(use_action_delta_gate),
                 "action_delta_gate_requested": action_delta_gate_requested,
                 "action_delta_gate_applied": action_delta_gate_applied,
@@ -2016,6 +2342,30 @@ class VLARecurrent(nn.Module):
                     "output_proj_ms_total": output_proj_ms_total,
                     "coda_time_ratio_total": (
                         coda_ms_total / profiled_recurrent_ms_total if profiled_recurrent_ms_total else 0.0
+                    ),
+                    "action_delta_nonconvergence_filter_recurrent_ms_total": (
+                        run_one_iteration_ms_total
+                    ),
+                    "action_delta_nonconvergence_filter_coda_ms_total": (
+                        coda_ms_total
+                    ),
+                    "action_delta_nonconvergence_filter_get_output_ms_total": (
+                        get_output_ms_total
+                    ),
+                    "action_delta_nonconvergence_filter_measured_gross_coda_savings_proxy_ms": (
+                        action_delta_nonconvergence_skip_count
+                        * (get_output_ms_total / get_output_call_count)
+                        if get_output_call_count
+                        else 0.0
+                    ),
+                    "action_delta_nonconvergence_filter_measured_net_savings_proxy_ms": (
+                        (
+                            action_delta_nonconvergence_skip_count
+                            * (get_output_ms_total / get_output_call_count)
+                            if get_output_call_count
+                            else 0.0
+                        )
+                        - sum(action_delta_nonconvergence_predictor_ms_list)
                     ),
                 })
 
@@ -2415,6 +2765,7 @@ class ActionHeadRecurrent(nn.Module):
                        action_delta_gate_exact_coda_audit=False,
                        action_delta_gate_return_mode="anchor",
                        collect_action_delta_gate_shadow=False,
+                       use_action_delta_nonconvergence_filter=False,
                        **kwargs):
         canonical_recurrence_strategy = canonicalize_recurrence_strategy(
             convergence_strategy
@@ -2433,7 +2784,9 @@ class ActionHeadRecurrent(nn.Module):
             scalar_policy_execution_mode,
         )
         if (
-            use_action_delta_gate or collect_action_delta_gate_shadow
+            use_action_delta_gate
+            or collect_action_delta_gate_shadow
+            or use_action_delta_nonconvergence_filter
         ) and action_delta_gate is None:
             action_delta_gate = self._action_delta_gate
         validate_latent_only_configuration(
@@ -2537,6 +2890,9 @@ class ActionHeadRecurrent(nn.Module):
                                  ),
                                  collect_action_delta_gate_shadow=(
                                      collect_action_delta_gate_shadow
+                                 ),
+                                 use_action_delta_nonconvergence_filter=(
+                                     use_action_delta_nonconvergence_filter
                                  ))
             if capture_action_head_workload:
                 metadata = self.model.last_inference_metadata

@@ -27,6 +27,13 @@ ACTION_DELTA_GATE_CHUNK_LEN = 8
 ACTION_DELTA_GATE_OUTER_FOLD = 4
 ACTION_DELTA_GATE_HELD_OUT_TASK_IDS = (4, 5)
 ACTION_DELTA_GATE_SHADOW_CALIBRATION_TASK_IDS = (0, 1, 2, 3, 6, 7, 8, 9)
+ACTION_DELTA_NONCONVERGENCE_THRESHOLD = 0.0015
+ACTION_DELTA_NONCONVERGENCE_MIN_TERMINAL_ITER = 5
+# Fixed measurement anchors used only for diagnostic latency estimates. Runtime
+# measurements remain separately reported and never replace these provenance
+# values.
+ACTION_DELTA_NONCONVERGENCE_SCORER_COST_MS = 0.36627289134678936
+ACTION_DELTA_NONCONVERGENCE_CODA_COST_MS = 1.864207385085098
 ACTION_DELTA_GATE_PRODUCTION_RETURN_MODES = (
     "anchor",
     "predicted_correction",
@@ -504,4 +511,77 @@ def validate_action_delta_gate_runtime_configuration(
     _require(
         isinstance(exact_coda_audit, bool),
         "Action-Delta Gate exact Coda audit must be boolean",
+    )
+
+
+def validate_action_delta_nonconvergence_filter_configuration(
+    *,
+    enabled: bool,
+    production_gate_enabled: bool,
+    shadow_collection_enabled: bool,
+    canonical_recurrence_strategy: str | None,
+    prepared_gate: Any,
+    batch_size: int,
+    use_warm_start: bool,
+    warm_start_source: str,
+    warm_start_min_iter: int,
+    use_latent_precheck: bool,
+    latent_precheck_mode: str,
+    latent_precheck_trace_level: str,
+    shadow_full_depth: bool,
+    collect_preconvergence_raw_shadow: bool,
+    use_cached_final_output: bool,
+    profile_coda_cost: bool,
+) -> None:
+    """Validate the development-only high-side non-convergence filter."""
+
+    if not enabled:
+        return
+    _require(
+        not production_gate_enabled,
+        "non-convergence filter cannot run with the production Action-Delta Gate",
+    )
+    _require(
+        not shadow_collection_enabled,
+        "non-convergence filter cannot run with Action-Delta shadow collection",
+    )
+    _require(
+        isinstance(prepared_gate, PreparedActionDeltaGate),
+        "non-convergence filter requires a prepared frozen Action-Delta artifact",
+    )
+    _require(batch_size == 1, "non-convergence filter requires batch size 1")
+    _require(
+        canonical_recurrence_strategy == "adjacent_action_mse",
+        "non-convergence filter requires adjacent action-MSE recurrence",
+    )
+    _require(use_warm_start, "non-convergence filter requires warm-start inference")
+    _require(
+        warm_start_source == "midpoint",
+        "non-convergence filter requires midpoint warm-start",
+    )
+    _require(
+        warm_start_min_iter == 2,
+        "non-convergence filter requires warm_start_min_iter=2",
+    )
+    _require(not use_latent_precheck, "non-convergence filter cannot use latent pre-check")
+    _require(
+        latent_precheck_mode == "off",
+        "non-convergence filter requires latent_precheck_mode='off'",
+    )
+    _require(
+        latent_precheck_trace_level == "off",
+        "non-convergence filter requires latent_precheck_trace_level='off'",
+    )
+    _require(not shadow_full_depth, "non-convergence filter cannot enable shadow_full_depth")
+    _require(
+        not collect_preconvergence_raw_shadow,
+        "non-convergence filter cannot collect raw shadow trajectories",
+    )
+    _require(
+        use_cached_final_output,
+        "non-convergence filter requires use_cached_final_output=True",
+    )
+    _require(
+        profile_coda_cost,
+        "non-convergence filter requires profile_coda_cost=True for diagnostic accounting",
     )

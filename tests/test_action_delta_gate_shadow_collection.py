@@ -555,3 +555,46 @@ def test_phase_a_runner_configuration_accepts_only_development_tasks_and_termina
             use_cached_final_output=True,
             min_terminal_iter=5,
         )
+
+
+def _nonconvergence_runtime_config(**overrides):
+    values = {
+        "pretrained_checkpoint": "",
+        "use_recurrent": True,
+        "recurrence_strategy": "kl_divergence",
+        "recurrence_kl_thresh": 0.001,
+        "use_warm_start": True,
+        "warm_start_source": "midpoint",
+        "warm_start_min_iter": 2,
+        "use_cached_final_output": True,
+        "profile_coda_cost": True,
+        "latent_precheck_mode": "off",
+        "latent_precheck_trace_level": "off",
+        "use_action_delta_nonconvergence_filter": True,
+        "action_delta_gate_artifact_path": "benchmark_results/coda_anchor_feasibility/action_delta_gate_fold4/action_delta_gate.pt",
+        "action_delta_gate_expected_sha256": "b4f9e938c72108f164b9d997a86eb4f5d9ea15b146754b9af83f9735e1ecfcf8",
+        "action_delta_gate_min_terminal_iter": 5,
+    }
+    values.update(overrides)
+    return GenerateConfig(**values)
+
+
+def test_nonconvergence_runtime_config_is_development_only_and_fixed_terminal_five():
+    validate_config(_nonconvergence_runtime_config(task_id=0))
+    validate_config(_nonconvergence_runtime_config(task_id=None))
+    with pytest.raises(ValueError, match="Task 4/5"):
+        validate_config(_nonconvergence_runtime_config(task_id=4))
+    with pytest.raises(ValueError, match="min_terminal_iter=5"):
+        validate_config(
+            _nonconvergence_runtime_config(
+                task_id=0,
+                action_delta_gate_min_terminal_iter=4,
+            )
+        )
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        validate_config(
+            _nonconvergence_runtime_config(
+                task_id=0,
+                use_action_delta_gate=True,
+            )
+        )
