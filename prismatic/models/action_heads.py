@@ -30,6 +30,7 @@ from prismatic.models.action_delta_gate import (
     PreparedActionDeltaGate,
     build_action_delta_gate_corrected_output,
     evaluate_action_delta_gate,
+    validate_action_delta_deferred_backfill_configuration,
     validate_action_delta_nonconvergence_filter_configuration,
     validate_action_delta_gate_runtime_configuration,
 )
@@ -643,6 +644,7 @@ class VLARecurrent(nn.Module):
                 action_delta_gate_return_mode: str = "anchor",
                 collect_action_delta_gate_shadow: bool = False,
                 use_action_delta_nonconvergence_filter: bool = False,
+                use_action_delta_deferred_backfill_filter: bool = False,
                 **kwargs) -> torch.Tensor:
         requested_recurrence_strategy = convergence_strategy
         canonical_recurrence_strategy = canonicalize_recurrence_strategy(convergence_strategy)
@@ -748,6 +750,25 @@ class VLARecurrent(nn.Module):
             use_cached_final_output=use_cached_final_output,
             profile_coda_cost=profile_coda_cost,
         )
+        validate_action_delta_deferred_backfill_configuration(
+            enabled=use_action_delta_deferred_backfill_filter,
+            max_skip_filter_enabled=use_action_delta_nonconvergence_filter,
+            production_gate_enabled=use_action_delta_gate,
+            shadow_collection_enabled=collect_action_delta_gate_shadow,
+            canonical_recurrence_strategy=canonical_recurrence_strategy,
+            prepared_gate=action_delta_gate,
+            batch_size=h_a.size(0),
+            use_warm_start=enable_warm_start,
+            warm_start_source=warm_start_source,
+            warm_start_min_iter=warm_start_min_iter,
+            use_latent_precheck=use_latent_precheck,
+            latent_precheck_mode=latent_precheck_mode,
+            latent_precheck_trace_level=latent_precheck_trace_level,
+            shadow_full_depth=shadow_full_depth,
+            collect_preconvergence_raw_shadow=collect_preconvergence_raw_shadow,
+            use_cached_final_output=use_cached_final_output,
+            profile_coda_cost=profile_coda_cost,
+        )
         if latent_precheck_mode == "origin_aware" and self.training:
             raise ValueError("latent_precheck_mode='origin_aware' is inference-only")
         if shadow_full_depth and self.training:
@@ -775,6 +796,8 @@ class VLARecurrent(nn.Module):
             raise ValueError("Action-Delta Gate shadow collection is inference-only")
         if use_action_delta_nonconvergence_filter and self.training:
             raise ValueError("Action-Delta non-convergence filter is inference-only")
+        if use_action_delta_deferred_backfill_filter and self.training:
+            raise ValueError("Action-Delta deferred/backfill filter is inference-only")
 
         B = h_a.size(0)
         device, dtype = h_a.device, h_a.dtype
@@ -1144,6 +1167,35 @@ class VLARecurrent(nn.Module):
             action_delta_nonconvergence_max_iter_skip_prevention_count = 0
             action_delta_nonconvergence_first_divergence_iteration = None
             action_delta_nonconvergence_fallback_reason = None
+            action_delta_deferred_requested = bool(
+                use_action_delta_deferred_backfill_filter
+            )
+            action_delta_deferred_applied = bool(
+                action_delta_deferred_requested and cached_state_used
+            )
+            action_delta_deferred_enabled_for_prediction = (
+                action_delta_deferred_applied
+            )
+            action_delta_deferred_previous_latent_state = None
+            action_delta_deferred_last_exact_iteration = None
+            action_delta_deferred_retained_state = None
+            action_delta_deferred_retained_iteration = None
+            action_delta_deferred_open_run = None
+            action_delta_deferred_confirmation_run_pending = None
+            action_delta_deferred_backfill_output = None
+            action_delta_deferred_runs = []
+            action_delta_deferred_score_trace = []
+            action_delta_deferred_predictor_ms_list = []
+            action_delta_deferred_high_score_count = 0
+            action_delta_deferred_backfill_call_count = 0
+            action_delta_deferred_backfill_get_output_ms_list = []
+            action_delta_deferred_backfill_coda_ms_list = []
+            action_delta_deferred_current_coda_call_count = 0
+            action_delta_deferred_current_get_output_ms_list = []
+            action_delta_deferred_current_coda_ms_list = []
+            action_delta_deferred_exact_stop_mse_trace = []
+            action_delta_deferred_max_iter_fallback_count = 0
+            action_delta_deferred_fallback_reason = None
 
             run_one_iteration_ms_list = []
             # Output timing lists include the final return-path call unless the
@@ -1229,6 +1281,9 @@ class VLARecurrent(nn.Module):
                         gate_predicted_delta = None
                         action_delta_gate_shadow_pending = None
                         action_delta_nonconvergence_forced_confirmation = False
+                        action_delta_deferred_backfill_output = None
+                        action_delta_deferred_comparison_iteration = None
+                        action_delta_deferred_suppress_stop_comparison = False
                         if action_delta_nonconvergence_force_exact_next:
                             # max_skip=1: the iteration immediately following a
                             # diagnostic skip is always routed through the normal
@@ -1276,6 +1331,189 @@ class VLARecurrent(nn.Module):
                                     action_delta_gate_shadow_error = (
                                         f"{type(exc).__name__}: {exc}"
                                     )
+                            if (
+                                should_call_coda
+                                and action_delta_deferred_enabled_for_prediction
+                                and action_delta_deferred_previous_latent_state is not None
+                                and actual_iter
+                                >= ACTION_DELTA_NONCONVERGENCE_MIN_TERMINAL_ITER
+                            ):
+                                predictor_start = time.perf_counter()
+                                deferred_score = None
+                                deferred_high = False
+                                try:
+                                    with rdvla_range(
+                                        "RDVLA/action_head/"
+                                        "action_delta_deferred_backfill_filter_total"
+                                    ):
+                                        deferred_score, _unused_gate_decision = (
+                                            evaluate_action_delta_gate(
+                                                action_delta_gate,
+                                                action_delta_deferred_previous_latent_state,
+                                                state,
+                                            )
+                                        )
+                                    deferred_high = bool(
+                                        deferred_score
+                                        >= ACTION_DELTA_NONCONVERGENCE_THRESHOLD
+                                    )
+                                except NonFiniteActionDeltaGateError as exc:
+                                    # An indeterminate transition is handled as
+                                    # requiring exact adjacent confirmation.
+                                    action_delta_deferred_fallback_reason = str(exc)
+                                    action_delta_deferred_enabled_for_prediction = False
+                                predictor_end = time.perf_counter()
+                                action_delta_deferred_predictor_ms_list.append(
+                                    (predictor_end - predictor_start) * 1000.0
+                                )
+                                score_record = {
+                                    "anchor_terminal_iteration": int(actual_iter - 1),
+                                    "terminal_iteration": int(actual_iter),
+                                    "score": (
+                                        float(deferred_score)
+                                        if deferred_score is not None
+                                        else None
+                                    ),
+                                    "predicted_nonconverged": bool(deferred_high),
+                                    "coda_deferred": False,
+                                    "max_iter_exact_fallback": False,
+                                    "fallback_reason": (
+                                        action_delta_deferred_fallback_reason
+                                        if deferred_score is None
+                                        else None
+                                    ),
+                                }
+                                action_delta_deferred_score_trace.append(score_record)
+
+                                if deferred_high and actual_iter < max_iter:
+                                    should_call_coda = False
+                                    score_record["coda_deferred"] = True
+                                    action_delta_deferred_high_score_count += 1
+                                    if action_delta_deferred_open_run is None:
+                                        action_delta_deferred_open_run = {
+                                            "prediction_identity": None,
+                                            "start_terminal_iteration": int(actual_iter),
+                                            "end_terminal_iteration": int(actual_iter),
+                                            "run_length": 0,
+                                            "scores": [],
+                                            "backfilled_terminal_iteration": None,
+                                            "confirming_current_terminal_iteration": None,
+                                            "exact_adjacent_confirmation_mse": None,
+                                            "stopped_at_confirmation": None,
+                                            "truly_eliminated_coda_calls": None,
+                                            "closed_by_max_iter_exact_fallback": False,
+                                        }
+                                    action_delta_deferred_open_run[
+                                        "end_terminal_iteration"
+                                    ] = int(actual_iter)
+                                    action_delta_deferred_open_run["run_length"] += 1
+                                    action_delta_deferred_open_run["scores"].append(
+                                        float(deferred_score)
+                                    )
+                                    # Only the final state of a high-score run is
+                                    # needed to reconstruct the later adjacent pair.
+                                    action_delta_deferred_retained_state = state.detach()
+                                    action_delta_deferred_retained_iteration = int(
+                                        actual_iter
+                                    )
+                                else:
+                                    if deferred_high and actual_iter >= max_iter:
+                                        # Terminal output must be exact. The high
+                                        # score cannot suppress Coda at max_iter.
+                                        action_delta_deferred_max_iter_fallback_count += 1
+                                        score_record["max_iter_exact_fallback"] = True
+                                        if action_delta_deferred_open_run is not None:
+                                            # The last executed exact action can be
+                                            # older than S[k-1] here. Execute exact
+                                            # Coda(S[k]) for the return contract, but
+                                            # never feed that non-adjacent pair to the
+                                            # convergence criterion.
+                                            action_delta_deferred_suppress_stop_comparison = (
+                                                True
+                                            )
+                                            action_delta_deferred_open_run.update(
+                                                {
+                                                    "confirming_current_terminal_iteration": int(
+                                                        actual_iter
+                                                    ),
+                                                    "truly_eliminated_coda_calls": int(
+                                                        action_delta_deferred_open_run[
+                                                            "run_length"
+                                                        ]
+                                                    ),
+                                                    "closed_by_max_iter_exact_fallback": True,
+                                                }
+                                            )
+                                            action_delta_deferred_runs.append(
+                                                action_delta_deferred_open_run
+                                            )
+                                            action_delta_deferred_open_run = None
+                                            action_delta_deferred_retained_state = None
+                                            action_delta_deferred_retained_iteration = None
+                                    elif action_delta_deferred_open_run is not None:
+                                        # Low or non-finite score: reconstruct only
+                                        # a[k-1], then the normal path below executes
+                                        # a[k] and applies the original adjacent MSE.
+                                        action_delta_deferred_confirmation_run_pending = (
+                                            action_delta_deferred_open_run
+                                        )
+                                        action_delta_deferred_open_run = None
+                                        backfill_start = time.perf_counter()
+                                        try:
+                                            with rdvla_range(
+                                                "RDVLA/action_head/"
+                                                "action_delta_deferred_backfill_coda"
+                                            ):
+                                                action_delta_deferred_backfill_output = (
+                                                    self._get_output(
+                                                        action_delta_deferred_retained_state,
+                                                        h_a,
+                                                        h_t,
+                                                        p,
+                                                        profile=profile_coda_cost,
+                                                    )
+                                                )
+                                            get_output_call_count += 1
+                                            action_delta_deferred_backfill_call_count += 1
+                                            action_delta_deferred_comparison_iteration = int(
+                                                action_delta_deferred_retained_iteration
+                                            )
+                                            if profile_coda_cost:
+                                                append_get_output_timing()
+                                                action_delta_deferred_backfill_get_output_ms_list.append(
+                                                    float(
+                                                        self._last_get_output_timing[
+                                                            "get_output_ms"
+                                                        ]
+                                                    )
+                                                )
+                                                action_delta_deferred_backfill_coda_ms_list.append(
+                                                    float(
+                                                        self._last_get_output_timing[
+                                                            "coda_ms"
+                                                        ]
+                                                    )
+                                                )
+                                            if not bool(
+                                                torch.isfinite(
+                                                    action_delta_deferred_backfill_output
+                                                ).all().item()
+                                            ):
+                                                action_delta_deferred_fallback_reason = (
+                                                    "deferred/backfill exact output is non-finite"
+                                                )
+                                                action_delta_deferred_enabled_for_prediction = False
+                                        except Exception as exc:
+                                            action_delta_deferred_backfill_output = None
+                                            action_delta_deferred_suppress_stop_comparison = True
+                                            action_delta_deferred_fallback_reason = (
+                                                f"backfill {type(exc).__name__}: {exc}"
+                                            )
+                                            action_delta_deferred_enabled_for_prediction = False
+                                        finally:
+                                            _unused_backfill_wall_ms = (
+                                                time.perf_counter() - backfill_start
+                                            ) * 1000.0
                             if (
                                 should_call_coda
                                 and action_delta_nonconvergence_enabled_for_prediction
@@ -1562,6 +1800,24 @@ class VLARecurrent(nn.Module):
                                     append_get_output_timing()
                                     convergence_check_start = self._sync_time()
 
+                                if action_delta_deferred_applied:
+                                    action_delta_deferred_current_coda_call_count += 1
+                                    if profile_coda_cost:
+                                        action_delta_deferred_current_get_output_ms_list.append(
+                                            float(
+                                                self._last_get_output_timing[
+                                                    "get_output_ms"
+                                                ]
+                                            )
+                                        )
+                                        action_delta_deferred_current_coda_ms_list.append(
+                                            float(
+                                                self._last_get_output_timing[
+                                                    "coda_ms"
+                                                ]
+                                            )
+                                        )
+
                                 if action_delta_gate_diagnostic_trigger_pending is not None:
                                     action_delta_gate_diagnostic_coda_call_count += 1
                                     action_delta_gate_diagnostic_coda_iterations.append(
@@ -1576,9 +1832,23 @@ class VLARecurrent(nn.Module):
                                             )
                                         )
 
-                                if prev_output is not None:
+                                action_mse_previous_output = prev_output
+                                action_mse_previous_iteration = (
+                                    action_delta_deferred_last_exact_iteration
+                                )
+                                if action_delta_deferred_backfill_output is not None:
+                                    action_mse_previous_output = (
+                                        action_delta_deferred_backfill_output
+                                    )
+                                    action_mse_previous_iteration = (
+                                        action_delta_deferred_comparison_iteration
+                                    )
+                                if action_delta_deferred_suppress_stop_comparison:
+                                    action_mse_previous_output = None
+
+                                if action_mse_previous_output is not None:
                                     with rdvla_range("RDVLA/action_head/stop_check/mse_compute"):
-                                        diff = curr_output - prev_output
+                                        diff = curr_output - action_mse_previous_output
                                         action_mse_tensor = torch.mean(diff ** 2)
                                     with rdvla_range("RDVLA/action_head/stop_check/item_sync"):
                                         action_mse = action_mse_tensor.item()
@@ -1606,7 +1876,7 @@ class VLARecurrent(nn.Module):
 
                                         if canonical_recurrence_strategy == "cosine_similarity":
                                             cos_sim_tensor = F.cosine_similarity(
-                                                prev_output.flatten(), curr_output.flatten(), dim=0
+                                                action_mse_previous_output.flatten(), curr_output.flatten(), dim=0
                                             )
                                             with rdvla_range("RDVLA/action_head/stop_check/item_sync"):
                                                 cos_sim = cos_sim_tensor.item()
@@ -1636,6 +1906,65 @@ class VLARecurrent(nn.Module):
                                                         )
                                                 else:
                                                     min_iter_gate_block_count += 1
+
+                                    if action_delta_deferred_applied:
+                                        adjacent_comparison = bool(
+                                            action_mse_previous_iteration
+                                            == actual_iter - 1
+                                        )
+                                        if not adjacent_comparison:
+                                            raise RuntimeError(
+                                                "deferred/backfill stop comparison is not adjacent"
+                                            )
+                                        action_delta_deferred_exact_stop_mse_trace.append(
+                                            {
+                                                "anchor_terminal_iteration": int(
+                                                    action_mse_previous_iteration
+                                                ),
+                                                "terminal_iteration": int(actual_iter),
+                                                "exact_adjacent_mse": float(action_mse),
+                                                "stopped": bool(adaptive_stop),
+                                            }
+                                        )
+
+                                if (
+                                    action_delta_deferred_confirmation_run_pending
+                                    is not None
+                                ):
+                                    pending_run = (
+                                        action_delta_deferred_confirmation_run_pending
+                                    )
+                                    pending_run.update(
+                                        {
+                                            "backfilled_terminal_iteration": int(
+                                                action_delta_deferred_comparison_iteration
+                                            )
+                                            if action_delta_deferred_comparison_iteration
+                                            is not None
+                                            else None,
+                                            "confirming_current_terminal_iteration": int(
+                                                actual_iter
+                                            ),
+                                            "exact_adjacent_confirmation_mse": (
+                                                float(action_mse)
+                                                if action_mse is not None
+                                                else None
+                                            ),
+                                            "stopped_at_confirmation": bool(
+                                                adaptive_stop
+                                            ),
+                                            "truly_eliminated_coda_calls": int(
+                                                pending_run["run_length"] - 1
+                                            )
+                                            if action_delta_deferred_backfill_output
+                                            is not None
+                                            else int(pending_run["run_length"]),
+                                        }
+                                    )
+                                    action_delta_deferred_runs.append(pending_run)
+                                    action_delta_deferred_confirmation_run_pending = None
+                                    action_delta_deferred_retained_state = None
+                                    action_delta_deferred_retained_iteration = None
 
                                 if action_delta_nonconvergence_forced_confirmation:
                                     if action_delta_nonconvergence_pending_event is None:
@@ -1843,6 +2172,17 @@ class VLARecurrent(nn.Module):
                                     raw_production_actions.append(curr_output.detach())
 
                                 prev_output = curr_output.detach()
+                                if action_delta_deferred_applied:
+                                    action_delta_deferred_last_exact_iteration = int(
+                                        actual_iter
+                                    )
+                                    if not bool(
+                                        torch.isfinite(curr_output).all().item()
+                                    ):
+                                        action_delta_deferred_fallback_reason = (
+                                            "deferred/backfill current exact output is non-finite"
+                                        )
+                                        action_delta_deferred_enabled_for_prediction = False
                                 if action_delta_gate_shadow_applied:
                                     # This diagnostic anchor follows every exact
                                     # Coda, including all iterations before
@@ -1911,6 +2251,10 @@ class VLARecurrent(nn.Module):
                                 "action_mse": float(action_mse) if action_mse is not None else None,
                             })
                             prev_state = state.detach()
+                        if action_delta_deferred_applied:
+                            # This adjacency anchor advances on every recurrent
+                            # state, including iterations whose Coda was deferred.
+                            action_delta_deferred_previous_latent_state = state.detach()
                         if adaptive_stop:
                             break
 
@@ -1941,6 +2285,27 @@ class VLARecurrent(nn.Module):
             for event in action_delta_nonconvergence_events:
                 event["iterations_from_skip_to_prediction_end"] = int(
                     actual_iter - event["skipped_terminal_iteration"]
+                )
+
+            if (
+                action_delta_deferred_open_run is not None
+                or action_delta_deferred_confirmation_run_pending is not None
+                or action_delta_deferred_retained_state is not None
+            ):
+                raise RuntimeError(
+                    "deferred/backfill prediction ended with unresolved deferred state"
+                )
+            action_delta_deferred_eliminated_count = sum(
+                int(run["truly_eliminated_coda_calls"] or 0)
+                for run in action_delta_deferred_runs
+            )
+            if (
+                action_delta_deferred_eliminated_count
+                != action_delta_deferred_high_score_count
+                - action_delta_deferred_backfill_call_count
+            ):
+                raise RuntimeError(
+                    "deferred/backfill eliminated-Coda accounting is inconsistent"
                 )
 
             reuse_terminal_output = bool(
@@ -1996,6 +2361,14 @@ class VLARecurrent(nn.Module):
                 len(action_delta_nonconvergence_score_trace)
                 * ACTION_DELTA_NONCONVERGENCE_SCORER_COST_MS
             )
+            action_delta_deferred_estimated_gross_ms = (
+                action_delta_deferred_eliminated_count
+                * ACTION_DELTA_NONCONVERGENCE_CODA_COST_MS
+            )
+            action_delta_deferred_estimated_scorer_ms = (
+                len(action_delta_deferred_score_trace)
+                * ACTION_DELTA_NONCONVERGENCE_SCORER_COST_MS
+            )
 
             self.last_recurrence_debug = {
                 "strategy": convergence_strategy,
@@ -2033,6 +2406,106 @@ class VLARecurrent(nn.Module):
                 "scalar_policy_terminal_iteration": None,
                 "scalar_policy_score_call_count": 0,
                 "scalar_policy_score_trace": [],
+                "use_action_delta_deferred_backfill_filter": bool(
+                    use_action_delta_deferred_backfill_filter
+                ),
+                "action_delta_deferred_backfill_filter_requested": bool(
+                    action_delta_deferred_requested
+                ),
+                "action_delta_deferred_backfill_filter_applied": bool(
+                    action_delta_deferred_applied
+                ),
+                "action_delta_deferred_backfill_filter_development_only": True,
+                "action_delta_deferred_backfill_filter_efficiency_eligible": False,
+                "action_delta_deferred_backfill_filter_threshold": float(
+                    ACTION_DELTA_NONCONVERGENCE_THRESHOLD
+                ),
+                "action_delta_deferred_backfill_filter_min_terminal_iter": int(
+                    ACTION_DELTA_NONCONVERGENCE_MIN_TERMINAL_ITER
+                ),
+                "action_delta_deferred_backfill_filter_score_call_count": len(
+                    action_delta_deferred_score_trace
+                ),
+                "action_delta_deferred_backfill_filter_score_trace": (
+                    action_delta_deferred_score_trace
+                ),
+                "action_delta_deferred_backfill_filter_predictor_ms_list": (
+                    action_delta_deferred_predictor_ms_list
+                ),
+                "action_delta_deferred_backfill_filter_predictor_ms_total": sum(
+                    action_delta_deferred_predictor_ms_list
+                ),
+                "action_delta_deferred_backfill_filter_high_score_deferred_call_count": int(
+                    action_delta_deferred_high_score_count
+                ),
+                "action_delta_deferred_backfill_filter_consecutive_run_lengths": [
+                    int(run["run_length"]) for run in action_delta_deferred_runs
+                ],
+                "action_delta_deferred_backfill_filter_runs": (
+                    action_delta_deferred_runs
+                ),
+                "action_delta_deferred_backfill_filter_backfill_coda_call_count": int(
+                    action_delta_deferred_backfill_call_count
+                ),
+                "action_delta_deferred_backfill_filter_backfill_get_output_ms_list": (
+                    action_delta_deferred_backfill_get_output_ms_list
+                ),
+                "action_delta_deferred_backfill_filter_backfill_get_output_ms_total": sum(
+                    action_delta_deferred_backfill_get_output_ms_list
+                ),
+                "action_delta_deferred_backfill_filter_backfill_coda_ms_list": (
+                    action_delta_deferred_backfill_coda_ms_list
+                ),
+                "action_delta_deferred_backfill_filter_backfill_coda_ms_total": sum(
+                    action_delta_deferred_backfill_coda_ms_list
+                ),
+                "action_delta_deferred_backfill_filter_current_state_coda_call_count": int(
+                    action_delta_deferred_current_coda_call_count
+                ),
+                "action_delta_deferred_backfill_filter_current_get_output_ms_list": (
+                    action_delta_deferred_current_get_output_ms_list
+                ),
+                "action_delta_deferred_backfill_filter_current_get_output_ms_total": sum(
+                    action_delta_deferred_current_get_output_ms_list
+                ),
+                "action_delta_deferred_backfill_filter_current_coda_ms_list": (
+                    action_delta_deferred_current_coda_ms_list
+                ),
+                "action_delta_deferred_backfill_filter_current_coda_ms_total": sum(
+                    action_delta_deferred_current_coda_ms_list
+                ),
+                "action_delta_deferred_backfill_filter_truly_eliminated_coda_call_count": int(
+                    action_delta_deferred_eliminated_count
+                ),
+                "action_delta_deferred_backfill_filter_total_exact_coda_call_count": int(
+                    get_output_call_count
+                ),
+                "action_delta_deferred_backfill_filter_recurrent_K": int(actual_iter),
+                "action_delta_deferred_backfill_filter_exact_stop_mse_trace": (
+                    action_delta_deferred_exact_stop_mse_trace
+                ),
+                "action_delta_deferred_backfill_filter_unresolved_max_iter_fallback_count": int(
+                    action_delta_deferred_max_iter_fallback_count
+                ),
+                "action_delta_deferred_backfill_filter_fallback_reason": (
+                    action_delta_deferred_fallback_reason
+                ),
+                "action_delta_deferred_backfill_filter_fixed_scorer_cost_ms_per_call": float(
+                    ACTION_DELTA_NONCONVERGENCE_SCORER_COST_MS
+                ),
+                "action_delta_deferred_backfill_filter_fixed_coda_cost_ms_per_call": float(
+                    ACTION_DELTA_NONCONVERGENCE_CODA_COST_MS
+                ),
+                "action_delta_deferred_backfill_filter_fixed_estimated_scorer_cost_ms": float(
+                    action_delta_deferred_estimated_scorer_ms
+                ),
+                "action_delta_deferred_backfill_filter_fixed_estimated_coda_savings_ms": float(
+                    action_delta_deferred_estimated_gross_ms
+                ),
+                "action_delta_deferred_backfill_filter_fixed_estimated_net_savings_ms": float(
+                    action_delta_deferred_estimated_gross_ms
+                    - action_delta_deferred_estimated_scorer_ms
+                ),
                 "use_action_delta_nonconvergence_filter": bool(
                     use_action_delta_nonconvergence_filter
                 ),
@@ -2342,6 +2815,20 @@ class VLARecurrent(nn.Module):
                     "output_proj_ms_total": output_proj_ms_total,
                     "coda_time_ratio_total": (
                         coda_ms_total / profiled_recurrent_ms_total if profiled_recurrent_ms_total else 0.0
+                    ),
+                    "action_delta_deferred_backfill_filter_recurrent_ms_total": (
+                        run_one_iteration_ms_total
+                    ),
+                    "action_delta_deferred_backfill_filter_coda_ms_total": (
+                        coda_ms_total
+                    ),
+                    "action_delta_deferred_backfill_filter_get_output_ms_total": (
+                        get_output_ms_total
+                    ),
+                    "action_delta_deferred_backfill_filter_actual_inference_component_ms_total": (
+                        run_one_iteration_ms_total
+                        + get_output_ms_total
+                        + sum(action_delta_deferred_predictor_ms_list)
                     ),
                     "action_delta_nonconvergence_filter_recurrent_ms_total": (
                         run_one_iteration_ms_total
@@ -2766,6 +3253,7 @@ class ActionHeadRecurrent(nn.Module):
                        action_delta_gate_return_mode="anchor",
                        collect_action_delta_gate_shadow=False,
                        use_action_delta_nonconvergence_filter=False,
+                       use_action_delta_deferred_backfill_filter=False,
                        **kwargs):
         canonical_recurrence_strategy = canonicalize_recurrence_strategy(
             convergence_strategy
@@ -2787,6 +3275,7 @@ class ActionHeadRecurrent(nn.Module):
             use_action_delta_gate
             or collect_action_delta_gate_shadow
             or use_action_delta_nonconvergence_filter
+            or use_action_delta_deferred_backfill_filter
         ) and action_delta_gate is None:
             action_delta_gate = self._action_delta_gate
         validate_latent_only_configuration(
@@ -2893,6 +3382,9 @@ class ActionHeadRecurrent(nn.Module):
                                  ),
                                  use_action_delta_nonconvergence_filter=(
                                      use_action_delta_nonconvergence_filter
+                                 ),
+                                 use_action_delta_deferred_backfill_filter=(
+                                     use_action_delta_deferred_backfill_filter
                                  ))
             if capture_action_head_workload:
                 metadata = self.model.last_inference_metadata

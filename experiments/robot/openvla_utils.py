@@ -509,6 +509,13 @@ def get_vla_action(
                                 False,
                             )
                         ),
+                        use_action_delta_deferred_backfill_filter=bool(
+                            getattr(
+                                cfg,
+                                "use_action_delta_deferred_backfill_filter",
+                                False,
+                            )
+                        ),
                     )
                     recurrence_debug = getattr(getattr(action_head, "model", None), "last_recurrence_debug", None)
                     action_head_inference_metadata = (

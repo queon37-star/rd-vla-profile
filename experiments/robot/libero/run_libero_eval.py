@@ -237,6 +237,7 @@ class GenerateConfig:
     collect_action_delta_gate_shadow: bool = False
     # Development-only high-side predictor filter; never a convergence gate.
     use_action_delta_nonconvergence_filter: bool = False
+    use_action_delta_deferred_backfill_filter: bool = False
     action_delta_gate_shadow_dir: str = ""
     action_delta_gate_shadow_shard_size: int = 64
 
@@ -416,12 +417,13 @@ def validate_config(cfg: GenerateConfig) -> None:
             cfg.use_action_delta_gate,
             cfg.collect_action_delta_gate_shadow,
             cfg.use_action_delta_nonconvergence_filter,
+            cfg.use_action_delta_deferred_backfill_filter,
         )
     )
     if action_delta_mode_count > 1:
         raise ValueError(
             "production Action-Delta Gate, diagnostic shadow collection, and "
-            "the diagnostic non-convergence filter are mutually exclusive"
+            "both diagnostic non-convergence filters are mutually exclusive"
         )
 
     if cfg.use_action_delta_gate:
@@ -497,6 +499,7 @@ def validate_config(cfg: GenerateConfig) -> None:
     elif not (
         cfg.collect_action_delta_gate_shadow
         or cfg.use_action_delta_nonconvergence_filter
+        or cfg.use_action_delta_deferred_backfill_filter
     ) and (
         cfg.action_delta_gate_artifact_path
         or cfg.action_delta_gate_expected_sha256
@@ -649,6 +652,73 @@ def validate_config(cfg: GenerateConfig) -> None:
             raise ValueError("non-convergence filter cannot enable exact-Coda gate audit")
         if cfg.action_delta_gate_return_mode != "anchor":
             raise ValueError("non-convergence filter does not use an Action-Delta return mode")
+
+    if cfg.use_action_delta_deferred_backfill_filter:
+        if not cfg.use_recurrent:
+            raise ValueError("deferred/backfill filter requires use_recurrent=True")
+        if canonical_recurrence_strategy != "adjacent_action_mse":
+            raise ValueError(
+                "deferred/backfill filter requires adjacent action-MSE recurrence"
+            )
+        if cfg.task_suite_name != TaskSuite.LIBERO_SPATIAL:
+            raise ValueError("deferred/backfill filter is LIBERO Spatial-only")
+        if (
+            cfg.task_id is not None
+            and cfg.task_id not in ACTION_DELTA_GATE_SHADOW_DEVELOPMENT_TASK_IDS
+        ):
+            raise ValueError(
+                "deferred/backfill filter permits only development tasks "
+                f"{ACTION_DELTA_GATE_SHADOW_DEVELOPMENT_TASK_IDS}; Task 4/5 are forbidden"
+            )
+        if not cfg.action_delta_gate_artifact_path:
+            raise ValueError("deferred/backfill filter requires action_delta_gate_artifact_path")
+        if not Path(cfg.action_delta_gate_artifact_path).exists():
+            raise ValueError(
+                "Action-Delta artifact path does not exist: "
+                f"{cfg.action_delta_gate_artifact_path}"
+            )
+        expected_hash = cfg.action_delta_gate_expected_sha256
+        if (
+            len(expected_hash) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in expected_hash.lower()
+            )
+        ):
+            raise ValueError(
+                "action_delta_gate_expected_sha256 must be a 64-character "
+                "hexadecimal SHA-256"
+            )
+        if not cfg.use_warm_start or cfg.warm_start_source != "midpoint":
+            raise ValueError("deferred/backfill filter requires midpoint warm-start")
+        if cfg.warm_start_min_iter != 2:
+            raise ValueError("deferred/backfill filter requires warm_start_min_iter=2")
+        if cfg.use_latent_precheck or cfg.latent_precheck_mode != "off":
+            raise ValueError("deferred/backfill filter requires latent pre-check off")
+        if cfg.latent_precheck_trace_level != "off":
+            raise ValueError(
+                "deferred/backfill filter requires latent_precheck_trace_level='off'"
+            )
+        if cfg.shadow_full_depth or cfg.collect_preconvergence_raw_shadow:
+            raise ValueError("deferred/backfill filter cannot collect shadow recurrence")
+        if not cfg.use_cached_final_output:
+            raise ValueError("deferred/backfill filter requires exact terminal-output reuse")
+        if not cfg.profile_coda_cost:
+            raise ValueError("deferred/backfill filter requires profile_coda_cost=True")
+        if (
+            cfg.action_delta_gate_min_terminal_iter
+            != ACTION_DELTA_NONCONVERGENCE_MIN_TERMINAL_ITER
+        ):
+            raise ValueError(
+                "deferred/backfill filter requires action_delta_gate_min_terminal_iter="
+                f"{ACTION_DELTA_NONCONVERGENCE_MIN_TERMINAL_ITER}"
+            )
+        if float(cfg.recurrence_kl_thresh) != 0.001:
+            raise ValueError("deferred/backfill filter requires recurrence_kl_thresh=0.001")
+        if cfg.action_delta_gate_exact_coda_audit:
+            raise ValueError("deferred/backfill filter cannot enable exact-Coda gate audit")
+        if cfg.action_delta_gate_return_mode != "anchor":
+            raise ValueError("deferred/backfill filter does not use an Action-Delta return mode")
 
     validate_latent_only_configuration(
         cfg.recurrence_strategy,
@@ -1302,6 +1372,67 @@ def build_action_delta_nonconvergence_log_fields(debug):
     return fields
 
 
+def build_action_delta_deferred_backfill_log_fields(
+    debug, prediction_identity=None
+):
+    """Extract adjacent-history deferred/backfill diagnostic accounting."""
+
+    debug = debug or {}
+    prefix = "action_delta_deferred_backfill_filter_"
+    names = (
+        "requested",
+        "applied",
+        "development_only",
+        "efficiency_eligible",
+        "threshold",
+        "min_terminal_iter",
+        "score_call_count",
+        "score_trace",
+        "predictor_ms_list",
+        "predictor_ms_total",
+        "high_score_deferred_call_count",
+        "consecutive_run_lengths",
+        "runs",
+        "backfill_coda_call_count",
+        "backfill_get_output_ms_list",
+        "backfill_get_output_ms_total",
+        "backfill_coda_ms_list",
+        "backfill_coda_ms_total",
+        "current_state_coda_call_count",
+        "current_get_output_ms_list",
+        "current_get_output_ms_total",
+        "current_coda_ms_list",
+        "current_coda_ms_total",
+        "truly_eliminated_coda_call_count",
+        "total_exact_coda_call_count",
+        "recurrent_K",
+        "exact_stop_mse_trace",
+        "unresolved_max_iter_fallback_count",
+        "fallback_reason",
+        "recurrent_ms_total",
+        "coda_ms_total",
+        "get_output_ms_total",
+        "actual_inference_component_ms_total",
+        "fixed_scorer_cost_ms_per_call",
+        "fixed_coda_cost_ms_per_call",
+        "fixed_estimated_scorer_cost_ms",
+        "fixed_estimated_coda_savings_ms",
+        "fixed_estimated_net_savings_ms",
+    )
+    fields = {
+        "use_action_delta_deferred_backfill_filter": bool(
+            debug.get("use_action_delta_deferred_backfill_filter", False)
+        )
+    }
+    fields.update({prefix + name: debug.get(prefix + name) for name in names})
+    if prediction_identity is not None:
+        fields[prefix + "runs"] = [
+            {**run, "prediction_identity": dict(prediction_identity)}
+            for run in (fields[prefix + "runs"] or [])
+        ]
+    return fields
+
+
 def resolve_fixed_k_log_value(debug, recurrence_strategy, recurrent_num_iter):
     """Resolve fixed depth for legacy and terminal-only step records."""
 
@@ -1386,6 +1517,7 @@ def _build_timing_summary_record(timing_record, result):
         ),
         **build_action_delta_gate_log_fields(recurrence_debug),
         **build_action_delta_nonconvergence_log_fields(recurrence_debug),
+        **build_action_delta_deferred_backfill_log_fields(recurrence_debug),
         "latent_metric_call_count": recurrence_debug.get("latent_metric_call_count"),
         "latent_precheck_mode": recurrence_debug.get("latent_precheck_mode", "legacy"),
         "latent_precheck_trace_level_requested": recurrence_debug.get("latent_precheck_trace_level_requested", "off"),
@@ -1825,6 +1957,65 @@ def summarize_action_delta_nonconvergence_filter(
     }
 
 
+def summarize_action_delta_deferred_backfill_filter(
+    records: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    prefix = "action_delta_deferred_backfill_filter_"
+    requested = [record for record in records if record.get(prefix + "requested")]
+
+    def total(name):
+        return sum(_as_float(record.get(prefix + name)) or 0.0 for record in requested)
+
+    run_lengths = [
+        int(length)
+        for record in requested
+        for length in (record.get(prefix + "consecutive_run_lengths") or [])
+    ]
+    return {
+        "development_only": True,
+        "excluded_from_production_efficiency_claims": True,
+        "requested_prediction_count": len(requested),
+        "applied_prediction_count": sum(
+            bool(record.get(prefix + "applied")) for record in requested
+        ),
+        "score_call_count": int(total("score_call_count")),
+        "high_score_deferred_call_count": int(
+            total("high_score_deferred_call_count")
+        ),
+        "backfill_coda_call_count": int(total("backfill_coda_call_count")),
+        "current_state_coda_call_count": int(
+            total("current_state_coda_call_count")
+        ),
+        "truly_eliminated_coda_call_count": int(
+            total("truly_eliminated_coda_call_count")
+        ),
+        "total_exact_coda_call_count": int(total("total_exact_coda_call_count")),
+        "unresolved_max_iter_fallback_count": int(
+            total("unresolved_max_iter_fallback_count")
+        ),
+        "consecutive_run_lengths": run_lengths,
+        "predictor_ms_total": float(total("predictor_ms_total")),
+        "backfill_get_output_ms_total": float(
+            total("backfill_get_output_ms_total")
+        ),
+        "current_get_output_ms_total": float(
+            total("current_get_output_ms_total")
+        ),
+        "recurrent_ms_total": float(total("recurrent_ms_total")),
+        "coda_ms_total": float(total("coda_ms_total")),
+        "get_output_ms_total": float(total("get_output_ms_total")),
+        "fixed_estimated_scorer_cost_ms": float(
+            total("fixed_estimated_scorer_cost_ms")
+        ),
+        "fixed_estimated_coda_savings_ms": float(
+            total("fixed_estimated_coda_savings_ms")
+        ),
+        "fixed_estimated_net_savings_ms": float(
+            total("fixed_estimated_net_savings_ms")
+        ),
+    }
+
+
 def save_recurrent_convergence_summary(cfg, full_results, log_file=None):
     """Write run-level success/failure comparison for recurrent convergence metrics."""
     step_log_path = get_step_log_file(cfg)
@@ -1865,6 +2056,9 @@ def save_recurrent_convergence_summary(cfg, full_results, log_file=None):
                 "action_delta_nonconvergence_filter": summarize_action_delta_nonconvergence_filter(
                     prediction_records
                 ),
+                "action_delta_deferred_backfill_filter": summarize_action_delta_deferred_backfill_filter(
+                    prediction_records
+                ),
             },
             "success": {
                 "iteration_stats": _numeric_stats([r.get("recurrent_iteration_count") for r in success_records]),
@@ -1876,6 +2070,9 @@ def save_recurrent_convergence_summary(cfg, full_results, log_file=None):
                 "action_delta_nonconvergence_filter": summarize_action_delta_nonconvergence_filter(
                     success_records
                 ),
+                "action_delta_deferred_backfill_filter": summarize_action_delta_deferred_backfill_filter(
+                    success_records
+                ),
             },
             "failure": {
                 "iteration_stats": _numeric_stats([r.get("recurrent_iteration_count") for r in failure_records]),
@@ -1885,6 +2082,9 @@ def save_recurrent_convergence_summary(cfg, full_results, log_file=None):
                 "latent_precheck": summarize_latent_precheck(failure_records),
                 "action_delta_gate": summarize_action_delta_gate(failure_records),
                 "action_delta_nonconvergence_filter": summarize_action_delta_nonconvergence_filter(
+                    failure_records
+                ),
+                "action_delta_deferred_backfill_filter": summarize_action_delta_deferred_backfill_filter(
                     failure_records
                 ),
             },
@@ -2317,6 +2517,22 @@ def run_episode(
                     ),
                     **build_action_delta_gate_log_fields(debug),
                     **build_action_delta_nonconvergence_log_fields(debug),
+                    **build_action_delta_deferred_backfill_log_fields(
+                        debug,
+                        {
+                            "task_id": int(task_id),
+                            "episode_id": int(episode_idx),
+                            "episode_seed": int(episode_seed),
+                            "action_prediction_index": int(prediction_id),
+                            "environment_timestep": int(t),
+                            "trajectory_id": protocol_log_metadata.get(
+                                "trajectory_id"
+                            ),
+                            "initial_state_id": protocol_log_metadata.get(
+                                "initial_state_id"
+                            ),
+                        },
+                    ),
                     "latent_metric_call_count": debug.get("latent_metric_call_count"),
                     "latent_metric_trace_enabled": debug.get(
                         "latent_metric_trace_enabled", False
@@ -2880,6 +3096,7 @@ def eval_libero(cfg: GenerateConfig) -> float:
         cfg.use_action_delta_gate
         or cfg.collect_action_delta_gate_shadow
         or cfg.use_action_delta_nonconvergence_filter
+        or cfg.use_action_delta_deferred_backfill_filter
     ):
         (
             action_delta_gate_manifest,
@@ -3121,6 +3338,17 @@ def eval_libero(cfg: GenerateConfig) -> float:
                     ACTION_DELTA_GATE_SHADOW_DEVELOPMENT_TASK_IDS
                 ),
             }
+        if cfg.use_action_delta_deferred_backfill_filter:
+            full_results["action_delta_deferred_backfill_filter"] = {
+                "development_only": True,
+                "excluded_from_production_efficiency_claims": True,
+                "adjacent_exact_stopping_semantics": True,
+                "threshold": ACTION_DELTA_NONCONVERGENCE_THRESHOLD,
+                "min_terminal_iter": ACTION_DELTA_NONCONVERGENCE_MIN_TERMINAL_ITER,
+                "allowed_task_ids": list(
+                    ACTION_DELTA_GATE_SHADOW_DEVELOPMENT_TASK_IDS
+                ),
+            }
 
     if cfg.evaluation_protocol_phase != "legacy":
         protocol_manifest, manifest_sha256 = load_protocol_manifest(
@@ -3150,6 +3378,7 @@ def eval_libero(cfg: GenerateConfig) -> float:
     elif (
         cfg.collect_action_delta_gate_shadow
         or cfg.use_action_delta_nonconvergence_filter
+        or cfg.use_action_delta_deferred_backfill_filter
     ):
         task_ids = ACTION_DELTA_GATE_SHADOW_DEVELOPMENT_TASK_IDS
         log_message(
@@ -3195,6 +3424,7 @@ def eval_libero(cfg: GenerateConfig) -> float:
             if (
                 cfg.collect_action_delta_gate_shadow
                 or cfg.use_action_delta_nonconvergence_filter
+                or cfg.use_action_delta_deferred_backfill_filter
             ):
                 prepared_action_delta_gate = prepare_action_delta_gate_shadow(
                     action_delta_gate_payload,

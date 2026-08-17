@@ -598,3 +598,28 @@ def test_nonconvergence_runtime_config_is_development_only_and_fixed_terminal_fi
                 use_action_delta_gate=True,
             )
         )
+
+
+def test_deferred_backfill_runtime_config_is_separate_development_mode():
+    cfg = _nonconvergence_runtime_config(
+        task_id=0,
+        use_action_delta_nonconvergence_filter=False,
+        use_action_delta_deferred_backfill_filter=True,
+    )
+    validate_config(cfg)
+
+    with pytest.raises(ValueError, match="Task 4/5"):
+        validate_config(
+            _nonconvergence_runtime_config(
+                task_id=4,
+                use_action_delta_nonconvergence_filter=False,
+                use_action_delta_deferred_backfill_filter=True,
+            )
+        )
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        validate_config(
+            _nonconvergence_runtime_config(
+                task_id=0,
+                use_action_delta_deferred_backfill_filter=True,
+            )
+        )

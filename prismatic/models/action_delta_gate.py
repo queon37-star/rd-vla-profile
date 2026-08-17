@@ -585,3 +585,51 @@ def validate_action_delta_nonconvergence_filter_configuration(
         profile_coda_cost,
         "non-convergence filter requires profile_coda_cost=True for diagnostic accounting",
     )
+
+
+def validate_action_delta_deferred_backfill_configuration(
+    *,
+    enabled: bool,
+    max_skip_filter_enabled: bool,
+    production_gate_enabled: bool,
+    shadow_collection_enabled: bool,
+    canonical_recurrence_strategy: str | None,
+    prepared_gate: Any,
+    batch_size: int,
+    use_warm_start: bool,
+    warm_start_source: str,
+    warm_start_min_iter: int,
+    use_latent_precheck: bool,
+    latent_precheck_mode: str,
+    latent_precheck_trace_level: str,
+    shadow_full_depth: bool,
+    collect_preconvergence_raw_shadow: bool,
+    use_cached_final_output: bool,
+    profile_coda_cost: bool,
+) -> None:
+    """Validate the development-only adjacent-history deferred policy."""
+
+    if not enabled:
+        return
+    _require(
+        not max_skip_filter_enabled,
+        "deferred/backfill filter cannot run with the max-skip=1 non-convergence filter",
+    )
+    validate_action_delta_nonconvergence_filter_configuration(
+        enabled=True,
+        production_gate_enabled=production_gate_enabled,
+        shadow_collection_enabled=shadow_collection_enabled,
+        canonical_recurrence_strategy=canonical_recurrence_strategy,
+        prepared_gate=prepared_gate,
+        batch_size=batch_size,
+        use_warm_start=use_warm_start,
+        warm_start_source=warm_start_source,
+        warm_start_min_iter=warm_start_min_iter,
+        use_latent_precheck=use_latent_precheck,
+        latent_precheck_mode=latent_precheck_mode,
+        latent_precheck_trace_level=latent_precheck_trace_level,
+        shadow_full_depth=shadow_full_depth,
+        collect_preconvergence_raw_shadow=collect_preconvergence_raw_shadow,
+        use_cached_final_output=use_cached_final_output,
+        profile_coda_cost=profile_coda_cost,
+    )

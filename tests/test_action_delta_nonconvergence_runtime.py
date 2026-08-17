@@ -302,3 +302,240 @@ def test_timing_and_savings_accounting_is_internally_consistent():
     assert debug["action_delta_nonconvergence_filter_measured_net_savings_ms"] is None
     assert debug["action_delta_nonconvergence_filter_efficiency_eligible"] is False
     assert ACTION_DELTA_NONCONVERGENCE_THRESHOLD == 0.0015
+
+
+def deferred_kwargs(gate, *, max_iter=8):
+    values = kwargs(gate, max_iter=max_iter)
+    values.update(
+        use_action_delta_nonconvergence_filter=False,
+        use_action_delta_deferred_backfill_filter=True,
+    )
+    return values
+
+
+def install_state_indexed_outputs(model, outputs_by_iteration):
+    def get_output(self, state, *args, profile=False):
+        iteration = int(round(float(state[0, 0, 0].item())))
+        self.test_coda_iterations.append(iteration)
+        if profile:
+            self._last_get_output_timing = {
+                "get_output_ms": 0.3,
+                "coda_ms": 0.2,
+                "output_proj_ms": 0.1,
+            }
+        return outputs_by_iteration[iteration].detach().clone()
+
+    model._get_output = types.MethodType(get_output, model)
+
+
+def install_score_trace(monkeypatch, scores_by_terminal):
+    calls = []
+
+    def evaluate(_gate, anchor_state, current_state, **_kwargs):
+        anchor = int(round(float(anchor_state[0, 0, 0].item())))
+        terminal = int(round(float(current_state[0, 0, 0].item())))
+        calls.append((anchor, terminal))
+        return float(scores_by_terminal[terminal]), False
+
+    monkeypatch.setattr(action_heads_score_module(), "evaluate_action_delta_gate", evaluate)
+    return calls
+
+
+def action(value):
+    return torch.full((1, 2, 2), float(value))
+
+
+def run_deferred(model, gate, *, max_iter):
+    return model(
+        *inputs(),
+        warm_start_state=torch.zeros(1, 2, 4, dtype=torch.bfloat16),
+        **deferred_kwargs(gate, max_iter=max_iter),
+    )
+
+
+def test_deferred_single_high_then_low_saves_zero_coda(monkeypatch):
+    model = make_model()
+    install_state_indexed_outputs(
+        model,
+        {1: action(0), 2: action(1), 3: action(2), 4: action(3), 5: action(4), 6: action(4.01)},
+    )
+    calls = install_score_trace(monkeypatch, {5: 0.002, 6: 0.0005})
+
+    _, terminal, _ = run_deferred(model, make_gate(0.0), max_iter=6)
+
+    assert terminal == 6
+    assert calls == [(4, 5), (5, 6)]
+    assert model.test_coda_iterations == [1, 2, 3, 4, 5, 6]
+    debug = model.last_recurrence_debug
+    assert debug["action_delta_deferred_backfill_filter_consecutive_run_lengths"] == [1]
+    assert debug["action_delta_deferred_backfill_filter_backfill_coda_call_count"] == 1
+    assert debug["action_delta_deferred_backfill_filter_truly_eliminated_coda_call_count"] == 0
+
+
+@pytest.mark.parametrize(
+    ("high_terminals", "low_terminal", "expected_saved"),
+    [((5, 6), 7, 1), ((5, 6, 7), 8, 2)],
+)
+def test_deferred_consecutive_high_runs_save_l_minus_one(
+    monkeypatch, high_terminals, low_terminal, expected_saved
+):
+    model = make_model()
+    outputs = {index: action(index) for index in range(1, low_terminal)}
+    outputs[low_terminal] = action(low_terminal - 1 + 0.01)
+    install_state_indexed_outputs(model, outputs)
+    scores = {terminal: 0.002 for terminal in high_terminals}
+    scores[low_terminal] = 0.0005
+    install_score_trace(monkeypatch, scores)
+
+    _, terminal, _ = run_deferred(model, make_gate(0.0), max_iter=low_terminal)
+
+    assert terminal == low_terminal
+    debug = model.last_recurrence_debug
+    assert debug["action_delta_deferred_backfill_filter_consecutive_run_lengths"] == [
+        len(high_terminals)
+    ]
+    assert debug["action_delta_deferred_backfill_filter_backfill_coda_call_count"] == 1
+    assert debug["action_delta_deferred_backfill_filter_truly_eliminated_coda_call_count"] == expected_saved
+    assert debug["action_delta_deferred_backfill_filter_total_exact_coda_call_count"] == low_terminal - expected_saved
+
+
+def test_deferred_backfill_uses_adjacent_actions_and_reproduces_baseline_k(monkeypatch):
+    outputs = {
+        1: action(0),
+        2: action(1),
+        3: action(2),
+        4: action(0),
+        5: action(5),
+        6: action(10),
+        7: action(10.01),
+    }
+    baseline = make_model()
+    install_state_indexed_outputs(baseline, outputs)
+    baseline_result = baseline(
+        *inputs(),
+        warm_start_state=torch.zeros(1, 2, 4, dtype=torch.bfloat16),
+        convergence_strategy="adjacent_action_mse",
+        kl_thresh=0.001,
+        enable_warm_start=True,
+        warm_start_source="midpoint",
+        warm_start_min_iter=2,
+        use_cached_final_output=True,
+        latent_precheck_mode="off",
+        latent_precheck_trace_level="off",
+        max_iter=7,
+    )
+
+    deferred = make_model()
+    install_state_indexed_outputs(deferred, outputs)
+    install_score_trace(monkeypatch, {5: 0.002, 6: 0.002, 7: 0.0005})
+    deferred_result = run_deferred(deferred, make_gate(0.0), max_iter=7)
+
+    assert baseline_result[1] == deferred_result[1] == 7
+    debug = deferred.last_recurrence_debug
+    confirmation = debug["action_delta_deferred_backfill_filter_runs"][0]
+    assert confirmation["backfilled_terminal_iteration"] == 6
+    assert confirmation["confirming_current_terminal_iteration"] == 7
+    assert confirmation["exact_adjacent_confirmation_mse"] == pytest.approx(
+        0.0001, rel=1e-4
+    )
+    assert debug["action_delta_deferred_backfill_filter_exact_stop_mse_trace"][-1][
+        "anchor_terminal_iteration"
+    ] == 6
+    assert deferred.test_coda_iterations[-2:] == [6, 7]
+
+
+def test_deferred_predictor_never_directly_stops_and_max_iter_is_exact(monkeypatch):
+    model = make_model()
+    outputs = {index: action(index) for index in range(1, 7)}
+    install_state_indexed_outputs(model, outputs)
+    install_score_trace(monkeypatch, {5: 0.002, 6: 0.002})
+
+    output, terminal, _ = run_deferred(model, make_gate(0.0), max_iter=6)
+
+    assert terminal == 6
+    assert model.last_recurrence_debug["stop_reason"] == "max_iter"
+    assert model.test_coda_iterations == [1, 2, 3, 4, 6]
+    torch.testing.assert_close(output, outputs[6], rtol=0, atol=0)
+    debug = model.last_recurrence_debug
+    assert debug[
+        "action_delta_deferred_backfill_filter_unresolved_max_iter_fallback_count"
+    ] == 1
+    assert debug["action_delta_deferred_backfill_filter_truly_eliminated_coda_call_count"] == 1
+
+
+def test_deferred_nonfinite_score_backfills_and_fails_closed(monkeypatch):
+    model = make_model()
+    outputs = {index: action(index) for index in range(1, 7)}
+    install_state_indexed_outputs(model, outputs)
+    calls = []
+
+    def evaluate(_gate, anchor_state, current_state, **_kwargs):
+        anchor = int(round(float(anchor_state[0, 0, 0].item())))
+        terminal = int(round(float(current_state[0, 0, 0].item())))
+        calls.append((anchor, terminal))
+        if terminal == 6:
+            raise action_heads_score_module().NonFiniteActionDeltaGateError(
+                "non-finite diagnostic transition"
+            )
+        return 0.002, False
+
+    monkeypatch.setattr(action_heads_score_module(), "evaluate_action_delta_gate", evaluate)
+
+    _, terminal, _ = run_deferred(model, make_gate(0.0), max_iter=6)
+
+    assert terminal == 6
+    assert calls == [(4, 5), (5, 6)]
+    assert model.test_coda_iterations == [1, 2, 3, 4, 5, 6]
+    debug = model.last_recurrence_debug
+    assert debug["action_delta_deferred_backfill_filter_backfill_coda_call_count"] == 1
+    assert debug["action_delta_deferred_backfill_filter_truly_eliminated_coda_call_count"] == 0
+    assert "non-finite" in debug["action_delta_deferred_backfill_filter_fallback_reason"]
+
+
+def test_deferred_timing_and_fixed_cost_accounting(monkeypatch):
+    model = make_model()
+    outputs = {index: action(index) for index in range(1, 7)}
+    install_state_indexed_outputs(model, outputs)
+    install_score_trace(monkeypatch, {5: 0.002, 6: 0.0005})
+
+    run_deferred(model, make_gate(0.0), max_iter=6)
+
+    debug = model.last_recurrence_debug
+    assert debug["action_delta_deferred_backfill_filter_score_call_count"] == 2
+    assert debug["action_delta_deferred_backfill_filter_total_exact_coda_call_count"] == 6
+    assert debug["action_delta_deferred_backfill_filter_current_state_coda_call_count"] == 5
+    assert debug["action_delta_deferred_backfill_filter_backfill_coda_call_count"] == 1
+    assert debug["action_delta_deferred_backfill_filter_get_output_ms_total"] == pytest.approx(1.8)
+    assert debug["action_delta_deferred_backfill_filter_coda_ms_total"] == pytest.approx(1.2)
+    assert debug["action_delta_deferred_backfill_filter_fixed_estimated_coda_savings_ms"] == 0
+    assert debug["action_delta_deferred_backfill_filter_fixed_estimated_net_savings_ms"] < 0
+
+
+def test_deferred_mode_off_does_not_score_or_change_exact_control(monkeypatch):
+    score_calls = 0
+
+    def forbidden(*args, **kwargs):
+        nonlocal score_calls
+        score_calls += 1
+        raise AssertionError("disabled deferred mode evaluated the predictor")
+
+    monkeypatch.setattr(action_heads_score_module(), "evaluate_action_delta_gate", forbidden)
+    model = make_model()
+    result = model(
+        *inputs(),
+        warm_start_state=torch.zeros(1, 2, 4, dtype=torch.bfloat16),
+        convergence_strategy="adjacent_action_mse",
+        kl_thresh=0.001,
+        enable_warm_start=True,
+        warm_start_source="midpoint",
+        warm_start_min_iter=2,
+        use_cached_final_output=True,
+        latent_precheck_mode="off",
+        latent_precheck_trace_level="off",
+        use_action_delta_deferred_backfill_filter=False,
+        max_iter=5,
+    )
+
+    assert result[1] == 5
+    assert score_calls == 0
+    assert model.test_coda_iterations == [1, 2, 3, 4, 5]
