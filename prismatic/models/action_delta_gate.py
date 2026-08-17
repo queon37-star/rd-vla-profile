@@ -606,6 +606,7 @@ def validate_action_delta_deferred_backfill_configuration(
     collect_preconvergence_raw_shadow: bool,
     use_cached_final_output: bool,
     profile_coda_cost: bool,
+    min_terminal_iter: int,
 ) -> None:
     """Validate the development-only adjacent-history deferred policy."""
 
@@ -614,6 +615,12 @@ def validate_action_delta_deferred_backfill_configuration(
     _require(
         not max_skip_filter_enabled,
         "deferred/backfill filter cannot run with the max-skip=1 non-convergence filter",
+    )
+    _require(
+        isinstance(min_terminal_iter, int)
+        and not isinstance(min_terminal_iter, bool)
+        and min_terminal_iter >= 2,
+        "deferred/backfill filter minimum terminal iteration must be an integer >= 2",
     )
     validate_action_delta_nonconvergence_filter_configuration(
         enabled=True,

@@ -1,4 +1,4 @@
-"""Analyze adjacent-history-preserving deferred Action-Delta confirmation."""
+"""Sweep deferred/backfill cadence on a full deployment-matched shadow trace."""
 
 from __future__ import annotations
 
@@ -13,17 +13,17 @@ from typing import Any, Mapping, Sequence
 
 
 TASK_IDS = (0, 1, 2, 3, 6, 7, 8, 9)
+REPLAY_MIN_TERMINAL_ITERS = (2, 3, 4, 5)
 DIAGNOSTIC_Q = 0.0015
 EXACT_CONVERGENCE_MSE = 0.001
-MIN_TERMINAL_ITER = 5
 SCORER_COST_MS = 0.36627289134678936
 CODA_COST_MS = 1.864207385085098
-EXPECTED_TRAJECTORIES = 80
-EXPECTED_PREDICTIONS = 1762
-EXPECTED_ROWS = 2555
+EXPECTED_ARTIFACT_SHA256 = (
+    "b4f9e938c72108f164b9d997a86eb4f5d9ea15b146754b9af83f9735e1ecfcf8"
+)
 DEFAULT_MANIFEST = Path(
     "benchmark_results/coda_anchor_feasibility/deployment_matched_shadow/"
-    "phaseA_8tasks_20260817_085319/shards/manifest.json"
+    "phaseA_terminal2_8tasks/shards/manifest.json"
 )
 
 
@@ -36,7 +36,9 @@ def _require(condition: bool, message: str) -> None:
         raise DeferredBackfillAnalysisError(message)
 
 
-def _safe_ratio(numerator: int | float, denominator: int | float) -> float | None:
+def _safe_ratio(
+    numerator: int | float, denominator: int | float
+) -> float | None:
     return float(numerator / denominator) if denominator else None
 
 
@@ -48,35 +50,74 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _manifest_min_terminal_iteration(manifest: Mapping[str, Any]) -> int:
+    value = manifest.get("min_terminal_iteration")
+    configuration = manifest.get("configuration") or {}
+    gate = configuration.get("gate") if isinstance(configuration, Mapping) else None
+    configured = gate.get("min_terminal_iteration") if isinstance(gate, Mapping) else None
+    if configured is None and isinstance(configuration, Mapping):
+        configured = configuration.get("gate_min_terminal_iteration")
+    if value is None:
+        value = configured
+    _require(
+        isinstance(value, int) and not isinstance(value, bool) and value >= 2,
+        "source manifest does not declare a valid minimum terminal iteration",
+    )
+    if configured is not None:
+        _require(value == configured, "source manifest minimum/configuration mismatch")
+    return int(value)
+
+
 def compact_predictions(
     predictions: Sequence[Mapping[str, Any]],
+    *,
+    source_min_terminal_iter: int | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Validate source identity and retain only replay-relevant scalars."""
+
     compact: list[dict[str, Any]] = []
     trajectory_ids: set[str] = set()
+    source_minima: set[int] = set()
     row_count = 0
     baseline_calls = 0
     for prediction in predictions:
         identity = prediction["identity"]
         production = prediction["production_parity"]
         task_id = int(identity["task_id"])
-        trajectory_ids.add(str(identity["trajectory_id"]))
+        _require(task_id in TASK_IDS, f"forbidden task in shadow data: {task_id}")
+        trajectory_id = str(identity["trajectory_id"])
+        trajectory_ids.add(trajectory_id)
         baseline_k = int(production["K_t"])
         exact_calls = int(production["exact_coda_call_count"])
         _require(exact_calls == baseline_k, "baseline exact-Coda count must equal K")
+        minimum = int(prediction["min_terminal_iteration"])
+        _require(minimum >= 2, "source minimum terminal iteration must be >= 2")
+        source_minima.add(minimum)
+        if source_min_terminal_iter is not None:
+            _require(
+                minimum == source_min_terminal_iter,
+                "prediction minimum differs from source manifest",
+            )
+
         source_rows = sorted(
             prediction.get("transitions", []),
             key=lambda row: int(row["terminal_iteration"]),
         )
+        collection_applied = bool(prediction.get("collection_applied"))
+        observed_terminals = [int(row["terminal_iteration"]) for row in source_rows]
+        expected_terminals = (
+            list(range(minimum, baseline_k + 1)) if collection_applied else []
+        )
+        _require(
+            observed_terminals == expected_terminals,
+            "source transition trace is not contiguous from configured minimum "
+            f"through K: prediction={prediction['prediction_id']}, "
+            f"expected={expected_terminals}, actual={observed_terminals}",
+        )
+
         rows: list[dict[str, Any]] = []
-        previous_terminal = None
         for source in source_rows:
             terminal = int(source["terminal_iteration"])
-            _require(terminal >= MIN_TERMINAL_ITER, "pre-eligibility transition")
-            if previous_terminal is not None:
-                _require(
-                    terminal == previous_terminal + 1,
-                    "eligible transition trace is not terminal-contiguous",
-                )
             score = float(source["gate_score"])
             exact_mse = float(source["exact_adjacent_action_mse"])
             _require(math.isfinite(score), "non-finite gate score")
@@ -91,53 +132,73 @@ def compact_predictions(
                     "exact_safe": exact_safe,
                 }
             )
-            previous_terminal = terminal
-        if rows:
-            _require(
-                rows[0]["terminal_iteration"] == MIN_TERMINAL_ITER,
-                "eligible trace must begin at terminal 5",
-            )
-            _require(
-                rows[-1]["terminal_iteration"] == baseline_k,
-                "eligible trace must end at baseline K",
-            )
+
         row_count += len(rows)
         baseline_calls += exact_calls
         compact.append(
             {
                 "task_id": task_id,
                 "prediction_id": str(prediction["prediction_id"]),
-                "trajectory_id": str(identity["trajectory_id"]),
+                "trajectory_id": trajectory_id,
                 "baseline_k": baseline_k,
                 "baseline_coda_calls": exact_calls,
                 "baseline_stop_reason": str(production["stop_reason"]),
                 "baseline_adaptive_stop": bool(production["adaptive_stop"]),
+                "collection_applied": collection_applied,
+                "source_min_terminal_iteration": minimum,
                 "rows": rows,
             }
         )
+
+    _require(len(source_minima) <= 1, "mixed source minimum terminal iterations")
+    observed_minimum = next(iter(source_minima), source_min_terminal_iter)
     return compact, {
         "trajectory_count": len(trajectory_ids),
         "prediction_count": len(compact),
+        "source_min_terminal_iteration": observed_minimum,
         "eligible_row_count": row_count,
         "baseline_coda_calls": baseline_calls,
     }
+
+
+def slice_prediction(
+    prediction: Mapping[str, Any], min_terminal_iter: int
+) -> dict[str, Any]:
+    _require(
+        isinstance(min_terminal_iter, int)
+        and not isinstance(min_terminal_iter, bool)
+        and min_terminal_iter >= 2,
+        "replay minimum terminal iteration must be an integer >= 2",
+    )
+    source_minimum = int(
+        prediction.get("source_min_terminal_iteration", min_terminal_iter)
+    )
+    _require(
+        min_terminal_iter >= source_minimum,
+        "replay minimum precedes the source collection minimum",
+    )
+    sliced = dict(prediction)
+    sliced["rows"] = [
+        dict(row)
+        for row in prediction.get("rows", [])
+        if int(row["terminal_iteration"]) >= min_terminal_iter
+    ]
+    sliced["replay_min_terminal_iteration"] = int(min_terminal_iter)
+    return sliced
 
 
 def replay_prediction(
     prediction: Mapping[str, Any],
     *,
     threshold: float = DIAGNOSTIC_Q,
-    require_exact_terminal_output: bool = False,
+    min_terminal_iter: int | None = None,
+    require_exact_terminal_output: bool = True,
 ) -> dict[str, Any]:
-    """Replay one prediction while retaining baseline-adjacent confirmations.
+    """Replay one trace with exact adjacent confirmation after every high run."""
 
-    A terminal high-score run needs no convergence confirmation. The optional
-    exact-terminal-output variant executes its final Coda solely to preserve
-    the baseline terminal action contract; this is reported separately because
-    the requested policy specifies stopping semantics, not return semantics.
-    """
-
-    rows = list(prediction["rows"])
+    if min_terminal_iter is not None:
+        prediction = slice_prediction(prediction, min_terminal_iter)
+    rows = list(prediction.get("rows", []))
     baseline_k = int(prediction["baseline_k"])
     baseline_calls = int(prediction["baseline_coda_calls"])
     preeligible_calls = baseline_calls - len(rows)
@@ -147,35 +208,34 @@ def replay_prediction(
     eligible_exact_calls = 0
     deferred_calls = 0
     backfilled_calls = 0
-    policy_k = None
-    assumption_violations = 0
+    terminal_exact_fallback_calls = 0
+    policy_k: int | None = None
+    violations: list[dict[str, Any]] = []
     runs: list[dict[str, Any]] = []
     open_run: list[dict[str, Any]] = []
 
-    def close_run(*, followed_by_low: bool, trace_end: bool) -> None:
-        nonlocal eligible_exact_calls, backfilled_calls, open_run
+    def close_run(*, followed_by_low: bool, terminal_fallback: bool) -> None:
+        nonlocal eligible_exact_calls, backfilled_calls
+        nonlocal terminal_exact_fallback_calls, open_run
         if not open_run:
             return
-        backfilled = 0
-        if followed_by_low:
-            # Only a[k-1] is required alongside the current low-score a[k].
-            backfilled = 1
-        elif trace_end and require_exact_terminal_output:
-            # This preserves the exact returned terminal action, not stopping.
-            backfilled = 1
-        eligible_exact_calls += backfilled
+        backfilled = int(followed_by_low)
+        exact_terminal = int(terminal_fallback)
+        recovered = backfilled + exact_terminal
+        eligible_exact_calls += recovered
         backfilled_calls += backfilled
+        terminal_exact_fallback_calls += exact_terminal
         runs.append(
             {
                 "length": len(open_run),
-                "start_terminal_iteration": int(
-                    open_run[0]["terminal_iteration"]
-                ),
+                "start_terminal_iteration": int(open_run[0]["terminal_iteration"]),
                 "end_terminal_iteration": int(open_run[-1]["terminal_iteration"]),
                 "followed_by_low_score": bool(followed_by_low),
-                "ends_at_baseline_trace": bool(trace_end),
+                "ends_at_baseline_trace": bool(terminal_fallback),
                 "backfilled_coda_calls": backfilled,
-                "eliminated_coda_calls": len(open_run) - backfilled,
+                "terminal_exact_fallback_coda_calls": exact_terminal,
+                "recovered_deferred_coda_calls": recovered,
+                "eliminated_coda_calls": len(open_run) - recovered,
             }
         )
         open_run = []
@@ -186,51 +246,62 @@ def replay_prediction(
             deferred_calls += 1
             open_run.append(row)
             if bool(row["exact_safe"]):
-                # The requested replay assumes this cannot happen. Retain the
-                # violation so K agreement is not overstated at another q/data.
-                assumption_violations += 1
+                violations.append(
+                    {
+                        "terminal_iteration": int(row["terminal_iteration"]),
+                        "gate_score": float(row["gate_score"]),
+                        "exact_adjacent_action_mse": float(
+                            row["exact_adjacent_action_mse"]
+                        ),
+                    }
+                )
             continue
 
         if open_run:
-            close_run(followed_by_low=True, trace_end=False)
+            close_run(followed_by_low=True, terminal_fallback=False)
         eligible_exact_calls += 1
         if bool(row["exact_safe"]):
             policy_k = int(row["terminal_iteration"])
             break
 
     if open_run:
-        close_run(followed_by_low=False, trace_end=True)
-
-    if policy_k is None and not rows:
-        # Cold-origin or pre-eligibility baseline predictions never apply the
-        # diagnostic filter and therefore remain exactly unchanged.
-        policy_k = baseline_k
-    elif policy_k is None and assumption_violations == 0:
-        # No adjacent exact confirmation stopped the policy. The recorded trace
-        # then ends at the same recurrence maximum as baseline.
         _require(
-            not bool(prediction["baseline_adaptive_stop"]),
-            "adaptive baseline ended without a reproduced exact-safe confirmation",
+            require_exact_terminal_output,
+            "replay ended with an unresolved deferred terminal action",
         )
+        close_run(followed_by_low=False, terminal_fallback=True)
+
+    if policy_k is None and not violations:
+        if rows and bool(prediction["baseline_adaptive_stop"]):
+            _require(
+                bool(rows[-1]["exact_safe"]),
+                "adaptive baseline trace does not end at an exact-safe row",
+            )
         policy_k = baseline_k
 
     actual_calls = preeligible_calls + eligible_exact_calls
     eliminated_calls = baseline_calls - actual_calls
+    recovered_calls = backfilled_calls + terminal_exact_fallback_calls
     _require(
-        eliminated_calls == deferred_calls - backfilled_calls,
+        eliminated_calls == deferred_calls - recovered_calls,
         "deferred/backfill Coda accounting mismatch",
     )
-    k_agrees = bool(policy_k == baseline_k and assumption_violations == 0)
+    k_agrees = bool(policy_k == baseline_k and not violations)
     return {
         "baseline_k": baseline_k,
         "policy_k": policy_k,
         "baseline_coda_calls": baseline_calls,
         "actual_coda_calls": actual_calls,
+        "eligible_row_count": len(rows),
         "scorer_calls": scorer_calls,
         "deferred_coda_calls": deferred_calls,
+        "backfilled_coda_calls": backfilled_calls,
         "deferred_calls_later_backfilled": backfilled_calls,
+        "terminal_exact_fallback_coda_calls": terminal_exact_fallback_calls,
+        "recovered_deferred_coda_calls": recovered_calls,
         "truly_eliminated_coda_calls": eliminated_calls,
-        "high_score_exact_safe_assumption_violations": assumption_violations,
+        "high_score_exact_safe_assumption_violations": len(violations),
+        "violation_rows": violations,
         "baseline_k_agrees": k_agrees,
         "runs": runs,
     }
@@ -239,11 +310,14 @@ def replay_prediction(
 def _empty_counts() -> dict[str, int]:
     return {
         "prediction_count": 0,
+        "eligible_row_count": 0,
         "baseline_coda_calls": 0,
         "actual_coda_calls": 0,
         "scorer_calls": 0,
         "deferred_coda_calls": 0,
-        "deferred_calls_later_backfilled": 0,
+        "backfilled_coda_calls": 0,
+        "terminal_exact_fallback_coda_calls": 0,
+        "recovered_deferred_coda_calls": 0,
         "truly_eliminated_coda_calls": 0,
         "high_score_exact_safe_assumption_violations": 0,
         "baseline_k_agreement_count": 0,
@@ -251,7 +325,13 @@ def _empty_counts() -> dict[str, int]:
     }
 
 
-def _finalize(counts: Mapping[str, int]) -> dict[str, Any]:
+def _finalize(
+    counts: Mapping[str, int],
+    *,
+    trajectory_count: int,
+    deferred_run_count: int,
+    single_length_run_count: int,
+) -> dict[str, Any]:
     result = dict(counts)
     baseline_calls = int(result["baseline_coda_calls"])
     deferred = int(result["deferred_coda_calls"])
@@ -260,18 +340,40 @@ def _finalize(counts: Mapping[str, int]) -> dict[str, Any]:
     predictions = int(result["prediction_count"])
     scorer_cost = scorer_calls * SCORER_COST_MS
     coda_savings = eliminated * CODA_COST_MS
+    cost_ratio = _safe_ratio(eliminated, scorer_calls)
     result.update(
         {
+            "trajectory_count": int(trajectory_count),
+            "deferred_run_count": int(deferred_run_count),
+            "single_length_run_count": int(single_length_run_count),
             "backfill_rate": _safe_ratio(
-                int(result["deferred_calls_later_backfilled"]), deferred
+                int(result["backfilled_coda_calls"]), deferred
+            ),
+            "recovered_deferred_rate": _safe_ratio(
+                int(result["recovered_deferred_coda_calls"]), deferred
             ),
             "coda_reduction": _safe_ratio(eliminated, baseline_calls),
-            "estimated_scorer_cost_ms": scorer_cost,
-            "estimated_coda_savings_ms": coda_savings,
-            "estimated_net_latency_saving_ms": coda_savings - scorer_cost,
-            "estimated_net_latency_positive": bool(coda_savings > scorer_cost),
+            "coda_reduction_percent": (
+                100.0 * eliminated / baseline_calls if baseline_calls else None
+            ),
+            "violation_rate_among_high_score_rows": _safe_ratio(
+                int(result["high_score_exact_safe_assumption_violations"]),
+                deferred,
+            ),
             "baseline_k_agreement_rate": _safe_ratio(
                 int(result["baseline_k_agreement_count"]), predictions
+            ),
+            "eliminated_coda_per_score": cost_ratio,
+            "break_even_scorer_to_coda_cost_ratio": cost_ratio,
+            "break_even_scorer_cost_ms_per_call": (
+                cost_ratio * CODA_COST_MS if cost_ratio is not None else None
+            ),
+            "historical_estimated_scorer_cost_ms": scorer_cost,
+            "historical_estimated_coda_savings_ms": coda_savings,
+            "historical_estimated_net_latency_saving_ms": coda_savings
+            - scorer_cost,
+            "historical_estimated_net_latency_positive": bool(
+                coda_savings > scorer_cost
             ),
         }
     )
@@ -280,37 +382,25 @@ def _finalize(counts: Mapping[str, int]) -> dict[str, Any]:
 
 def _run_distribution(runs: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     lengths = Counter(int(run["length"]) for run in runs)
-    followed = Counter(
-        int(run["length"])
-        for run in runs
-        if bool(run["followed_by_low_score"])
-    )
-    ended = Counter(
-        int(run["length"])
-        for run in runs
-        if bool(run["ends_at_baseline_trace"])
-    )
     return {
-        "region_count": len(runs),
+        "run_count": len(runs),
         "high_score_row_count": sum(int(run["length"]) for run in runs),
-        "single_iteration_region_count": lengths.get(1, 0),
-        "single_iteration_regions_followed_by_low_score": followed.get(1, 0),
-        "single_iteration_regions_with_zero_saving_after_required_backfill": sum(
-            int(run["length"] == 1 and run["backfilled_coda_calls"] == 1)
-            for run in runs
-        ),
+        "single_length_run_count": lengths.get(1, 0),
         "by_length": {
             str(length): {
-                "region_count": count,
+                "run_count": count,
                 "high_score_rows": length * count,
-                "followed_by_low_score": followed.get(length, 0),
-                "ends_at_baseline_trace": ended.get(length, 0),
                 "backfilled_coda_calls": sum(
                     int(run["backfilled_coda_calls"])
                     for run in runs
                     if int(run["length"]) == length
                 ),
-                "eliminated_coda_calls": sum(
+                "terminal_exact_fallback_coda_calls": sum(
+                    int(run["terminal_exact_fallback_coda_calls"])
+                    for run in runs
+                    if int(run["length"]) == length
+                ),
+                "truly_eliminated_coda_calls": sum(
                     int(run["eliminated_coda_calls"])
                     for run in runs
                     if int(run["length"]) == length
@@ -324,70 +414,148 @@ def _run_distribution(runs: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
 def replay_dataset(
     compact: Sequence[Mapping[str, Any]],
     *,
+    min_terminal_iter: int,
     threshold: float = DIAGNOSTIC_Q,
-    require_exact_terminal_output: bool = False,
 ) -> dict[str, Any]:
     global_counts = _empty_counts()
     task_counts = {task_id: _empty_counts() for task_id in TASK_IDS}
     global_runs: list[dict[str, Any]] = []
     task_runs: dict[int, list[dict[str, Any]]] = defaultdict(list)
-    mismatch_predictions: list[dict[str, Any]] = []
-    for prediction in compact:
-        replay = replay_prediction(
-            prediction,
-            threshold=threshold,
-            require_exact_terminal_output=require_exact_terminal_output,
-        )
+    global_trajectories: set[str] = set()
+    task_trajectories: dict[int, set[str]] = defaultdict(set)
+    violations: list[dict[str, Any]] = []
+    mismatches: list[dict[str, Any]] = []
+
+    count_fields = tuple(
+        name for name in _empty_counts() if name != "prediction_count"
+    )
+    for source_prediction in compact:
+        prediction = slice_prediction(source_prediction, min_terminal_iter)
+        replay = replay_prediction(prediction, threshold=threshold)
         task_id = int(prediction["task_id"])
+        trajectory_id = str(prediction["trajectory_id"])
+        global_trajectories.add(trajectory_id)
+        task_trajectories[task_id].add(trajectory_id)
         for counts in (global_counts, task_counts[task_id]):
             counts["prediction_count"] += 1
-            for name in (
-                "baseline_coda_calls",
-                "actual_coda_calls",
-                "scorer_calls",
-                "deferred_coda_calls",
-                "deferred_calls_later_backfilled",
-                "truly_eliminated_coda_calls",
-                "high_score_exact_safe_assumption_violations",
-            ):
-                counts[name] += int(replay[name])
-            counts["baseline_k_agreement_count"] += int(replay["baseline_k_agrees"])
-            counts["predictions_with_terminal_mismatch"] += int(
-                not replay["baseline_k_agrees"]
-            )
+            for name in count_fields:
+                if name == "baseline_k_agreement_count":
+                    counts[name] += int(replay["baseline_k_agrees"])
+                elif name == "predictions_with_terminal_mismatch":
+                    counts[name] += int(not replay["baseline_k_agrees"])
+                else:
+                    counts[name] += int(replay[name])
+
         for run in replay["runs"]:
-            record = {**run, "task_id": task_id}
+            record = {
+                **run,
+                "task_id": task_id,
+                "trajectory_id": trajectory_id,
+                "prediction_id": prediction["prediction_id"],
+            }
             global_runs.append(record)
             task_runs[task_id].append(record)
-        if not replay["baseline_k_agrees"]:
-            mismatch_predictions.append(
+        for violation in replay["violation_rows"]:
+            violations.append(
                 {
                     "task_id": task_id,
-                    "trajectory_id": prediction["trajectory_id"],
+                    "trajectory_id": trajectory_id,
+                    "prediction_id": prediction["prediction_id"],
+                    **violation,
+                }
+            )
+        if not replay["baseline_k_agrees"]:
+            mismatches.append(
+                {
+                    "task_id": task_id,
+                    "trajectory_id": trajectory_id,
                     "prediction_id": prediction["prediction_id"],
                     "baseline_k": replay["baseline_k"],
                     "policy_k": replay["policy_k"],
-                    "assumption_violations": replay[
+                    "violation_count": replay[
                         "high_score_exact_safe_assumption_violations"
                     ],
                 }
             )
+
+    global_distribution = _run_distribution(global_runs)
+    task_distributions = {
+        task_id: _run_distribution(task_runs[task_id]) for task_id in TASK_IDS
+    }
     return {
-        "threshold": threshold,
-        "require_exact_terminal_output": require_exact_terminal_output,
-        "global": _finalize(global_counts),
+        "min_terminal_iteration": int(min_terminal_iter),
+        "threshold": float(threshold),
+        "global": _finalize(
+            global_counts,
+            trajectory_count=len(global_trajectories),
+            deferred_run_count=global_distribution["run_count"],
+            single_length_run_count=global_distribution[
+                "single_length_run_count"
+            ],
+        ),
         "by_task": {
             str(task_id): {
-                **_finalize(task_counts[task_id]),
-                "high_score_run_length_distribution": _run_distribution(
-                    task_runs[task_id]
+                **_finalize(
+                    task_counts[task_id],
+                    trajectory_count=len(task_trajectories[task_id]),
+                    deferred_run_count=task_distributions[task_id]["run_count"],
+                    single_length_run_count=task_distributions[task_id][
+                        "single_length_run_count"
+                    ],
                 ),
+                "run_length_distribution": task_distributions[task_id],
             }
             for task_id in TASK_IDS
         },
-        "high_score_run_length_distribution": _run_distribution(global_runs),
-        "terminal_mismatch_predictions": mismatch_predictions,
+        "run_length_distribution": global_distribution,
+        "high_score_exact_safe_violation_rows": violations,
+        "terminal_mismatch_predictions": mismatches,
     }
+
+
+def _margin(new: Mapping[str, Any], old: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "added_scorer_calls": int(new["scorer_calls"] - old["scorer_calls"]),
+        "added_deferred_rows": int(
+            new["deferred_coda_calls"] - old["deferred_coda_calls"]
+        ),
+        "added_truly_eliminated_coda_calls": int(
+            new["truly_eliminated_coda_calls"]
+            - old["truly_eliminated_coda_calls"]
+        ),
+        "added_safety_violations": int(
+            new["high_score_exact_safe_assumption_violations"]
+            - old["high_score_exact_safe_assumption_violations"]
+        ),
+        "coda_reduction_percentage_point_change": float(
+            (new["coda_reduction_percent"] or 0.0)
+            - (old["coda_reduction_percent"] or 0.0)
+        ),
+        "historical_estimated_net_latency_change_ms": float(
+            new["historical_estimated_net_latency_saving_ms"]
+            - old["historical_estimated_net_latency_saving_ms"]
+        ),
+    }
+
+
+def _marginal_effects(cadences: Mapping[str, Any]) -> dict[str, Any]:
+    effects: dict[str, Any] = {}
+    for old_min, new_min in ((5, 4), (4, 3), (3, 2)):
+        old = cadences[str(old_min)]
+        new = cadences[str(new_min)]
+        effects[f"min{old_min}_to_min{new_min}"] = {
+            "from_min_terminal_iteration": old_min,
+            "to_min_terminal_iteration": new_min,
+            "global": _margin(new["global"], old["global"]),
+            "by_task": {
+                str(task_id): _margin(
+                    new["by_task"][str(task_id)],
+                    old["by_task"][str(task_id)],
+                )
+                for task_id in TASK_IDS
+            },
+        }
+    return effects
 
 
 def analyze(
@@ -395,127 +563,144 @@ def analyze(
     predictions: Sequence[Mapping[str, Any]],
     *,
     manifest_path: Path,
+    min_terminal_iters: Sequence[int] = REPLAY_MIN_TERMINAL_ITERS,
 ) -> dict[str, Any]:
     _require(manifest.get("complete") is True, "shadow manifest is incomplete")
-    _require(tuple(manifest["expected_task_ids"]) == TASK_IDS, "task partition mismatch")
-    compact, dataset = compact_predictions(predictions)
-    _require(dataset["trajectory_count"] == EXPECTED_TRAJECTORIES, "trajectory count mismatch")
-    _require(dataset["prediction_count"] == EXPECTED_PREDICTIONS, "prediction count mismatch")
-    _require(dataset["eligible_row_count"] == EXPECTED_ROWS, "eligible-row count mismatch")
-
-    primary = replay_dataset(compact)
-    exact_terminal_variant = replay_dataset(
-        compact, require_exact_terminal_output=True
-    )
-
-    # Reuse the already-tested causal max_skip=1 replay for a direct comparison.
-    from scripts.coda_anchor_feasibility.analyze_action_delta_nonconvergence_filter import (
-        causal_replay,
-        prepare_replay_data,
-    )
-
-    current_compact, _, current_dataset = prepare_replay_data(predictions)
     _require(
-        current_dataset["baseline_coda_calls"] == dataset["baseline_coda_calls"],
-        "baseline Coda accounting differs from existing replay",
+        tuple(int(value) for value in manifest["expected_task_ids"]) == TASK_IDS,
+        "task partition mismatch",
     )
-    current = causal_replay(current_compact, DIAGNOSTIC_Q)
-    current_global = current["global"]
+    _require(
+        manifest.get("artifact_identity", {}).get("sha256")
+        == EXPECTED_ARTIFACT_SHA256,
+        "frozen Action-Delta artifact identity mismatch",
+    )
+    source_minimum = _manifest_min_terminal_iteration(manifest)
+    requested = tuple(int(value) for value in min_terminal_iters)
+    _require(bool(requested), "at least one replay minimum is required")
+    _require(
+        all(value >= source_minimum for value in requested),
+        "requested replay minimum precedes source collection minimum",
+    )
+    compact, dataset = compact_predictions(
+        predictions, source_min_terminal_iter=source_minimum
+    )
+    _require(
+        dataset["prediction_count"] == int(manifest["prediction_count"]),
+        "prediction count differs from source manifest identity",
+    )
+    _require(
+        dataset["eligible_row_count"] == int(manifest["transition_count"]),
+        "transition count differs from source manifest identity",
+    )
+    aggregate = manifest.get("summary", {}).get("aggregate", {})
+    _require(
+        dataset["trajectory_count"] == int(aggregate.get("trajectories", -1)),
+        "trajectory count differs from source manifest summary",
+    )
+
+    cadences = {
+        str(minimum): replay_dataset(
+            compact,
+            min_terminal_iter=minimum,
+            threshold=DIAGNOSTIC_Q,
+        )
+        for minimum in requested
+    }
+    min5 = cadences.get("5")
+    comparisons = {}
+    for minimum in requested:
+        summary = cadences[str(minimum)]["global"]
+        baseline_reduction = (
+            min5["global"]["coda_reduction_percent"] if min5 else None
+        )
+        absolute_gain = (
+            summary["coda_reduction_percent"] - baseline_reduction
+            if baseline_reduction is not None
+            else None
+        )
+        relative_gain = (
+            absolute_gain / baseline_reduction
+            if absolute_gain is not None and baseline_reduction
+            else None
+        )
+        comparisons[str(minimum)] = {
+            "zero_high_score_exact_safe_violations": bool(
+                summary["high_score_exact_safe_assumption_violations"] == 0
+            ),
+            "full_baseline_k_agreement": bool(
+                summary["baseline_k_agreement_count"]
+                == summary["prediction_count"]
+            ),
+            "coda_reduction_percentage_point_gain_vs_min5": absolute_gain,
+            "coda_reduction_relative_gain_vs_min5": relative_gain,
+            "materially_greater_coda_reduction_than_min5": (
+                bool(
+                    absolute_gain >= 1.0
+                    and relative_gain is not None
+                    and relative_gain >= 0.10
+                )
+                if minimum != 5 and absolute_gain is not None
+                else False
+            ),
+            "historical_estimated_action_head_net_positive": bool(
+                summary["historical_estimated_net_latency_positive"]
+            ),
+        }
+
     return {
-        "analysis_type": "action_delta_adjacent_history_deferred_backfill",
+        "analysis_type": "action_delta_deferred_backfill_minimum_sweep",
         "diagnostic_only": True,
         "source_manifest": str(manifest_path),
         "source_manifest_sha256": _sha256_file(manifest_path),
         "source_dataset": {
             **dataset,
             "task_ids": list(TASK_IDS),
+            "manifest_dataset_identity_sha256": manifest.get(
+                "dataset_identity_sha256"
+            ),
         },
         "frozen_predictor": {
             **dict(manifest["artifact_identity"]),
             "diagnostic_high_side_threshold": DIAGNOSTIC_Q,
             "retrained": False,
         },
-        "cost_anchors": {
+        "exact_convergence_mse_threshold": EXACT_CONVERGENCE_MSE,
+        "historical_cost_anchors": {
             "scorer_cost_ms": SCORER_COST_MS,
             "coda_cost_ms": CODA_COST_MS,
         },
+        "break_even_definition": {
+            "anchor_independent_required_scorer_to_coda_cost_ratio": (
+                "truly_eliminated_coda_calls / scorer_calls"
+            ),
+            "break_even_scorer_cost_ms_per_call": (
+                "ratio * historical_coda_cost_ms"
+            ),
+        },
         "policy": {
-            "minimum_terminal_iteration": MIN_TERMINAL_ITER,
             "predictor_scored_on_adjacent_latent_states": True,
-            "high_score_assumed_exact_nonconverged": True,
-            "low_score_after_defer_executes_adjacent_backfill_pair": True,
+            "high_score_rule": "gate_score >= 0.0015",
+            "low_after_run_backfills_only_immediately_previous_state": True,
             "only_adjacent_exact_action_mse_controls_stopping": True,
+            "exact_terminal_action_required": True,
         },
-        "deferred_backfill": primary,
-        "exact_terminal_output_variant": exact_terminal_variant,
-        "current_max_skip_1_comparison": {
-            "baseline_coda_calls": int(current_global["baseline_coda_calls"]),
-            "nominal_actual_coda_calls": int(
-                current_global["baseline_coda_calls"]
-                - current_global["nominal_skipped_coda_calls"]
-            ),
-            "nominal_coda_calls_saved": int(
-                current_global["nominal_skipped_coda_calls"]
-            ),
-            "scorer_calls": int(current_global["scorer_call_count"]),
-            "adjacent_history_difference_events": int(
-                current_global["adjacent_history_difference_events"]
-            ),
-            "altered_history_stop_decision_changes": int(
-                current_global["altered_history_stop_decision_changes"]
-            ),
-            "predictions_censored_after_history_change": int(
-                current_global["censored_predictions"]
-            ),
-            "estimated_scorer_cost_ms": float(current_global["scorer_cost_ms"]),
-            "estimated_coda_savings_ms": float(
-                current_global["gross_coda_time_saved_ms"]
-            ),
-            "estimated_net_latency_saving_ms": float(
-                current_global["nominal_net_time_saved_ms"]
-            ),
-            "warning": (
-                "Nominal observed-prefix accounting: forced exact Coda compares "
-                "against a non-adjacent last-executed anchor, so baseline K is not preserved."
-            ),
-            "by_task": {
-                str(task_id): {
-                    "baseline_coda_calls": int(
-                        current["by_task"][str(task_id)]["baseline_coda_calls"]
-                    ),
-                    "nominal_coda_calls_saved": int(
-                        current["by_task"][str(task_id)][
-                            "nominal_skipped_coda_calls"
-                        ]
-                    ),
-                    "scorer_calls": int(
-                        current["by_task"][str(task_id)]["scorer_call_count"]
-                    ),
-                    "adjacent_history_difference_events": int(
-                        current["by_task"][str(task_id)][
-                            "adjacent_history_difference_events"
-                        ]
-                    ),
-                    "altered_history_stop_decision_changes": int(
-                        current["by_task"][str(task_id)][
-                            "altered_history_stop_decision_changes"
-                        ]
-                    ),
-                    "predictions_censored_after_history_change": int(
-                        current["by_task"][str(task_id)][
-                            "censored_predictions"
-                        ]
-                    ),
-                }
-                for task_id in TASK_IDS
-            },
-        },
+        "cadences": cadences,
+        "marginal_effects": (
+            _marginal_effects(cadences)
+            if all(str(value) in cadences for value in REPLAY_MIN_TERMINAL_ITERS)
+            else {}
+        ),
+        "development_checks": comparisons,
+        "material_reduction_definition": (
+            ">=1.0 absolute percentage point and >=10% relative gain vs min=5; "
+            "descriptive only, not policy selection"
+        ),
         "limitations": [
-            "This is an offline replay on development Tasks 0,1,2,3,6,7,8,9 only.",
-            "All q=0.0015 high-score rows are verified exact-nonconverged in this dataset; this is not a guarantee on new trajectories.",
-            "The primary policy preserves exact adjacent stopping semantics but does not define an exact returned action when a high-score run reaches max iteration.",
-            "The exact-terminal-output variant separately counts one final Coda for such terminal runs.",
-            "Latency is estimated from established scorer/Coda cost anchors; LIBERO was not run.",
+            "Development Tasks 0,1,2,3,6,7,8,9 only; Tasks 4/5 remain held out.",
+            "q=0.0015 is frozen; no threshold or model was fitted.",
+            "A high-score exact-safe row is surfaced as a violation and K mismatch.",
+            "Latency uses historical fixed anchors; LIBERO was not run.",
         ],
     }
 
@@ -534,70 +719,105 @@ def write_outputs(results: Mapping[str, Any], output_dir: Path) -> None:
         json.dumps(results, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
     per_task = []
-    for task_id in TASK_IDS:
-        summary = results["deferred_backfill"]["by_task"][str(task_id)]
-        per_task.append(
+    distributions = []
+    for cadence, replay in results["cadences"].items():
+        for task_id in TASK_IDS:
+            summary = replay["by_task"][str(task_id)]
+            per_task.append(
+                {
+                    "min_terminal_iteration": int(cadence),
+                    "task_id": task_id,
+                    **{
+                        key: value
+                        for key, value in summary.items()
+                        if key != "run_length_distribution"
+                    },
+                }
+            )
+        for length, values in replay["run_length_distribution"]["by_length"].items():
+            distributions.append(
+                {
+                    "min_terminal_iteration": int(cadence),
+                    "scope": "global",
+                    "task_id": "",
+                    "run_length": int(length),
+                    **values,
+                }
+            )
+            for task_id in TASK_IDS:
+                task_values = replay["by_task"][str(task_id)][
+                    "run_length_distribution"
+                ]["by_length"].get(length)
+                if task_values is not None:
+                    distributions.append(
+                        {
+                            "min_terminal_iteration": int(cadence),
+                            "scope": "task",
+                            "task_id": task_id,
+                            "run_length": int(length),
+                            **task_values,
+                        }
+                    )
+    margins = []
+    for name, effect in results["marginal_effects"].items():
+        margins.append(
             {
-                "task_id": task_id,
-                **{
-                    key: value
-                    for key, value in summary.items()
-                    if key != "high_score_run_length_distribution"
-                },
+                "comparison": name,
+                "scope": "global",
+                "task_id": "",
+                **effect["global"],
             }
         )
+        for task_id in TASK_IDS:
+            margins.append(
+                {
+                    "comparison": name,
+                    "scope": "task",
+                    "task_id": task_id,
+                    **effect["by_task"][str(task_id)],
+                }
+            )
     _write_csv(output_dir / "per_task_summary.csv", per_task)
-    distribution = results["deferred_backfill"][
-        "high_score_run_length_distribution"
-    ]["by_length"]
-    _write_csv(
-        output_dir / "run_length_distribution.csv",
-        [
-            {"run_length": int(length), **values}
-            for length, values in distribution.items()
-        ],
-    )
+    _write_csv(output_dir / "run_length_distribution.csv", distributions)
+    _write_csv(output_dir / "marginal_effects.csv", margins)
 
 
 def print_summary(results: Mapping[str, Any], output_dir: Path) -> None:
-    primary = results["deferred_backfill"]["global"]
-    print("Action-Delta deferred/backfill adjacent-history replay")
+    print("Action-Delta deferred/backfill minimum-terminal sweep")
     print(
-        f"predictions={primary['prediction_count']} baseline_coda={primary['baseline_coda_calls']} "
-        f"actual_coda={primary['actual_coda_calls']} eliminated={primary['truly_eliminated_coda_calls']}"
+        "min  scores  deferred  runs  backfill  eliminated  reduction  "
+        "violations  K-match  net-ms  break-even-score-ms"
     )
-    print(
-        f"deferred={primary['deferred_coda_calls']} backfilled={primary['deferred_calls_later_backfilled']} "
-        f"backfill_rate={primary['backfill_rate']:.6f} coda_reduction={primary['coda_reduction']:.6f}"
-    )
-    print(
-        f"scorer_calls={primary['scorer_calls']} scorer_ms={primary['estimated_scorer_cost_ms']:.3f} "
-        f"coda_saved_ms={primary['estimated_coda_savings_ms']:.3f} "
-        f"net_ms={primary['estimated_net_latency_saving_ms']:.3f}"
-    )
-    print(
-        f"baseline_K_agreement={primary['baseline_k_agreement_count']}/{primary['prediction_count']} "
-        f"mismatches={primary['predictions_with_terminal_mismatch']}"
-    )
-    print("task  predictions  baseline  actual  eliminated  backfilled  reduction  K-match")
-    for task_id in TASK_IDS:
-        row = results["deferred_backfill"]["by_task"][str(task_id)]
+    for minimum in REPLAY_MIN_TERMINAL_ITERS:
+        if str(minimum) not in results["cadences"]:
+            continue
+        row = results["cadences"][str(minimum)]["global"]
         print(
-            f"{task_id:>4}  {row['prediction_count']:>11}  {row['baseline_coda_calls']:>8}  "
-            f"{row['actual_coda_calls']:>6}  {row['truly_eliminated_coda_calls']:>10}  "
-            f"{row['deferred_calls_later_backfilled']:>10}  {row['coda_reduction']:.5f}  "
-            f"{row['baseline_k_agreement_count']}/{row['prediction_count']}"
+            f"{minimum:>3}  {row['scorer_calls']:>6}  {row['deferred_coda_calls']:>8}  "
+            f"{row['deferred_run_count']:>4}  {row['backfilled_coda_calls']:>8}  "
+            f"{row['truly_eliminated_coda_calls']:>10}  "
+            f"{row['coda_reduction_percent']:>8.3f}%  "
+            f"{row['high_score_exact_safe_assumption_violations']:>10}  "
+            f"{row['baseline_k_agreement_count']}/{row['prediction_count']}  "
+            f"{row['historical_estimated_net_latency_saving_ms']:>7.2f}  "
+            f"{row['break_even_scorer_cost_ms_per_call'] or 0.0:.6f}"
         )
-    print(
-        "Run lengths: "
-        + json.dumps(
-            results["deferred_backfill"]["high_score_run_length_distribution"][
-                "by_length"
-            ],
-            sort_keys=True,
+    for name, effect in results["marginal_effects"].items():
+        row = effect["global"]
+        print(
+            f"{name}: +scores={row['added_scorer_calls']} "
+            f"+deferred={row['added_deferred_rows']} "
+            f"+eliminated={row['added_truly_eliminated_coda_calls']} "
+            f"+violations={row['added_safety_violations']} "
+            f"delta_reduction_pp={row['coda_reduction_percentage_point_change']:.3f} "
+            f"delta_net_ms={row['historical_estimated_net_latency_change_ms']:.3f}"
         )
-    )
-    for name in ("results.json", "per_task_summary.csv", "run_length_distribution.csv"):
+    for name in (
+        "results.json",
+        "per_task_summary.csv",
+        "run_length_distribution.csv",
+        "marginal_effects.csv",
+    ):
         print(f"Wrote {output_dir / name}")
 
 
@@ -610,7 +830,7 @@ def main() -> None:
     output_dir = (
         args.output_dir.resolve()
         if args.output_dir is not None
-        else manifest_path.parent.parent / "deferred_backfill_analysis"
+        else manifest_path.parent.parent / "deferred_backfill_minimum_sweep"
     )
     from experiments.robot.libero.action_delta_gate_shadow_collection import (
         load_action_delta_gate_shadow_collection,

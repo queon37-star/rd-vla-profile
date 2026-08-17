@@ -163,7 +163,13 @@ def test_phase_trials_use_10_10_30_and_smoke_only_calibration_first_three():
     screening = resolve_phase_trials(
         manifest=manifest, phase="screening", task_id=0, initial_states=states, base_seed=7
     )
-    final = resolve_phase_trials(manifest=manifest, phase="final", task_id=0, initial_states=states, base_seed=7)
+    final = resolve_phase_trials(
+        manifest=manifest,
+        phase="final_holdout",
+        task_id=0,
+        initial_states=states,
+        base_seed=7,
+    )
     smoke = resolve_phase_trials(manifest=manifest, phase="smoke", task_id=0, initial_states=states, base_seed=7)
 
     assert [len(calibration), len(screening), len(final), len(smoke)] == [10, 10, 30, 3]
@@ -264,7 +270,7 @@ def test_nonlegacy_configuration_is_fail_closed(tmp_path):
         )
     with pytest.raises(ValueError, match="requires num_trials_per_task=30"):
         validate_protocol_configuration(
-            phase="final",
+            phase="final_holdout",
             task_suite_name="libero_spatial",
             num_trials_per_task=60,
             initial_states_path="DEFAULT",

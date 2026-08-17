@@ -5,6 +5,9 @@ import pytest
 import torch
 
 import prismatic.models.action_delta_gate as action_delta_gate_module
+from prismatic.models.action_delta_deferred_scorer import (
+    PreparedActionDeltaDeferredScorer,
+)
 from prismatic.models.action_delta_gate import (
     ACTION_DELTA_GATE_ARTIFACT_TYPE,
     ACTION_DELTA_GATE_CALIBRATION_METHOD,
@@ -304,11 +307,12 @@ def test_timing_and_savings_accounting_is_internally_consistent():
     assert ACTION_DELTA_NONCONVERGENCE_THRESHOLD == 0.0015
 
 
-def deferred_kwargs(gate, *, max_iter=8):
+def deferred_kwargs(gate, *, max_iter=8, min_terminal_iter=5):
     values = kwargs(gate, max_iter=max_iter)
     values.update(
         use_action_delta_nonconvergence_filter=False,
         use_action_delta_deferred_backfill_filter=True,
+        action_delta_gate_min_terminal_iter=min_terminal_iter,
     )
     return values
 
@@ -345,12 +349,218 @@ def action(value):
     return torch.full((1, 2, 2), float(value))
 
 
-def run_deferred(model, gate, *, max_iter):
+def run_deferred(model, gate, *, max_iter, min_terminal_iter=5):
     return model(
         *inputs(),
         warm_start_state=torch.zeros(1, 2, 4, dtype=torch.bfloat16),
-        **deferred_kwargs(gate, max_iter=max_iter),
+        **deferred_kwargs(
+            gate,
+            max_iter=max_iter,
+            min_terminal_iter=min_terminal_iter,
+        ),
     )
+
+
+def test_deferred_min_two_scores_t2_after_exact_t1(monkeypatch):
+    model = make_model()
+    outputs = {index: action(index) for index in range(1, 4)}
+    install_state_indexed_outputs(model, outputs)
+    calls = install_score_trace(monkeypatch, {2: 0.0005, 3: 0.0005})
+
+    run_deferred(model, make_gate(0.0), max_iter=3, min_terminal_iter=2)
+
+    assert model.test_coda_iterations[0] == 1
+    assert calls[0] == (1, 2)
+    debug = model.last_recurrence_debug
+    assert debug["action_delta_deferred_backfill_filter_min_terminal_iter"] == 2
+    assert debug["action_delta_deferred_backfill_filter_scorer_backend"] == "eager"
+
+
+def test_deferred_compile_backend_is_opt_in_and_excludes_setup_from_timing(monkeypatch):
+    model = make_model()
+    outputs = {index: action(index) for index in range(1, 5)}
+    install_state_indexed_outputs(model, outputs)
+    compiled_calls = []
+
+    def compiled_score(anchor_state, current_state, *_artifact_tensors):
+        anchor = int(round(float(anchor_state[0, 0, 0].item())))
+        terminal = int(round(float(current_state[0, 0, 0].item())))
+        compiled_calls.append((anchor, terminal))
+        score = 0.002 if terminal == 2 else 0.0005
+        return torch.tensor(score)
+
+    prepared = PreparedActionDeltaDeferredScorer(
+        backend="compile_default",
+        tensor_scorer=compiled_score,
+        compile_setup_ms=4321.0,
+        compile_fullgraph=True,
+        compile_dynamic=False,
+        numerical_equivalence="not_bitwise_equal; parity=7139/7139",
+        development_decision_parity_count=7139,
+        development_decision_parity_total=7139,
+    )
+
+    def forbidden_eager(*_args, **_kwargs):
+        raise AssertionError("compiled deferred trial called the eager scorer")
+
+    monkeypatch.setattr(
+        action_heads_score_module(), "evaluate_action_delta_gate", forbidden_eager
+    )
+    config = deferred_kwargs(
+        make_gate(0.0), max_iter=4, min_terminal_iter=2
+    )
+    config.update(
+        action_delta_deferred_scorer_backend="compile_default",
+        action_delta_deferred_scorer=prepared,
+    )
+    model(
+        *inputs(),
+        warm_start_state=torch.zeros(1, 2, 4, dtype=torch.bfloat16),
+        **config,
+    )
+
+    debug = model.last_recurrence_debug
+    assert compiled_calls[0] == (1, 2)
+    assert debug["action_delta_deferred_backfill_filter_scorer_backend"] == (
+        "compile_default"
+    )
+    assert debug["action_delta_deferred_backfill_filter_compile_setup_ms"] == 4321.0
+    assert (
+        debug[
+            "action_delta_deferred_backfill_filter_compile_setup_in_predictor_timing"
+        ]
+        is False
+    )
+    assert debug["action_delta_deferred_backfill_filter_predictor_ms_total"] < 4321.0
+    assert debug[
+        "action_delta_deferred_backfill_filter_development_decision_parity"
+    ] == {"match_count": 7139, "transition_count": 7139}
+
+
+def test_compile_backend_cannot_be_used_by_max_skip_or_production_gate():
+    model = make_model()
+    base = kwargs(make_gate(0.04), max_iter=5)
+    base["action_delta_deferred_scorer_backend"] = "compile_default"
+    with pytest.raises(ValueError, match="deferred/backfill-only"):
+        model(
+            *inputs(),
+            warm_start_state=torch.zeros(1, 2, 4, dtype=torch.bfloat16),
+            **base,
+        )
+
+    production = dict(base)
+    production.update(
+        use_action_delta_nonconvergence_filter=False,
+        use_action_delta_gate=True,
+    )
+    with pytest.raises(ValueError, match="deferred/backfill-only"):
+        model(
+            *inputs(),
+            warm_start_state=torch.zeros(1, 2, 4, dtype=torch.bfloat16),
+            **production,
+        )
+
+
+def test_deferred_min_two_three_highs_backfills_only_t4_and_saves_two(monkeypatch):
+    outputs = {
+        1: action(0),
+        2: action(5),
+        3: action(10),
+        4: action(20),
+        5: action(20.01),
+    }
+    baseline = make_model()
+    install_state_indexed_outputs(baseline, outputs)
+    baseline_result = baseline(
+        *inputs(),
+        warm_start_state=torch.zeros(1, 2, 4, dtype=torch.bfloat16),
+        convergence_strategy="adjacent_action_mse",
+        kl_thresh=0.001,
+        enable_warm_start=True,
+        warm_start_source="midpoint",
+        warm_start_min_iter=2,
+        use_cached_final_output=True,
+        latent_precheck_mode="off",
+        latent_precheck_trace_level="off",
+        max_iter=5,
+    )
+
+    deferred = make_model()
+    install_state_indexed_outputs(deferred, outputs)
+    calls = install_score_trace(
+        monkeypatch,
+        {2: 0.002, 3: 0.002, 4: 0.002, 5: 0.0005},
+    )
+    deferred_result = run_deferred(
+        deferred,
+        make_gate(0.0),
+        max_iter=5,
+        min_terminal_iter=2,
+    )
+
+    assert baseline_result[1] == deferred_result[1] == 5
+    assert calls == [(1, 2), (2, 3), (3, 4), (4, 5)]
+    assert deferred.test_coda_iterations == [1, 4, 5]
+    debug = deferred.last_recurrence_debug
+    assert debug["action_delta_deferred_backfill_filter_consecutive_run_lengths"] == [3]
+    assert debug["action_delta_deferred_backfill_filter_backfill_coda_call_count"] == 1
+    assert debug["action_delta_deferred_backfill_filter_truly_eliminated_coda_call_count"] == 2
+    confirmation = debug["action_delta_deferred_backfill_filter_runs"][0]
+    assert confirmation["backfilled_terminal_iteration"] == 4
+    assert confirmation["confirming_current_terminal_iteration"] == 5
+    assert confirmation["exact_adjacent_confirmation_mse"] == pytest.approx(
+        0.0001,
+        rel=1e-4,
+    )
+
+
+def test_deferred_min_two_single_high_then_low_saves_zero(monkeypatch):
+    model = make_model()
+    outputs = {1: action(0), 2: action(5), 3: action(5.01)}
+    install_state_indexed_outputs(model, outputs)
+    calls = install_score_trace(monkeypatch, {2: 0.002, 3: 0.0005})
+
+    _, terminal, _ = run_deferred(
+        model,
+        make_gate(0.0),
+        max_iter=3,
+        min_terminal_iter=2,
+    )
+
+    assert terminal == 3
+    assert calls == [(1, 2), (2, 3)]
+    assert model.test_coda_iterations == [1, 2, 3]
+    debug = model.last_recurrence_debug
+    assert debug["action_delta_deferred_backfill_filter_backfill_coda_call_count"] == 1
+    assert debug["action_delta_deferred_backfill_filter_truly_eliminated_coda_call_count"] == 0
+
+
+def test_deferred_min_two_cold_origin_remains_ineligible(monkeypatch):
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("cold-origin deferred prediction evaluated scorer")
+
+    monkeypatch.setattr(
+        action_heads_score_module(),
+        "evaluate_action_delta_gate",
+        forbidden,
+    )
+    model = make_model()
+    result = model(
+        *inputs(),
+        warm_start_state=None,
+        **deferred_kwargs(
+            make_gate(0.0),
+            max_iter=3,
+            min_terminal_iter=2,
+        ),
+    )
+
+    assert result[1] == 3
+    assert model.test_coda_iterations == [1, 2, 3]
+    debug = model.last_recurrence_debug
+    assert debug["action_delta_deferred_backfill_filter_requested"] is True
+    assert debug["action_delta_deferred_backfill_filter_applied"] is False
+    assert debug["action_delta_deferred_backfill_filter_score_call_count"] == 0
 
 
 def test_deferred_single_high_then_low_saves_zero_coda(monkeypatch):

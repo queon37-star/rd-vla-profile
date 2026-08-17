@@ -98,7 +98,7 @@ def inputs():
     return h_a, torch.zeros_like(h_a), torch.zeros(1, 1, 4, dtype=torch.bfloat16)
 
 
-def kwargs(gate, *, collect):
+def kwargs(gate, *, collect, min_terminal_iter=5):
     return {
         "convergence_strategy": "adjacent_action_mse",
         "enable_warm_start": True,
@@ -110,7 +110,7 @@ def kwargs(gate, *, collect):
         "use_latent_precheck": False,
         "use_action_delta_gate": False,
         "action_delta_gate": gate,
-        "action_delta_gate_min_terminal_iter": 5,
+        "action_delta_gate_min_terminal_iter": min_terminal_iter,
         "collect_action_delta_gate_shadow": collect,
         "kl_thresh": 0.001,
         "max_iter": 6,
@@ -142,6 +142,35 @@ def test_shadow_predictor_never_changes_warm_only_output_k_or_exact_coda():
         rtol=0,
         atol=0,
     )
+
+
+def test_min_terminal_two_shadow_contains_every_adjacent_transition_through_k():
+    model = make_model()
+    gate = make_gate(predicted_delta=0.0, threshold=1.0)
+    warm = torch.zeros(1, 2, 4, dtype=torch.bfloat16)
+
+    model(
+        *inputs(),
+        warm_start_state=warm,
+        **kwargs(gate, collect=True, min_terminal_iter=2),
+    )
+
+    payload = model.last_inference_metadata["action_delta_gate_shadow"]
+    assert payload["min_terminal_iteration"] == 2
+    assert [row["terminal_iteration"] for row in payload["transitions"]] == [
+        2,
+        3,
+        4,
+        5,
+        6,
+    ]
+    assert [row["anchor_iteration"] for row in payload["transitions"]] == [
+        1,
+        2,
+        3,
+        4,
+        5,
+    ]
 
 
 def test_shadow_anchor_updates_before_eligibility_and_terminal_five_uses_s4_to_s5():
@@ -451,6 +480,7 @@ def test_writer_emits_phase_a_summary_provenance_and_global_identity(tmp_path):
     assert manifest["summary"]["aggregate"]["eligible_rows"] == 2
     assert manifest["summary"]["aggregate"]["predicted_triggers"] == 2
     assert manifest["production_parity"]["shadow_values_used_for_control"] is False
+    assert manifest["min_terminal_iteration"] == 5
     assert len(manifest["configuration_sha256"]) == 64
     expected_trajectory = globally_unique_trajectory_id(
         initial_state_manifest_sha256="a" * 64,
@@ -465,6 +495,14 @@ def test_writer_emits_phase_a_summary_provenance_and_global_identity(tmp_path):
     assert loaded_manifest["dataset_identity_sha256"] == manifest[
         "dataset_identity_sha256"
     ]
+
+    # Pre-extension min=5 manifests did not have the redundant top-level
+    # minimum; their hashed configuration remains authoritative and loadable.
+    legacy_manifest = dict(manifest)
+    legacy_manifest.pop("min_terminal_iteration")
+    manifest_path.write_text(json.dumps(legacy_manifest, indent=2) + "\n")
+    legacy_loaded, _ = load_action_delta_gate_shadow_collection(manifest_path)
+    assert legacy_loaded["configuration"]["gate_min_terminal_iteration"] == 5
     assert [item["prediction_id"] for item in loaded_predictions] == [
         prediction["prediction_id"]
     ]
@@ -528,13 +566,19 @@ def _phase_a_config(**overrides):
     return GenerateConfig(**values)
 
 
-def test_phase_a_runner_configuration_accepts_only_development_tasks_and_terminal_five():
-    validate_config(_phase_a_config(task_id=0))
-    validate_config(_phase_a_config(task_id=None))
+def test_phase_a_runner_configuration_accepts_development_tasks_and_minimum_two_or_later():
+    for minimum in (2, 3, 4, 5):
+        validate_config(
+            _phase_a_config(
+                task_id=0,
+                action_delta_gate_min_terminal_iter=minimum,
+            )
+        )
+    validate_config(_phase_a_config(task_id=None, action_delta_gate_min_terminal_iter=2))
     with pytest.raises(ValueError, match="Task 4/5"):
         validate_config(_phase_a_config(task_id=4))
-    with pytest.raises(ValueError, match="min_terminal_iter=5"):
-        validate_config(_phase_a_config(task_id=0, action_delta_gate_min_terminal_iter=4))
+    with pytest.raises(ValueError, match="integer >= 2"):
+        validate_config(_phase_a_config(task_id=0, action_delta_gate_min_terminal_iter=1))
     with pytest.raises(ValueError, match="recurrence_kl_thresh=0.001"):
         validate_config(_phase_a_config(task_id=0, recurrence_kl_thresh=0.002))
     with pytest.raises(Exception, match="cannot enable the production gate"):
@@ -574,6 +618,13 @@ def _nonconvergence_runtime_config(**overrides):
         "action_delta_gate_artifact_path": "benchmark_results/coda_anchor_feasibility/action_delta_gate_fold4/action_delta_gate.pt",
         "action_delta_gate_expected_sha256": "b4f9e938c72108f164b9d997a86eb4f5d9ea15b146754b9af83f9735e1ecfcf8",
         "action_delta_gate_min_terminal_iter": 5,
+        "evaluation_protocol_phase": "calibration",
+        "initial_state_manifest_path": (
+            "experiments/robot/libero/manifests/"
+            "libero_spatial_official_50_v1.json"
+        ),
+        "reset_rng_each_episode": True,
+        "num_trials_per_task": 10,
     }
     values.update(overrides)
     return GenerateConfig(**values)
@@ -601,19 +652,60 @@ def test_nonconvergence_runtime_config_is_development_only_and_fixed_terminal_fi
 
 
 def test_deferred_backfill_runtime_config_is_separate_development_mode():
-    cfg = _nonconvergence_runtime_config(
-        task_id=0,
-        use_action_delta_nonconvergence_filter=False,
-        use_action_delta_deferred_backfill_filter=True,
-    )
-    validate_config(cfg)
+    assert GenerateConfig().action_delta_deferred_scorer_backend == "eager"
+    for minimum in (2, 5):
+        cfg = _nonconvergence_runtime_config(
+            task_id=0,
+            use_action_delta_nonconvergence_filter=False,
+            use_action_delta_deferred_backfill_filter=True,
+            action_delta_gate_min_terminal_iter=minimum,
+        )
+        validate_config(cfg)
 
-    with pytest.raises(ValueError, match="Task 4/5"):
+    validate_config(
+        _nonconvergence_runtime_config(
+            task_id=0,
+            use_action_delta_nonconvergence_filter=False,
+            use_action_delta_deferred_backfill_filter=True,
+            action_delta_gate_min_terminal_iter=2,
+            action_delta_deferred_scorer_backend="compile_default",
+        )
+    )
+    with pytest.raises(ValueError, match="min_terminal_iter=2"):
+        validate_config(
+            _nonconvergence_runtime_config(
+                task_id=0,
+                use_action_delta_nonconvergence_filter=False,
+                use_action_delta_deferred_backfill_filter=True,
+                action_delta_gate_min_terminal_iter=5,
+                action_delta_deferred_scorer_backend="compile_default",
+            )
+        )
+    with pytest.raises(ValueError, match="deferred/backfill-only"):
+        validate_config(
+            _nonconvergence_runtime_config(
+                task_id=0,
+                action_delta_deferred_scorer_backend="compile_default",
+            )
+        )
+
+    with pytest.raises(ValueError, match="integer >= 2"):
+        validate_config(
+            _nonconvergence_runtime_config(
+                task_id=0,
+                use_action_delta_nonconvergence_filter=False,
+                use_action_delta_deferred_backfill_filter=True,
+                action_delta_gate_min_terminal_iter=1,
+            )
+        )
+
+    with pytest.raises(ValueError, match="task 4 requires screening"):
         validate_config(
             _nonconvergence_runtime_config(
                 task_id=4,
                 use_action_delta_nonconvergence_filter=False,
                 use_action_delta_deferred_backfill_filter=True,
+                action_delta_gate_min_terminal_iter=2,
             )
         )
     with pytest.raises(ValueError, match="mutually exclusive"):
@@ -623,3 +715,41 @@ def test_deferred_backfill_runtime_config_is_separate_development_mode():
                 use_action_delta_deferred_backfill_filter=True,
             )
         )
+
+
+def test_frozen_deferred_evaluation_task_phase_matrix_and_eager_backend():
+    def final_config(task_id, phase, **overrides):
+        values = {
+            "task_id": task_id,
+            "evaluation_protocol_phase": phase,
+            "num_trials_per_task": 30 if phase == "final_holdout" else 10,
+            "use_action_delta_nonconvergence_filter": False,
+            "use_action_delta_deferred_backfill_filter": True,
+            "action_delta_gate_min_terminal_iter": 2,
+            "action_delta_deferred_scorer_backend": "eager",
+        }
+        values.update(overrides)
+        return _nonconvergence_runtime_config(**values)
+
+    validate_config(final_config(0, "calibration"))
+    validate_config(final_config(4, "screening"))
+    validate_config(final_config(5, "final_holdout"))
+
+    for task_id, phase, message in (
+        (4, "calibration", "task 4 requires screening"),
+        (4, "final_holdout", "task_id=5"),
+        (5, "calibration", "task 5 requires final_holdout"),
+        (5, "screening", "task_id=4"),
+    ):
+        with pytest.raises(ValueError, match=message):
+            validate_config(final_config(task_id, phase))
+
+    for task_id, phase in ((4, "screening"), (5, "final_holdout")):
+        with pytest.raises(ValueError, match="backend='eager'"):
+            validate_config(
+                final_config(
+                    task_id,
+                    phase,
+                    action_delta_deferred_scorer_backend="compile_default",
+                )
+            )

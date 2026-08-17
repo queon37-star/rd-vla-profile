@@ -222,6 +222,53 @@ def _validate_transition(record: Mapping[str, Any]) -> None:
     )
 
 
+def _configuration_min_terminal_iteration(
+    configuration: Mapping[str, Any],
+) -> int | None:
+    """Read new nested and legacy flat collection provenance."""
+
+    gate = configuration.get("gate")
+    value = gate.get("min_terminal_iteration") if isinstance(gate, Mapping) else None
+    if value is None:
+        value = configuration.get("gate_min_terminal_iteration")
+    if value is None:
+        return None
+    _require(
+        isinstance(value, int) and not isinstance(value, bool) and value >= 2,
+        "configured shadow minimum terminal iteration must be an integer >= 2",
+    )
+    return int(value)
+
+
+def _validate_prediction_transition_trace(prediction: Mapping[str, Any]) -> None:
+    """Require an applied shadow to contain every adjacent row from min..K."""
+
+    minimum = prediction.get("min_terminal_iteration")
+    _require(
+        isinstance(minimum, int)
+        and not isinstance(minimum, bool)
+        and minimum >= 2,
+        "prediction minimum terminal iteration must be an integer >= 2",
+    )
+    k_value = int(prediction["production_parity"]["K_t"])
+    terminals = [
+        int(row["terminal_iteration"]) for row in prediction.get("transitions", [])
+    ]
+    if bool(prediction.get("collection_applied")):
+        expected = list(range(int(minimum), k_value + 1))
+        _require(
+            terminals == expected,
+            "applied shadow transition trace must be contiguous from "
+            f"terminal {minimum} through K={k_value}: "
+            f"expected={expected}, actual={terminals}",
+        )
+    else:
+        _require(
+            not terminals,
+            "ineligible shadow prediction cannot contain transition rows",
+        )
+
+
 def build_shadow_prediction_payload(
     raw_shadow: Mapping[str, Any],
     *,
@@ -318,7 +365,7 @@ def build_shadow_prediction_payload(
         "exact_coda_call_count": k_value,
         "iteration_mse": [float(value) for value in iteration_mse],
     }
-    return {
+    payload = {
         "schema_version": ACTION_DELTA_GATE_SHADOW_SCHEMA_VERSION,
         "collection_mode": ACTION_DELTA_GATE_SHADOW_COLLECTION_MODE,
         "identity": prediction_identity,
@@ -339,6 +386,8 @@ def build_shadow_prediction_payload(
             "exact_coda_outputs": exact_outputs,
         },
     }
+    _validate_prediction_transition_trace(payload)
+    return payload
 
 
 def _quantiles(values: Sequence[float]) -> dict[str, float | None]:
@@ -439,6 +488,13 @@ class ActionDeltaGateShadowWriter:
         self.checkpoint_identity = dict(checkpoint_identity)
         self.initial_state_manifest_identity = dict(initial_state_manifest_identity)
         self.configuration = dict(configuration)
+        self.min_terminal_iteration = _configuration_min_terminal_iteration(
+            self.configuration
+        )
+        _require(
+            self.min_terminal_iteration is not None,
+            "shadow writer configuration must record min_terminal_iteration",
+        )
         self.run_identity = dict(run_identity)
         self._buffer: list[dict[str, Any]] = []
         self._predictions: list[dict[str, Any]] = []
@@ -466,6 +522,13 @@ class ActionDeltaGateShadowWriter:
                 _validate_transition(transition)
             _require(prediction.get("collection_error") is None, "shadow predictor/recording error is not calibratable")
             _require(prediction["production_parity"]["warm_only_control_contract_verified"] is True, "Warm-only parity contract failed")
+            _validate_prediction_transition_trace(prediction)
+            if self.min_terminal_iteration is not None:
+                _require(
+                    int(prediction["min_terminal_iteration"])
+                    == self.min_terminal_iteration,
+                    "prediction minimum terminal iteration differs from writer configuration",
+                )
             self._buffer.append(prediction)
             self._predictions.append(prediction)
             if len(self._buffer) >= self.shard_size:
@@ -550,6 +613,7 @@ class ActionDeltaGateShadowWriter:
             "initial_state_manifest_identity": self.initial_state_manifest_identity,
             "configuration": self.configuration,
             "configuration_sha256": canonical_json_sha256(self.configuration),
+            "min_terminal_iteration": self.min_terminal_iteration,
             "collector_schema_version": ACTION_DELTA_GATE_SHADOW_SCHEMA_VERSION,
             "expected_task_ids": list(self.expected_task_ids),
             "expected_trajectories_per_task": self.expected_trajectories_per_task,
@@ -629,6 +693,15 @@ def load_action_delta_gate_shadow_collection(
         == canonical_json_sha256(manifest.get("configuration")),
         "configuration hash mismatch",
     )
+    configured_minimum = _configuration_min_terminal_iteration(
+        manifest.get("configuration") or {}
+    )
+    declared_minimum = manifest.get("min_terminal_iteration")
+    if declared_minimum is not None:
+        _require(
+            declared_minimum == configured_minimum,
+            "manifest minimum terminal iteration differs from configuration",
+        )
 
     predictions: list[dict[str, Any]] = []
     prediction_ids: set[str] = set()
@@ -697,6 +770,12 @@ def load_action_delta_gate_shadow_collection(
             transition_id = str(transition["transition_id"])
             _require(transition_id not in transition_ids, "duplicate transition identity")
             transition_ids.add(transition_id)
+        _validate_prediction_transition_trace(prediction)
+        if configured_minimum is not None:
+            _require(
+                int(prediction["min_terminal_iteration"]) == configured_minimum,
+                "prediction minimum terminal iteration differs from manifest configuration",
+            )
         predictions.append(prediction)
 
     _require(

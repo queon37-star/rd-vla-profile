@@ -98,6 +98,10 @@ from prismatic.models.action_delta_gate_shadow import (
     ACTION_DELTA_GATE_SHADOW_DEVELOPMENT_TASK_IDS,
     ACTION_DELTA_GATE_SHADOW_SCHEMA_VERSION,
 )
+from prismatic.models.action_delta_deferred_scorer import (
+    ACTION_DELTA_DEFERRED_COMPILED_NUMERICAL_EQUIVALENCE,
+    ACTION_DELTA_DEFERRED_SCORER_BACKENDS,
+)
 from prismatic.vla.constants import NUM_ACTIONS_CHUNK
 from prismatic.utils.rdvla_profiler import RDVLAProfiler
 
@@ -110,14 +114,64 @@ class TaskSuite(str, Enum):
     LIBERO_90 = "libero_90"
 
 
+PARITY_HASH_SCHEMA = {
+    "schema_version": 1,
+    "algorithm": "sha256",
+    "dtype": "preserved and included in the canonical header",
+    "shape": "preserved and included in the canonical header",
+    "byte_order": "little-endian",
+    "memory_order": "C-contiguous",
+}
+
+
 def _tensor_or_array_sha256(value) -> Optional[str]:
+    """Hash dtype, shape, and canonical little-endian C-order payload bytes."""
+
     if value is None:
         return None
     if torch.is_tensor(value):
-        array = value.detach().to(device="cpu", copy=True).contiguous().view(torch.uint8).numpy()
+        tensor = value.detach().to(device="cpu", copy=True).contiguous()
+        element_size = tensor.element_size()
+        array = tensor.view(torch.uint8).numpy().reshape(-1)
+        if sys.byteorder == "big" and element_size > 1:
+            array = array.reshape(-1, element_size)[:, ::-1].reshape(-1).copy()
+        header = {
+            "schema_version": PARITY_HASH_SCHEMA["schema_version"],
+            "kind": "torch",
+            "dtype": str(tensor.dtype),
+            "shape": list(tensor.shape),
+            "byte_order": "little",
+            "memory_order": "C",
+        }
     else:
-        array = np.ascontiguousarray(np.asarray(value)).view(np.uint8)
-    return hashlib.sha256(array.tobytes()).hexdigest()
+        source = np.asarray(value)
+        if source.dtype.hasobject:
+            raise ValueError("parity hashing does not support object arrays")
+        canonical_dtype = (
+            source.dtype.newbyteorder("<")
+            if source.dtype.itemsize > 1
+            else source.dtype
+        )
+        canonical = np.ascontiguousarray(source.astype(canonical_dtype, copy=False))
+        array = canonical.view(np.uint8).reshape(-1)
+        header = {
+            "schema_version": PARITY_HASH_SCHEMA["schema_version"],
+            "kind": "numpy",
+            "dtype": canonical.dtype.str,
+            "shape": list(canonical.shape),
+            "byte_order": "little",
+            "memory_order": "C",
+        }
+    digest = hashlib.sha256()
+    digest.update(b"rd-vla-prediction-parity-v1\0")
+    digest.update(
+        json.dumps(
+            header, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+        ).encode("ascii")
+    )
+    digest.update(b"\0")
+    digest.update(array.tobytes(order="C"))
+    return digest.hexdigest()
 
 
 def _rng_state_sha256() -> str:
@@ -183,7 +237,7 @@ class GenerateConfig:
     num_trials_per_task: int = 50                    # Number of rollouts per task
     task_id: Optional[int] = None                    # If set, only run this specific task ID
     initial_states_path: str = "DEFAULT"             # "DEFAULT", or path to initial states JSON file
-    evaluation_protocol_phase: str = "legacy"        # legacy | smoke | calibration | screening | final
+    evaluation_protocol_phase: str = "legacy"        # legacy | smoke | calibration | screening | final_holdout
     initial_state_manifest_path: str = ""             # Frozen official-state manifest for non-legacy phases
     env_img_res: int = 256                           # Resolution for environment images (not policy input resolution)
 
@@ -238,6 +292,7 @@ class GenerateConfig:
     # Development-only high-side predictor filter; never a convergence gate.
     use_action_delta_nonconvergence_filter: bool = False
     use_action_delta_deferred_backfill_filter: bool = False
+    action_delta_deferred_scorer_backend: str = "eager"
     action_delta_gate_shadow_dir: str = ""
     action_delta_gate_shadow_shard_size: int = 64
 
@@ -425,6 +480,21 @@ def validate_config(cfg: GenerateConfig) -> None:
             "production Action-Delta Gate, diagnostic shadow collection, and "
             "both diagnostic non-convergence filters are mutually exclusive"
         )
+    if (
+        cfg.action_delta_deferred_scorer_backend
+        not in ACTION_DELTA_DEFERRED_SCORER_BACKENDS
+    ):
+        raise ValueError(
+            "action_delta_deferred_scorer_backend must be one of "
+            f"{ACTION_DELTA_DEFERRED_SCORER_BACKENDS}"
+        )
+    if (
+        cfg.action_delta_deferred_scorer_backend != "eager"
+        and not cfg.use_action_delta_deferred_backfill_filter
+    ):
+        raise ValueError(
+            "compile_default scorer backend is deferred/backfill-only"
+        )
 
     if cfg.use_action_delta_gate:
         if not cfg.use_recurrent:
@@ -564,10 +634,14 @@ def validate_config(cfg: GenerateConfig) -> None:
             raise ValueError("shadow collection cannot enable post-production shadow recurrence")
         if not cfg.use_cached_final_output:
             raise ValueError("shadow collection requires exact terminal-output reuse")
-        if cfg.action_delta_gate_min_terminal_iter != 5:
+        if (
+            isinstance(cfg.action_delta_gate_min_terminal_iter, bool)
+            or not isinstance(cfg.action_delta_gate_min_terminal_iter, int)
+            or cfg.action_delta_gate_min_terminal_iter < 2
+        ):
             raise ValueError(
                 "deployment-matched Phase-A collection requires "
-                "action_delta_gate_min_terminal_iter=5"
+                "action_delta_gate_min_terminal_iter to be an integer >= 2"
             )
         if float(cfg.recurrence_kl_thresh) != 0.001:
             raise ValueError(
@@ -662,14 +736,44 @@ def validate_config(cfg: GenerateConfig) -> None:
             )
         if cfg.task_suite_name != TaskSuite.LIBERO_SPATIAL:
             raise ValueError("deferred/backfill filter is LIBERO Spatial-only")
-        if (
-            cfg.task_id is not None
-            and cfg.task_id not in ACTION_DELTA_GATE_SHADOW_DEVELOPMENT_TASK_IDS
-        ):
+        deferred_phase = cfg.evaluation_protocol_phase
+        if deferred_phase == "calibration":
+            if (
+                cfg.task_id is not None
+                and cfg.task_id
+                not in ACTION_DELTA_GATE_SHADOW_DEVELOPMENT_TASK_IDS
+            ):
+                raise ValueError(
+                    "deferred/backfill calibration permits only development "
+                    f"tasks {ACTION_DELTA_GATE_SHADOW_DEVELOPMENT_TASK_IDS}; "
+                    "task 4 requires screening and task 5 requires final_holdout"
+                )
+        elif deferred_phase == "screening":
+            if cfg.task_id != 4:
+                raise ValueError(
+                    "deferred/backfill screening requires explicit task_id=4"
+                )
+        elif deferred_phase == "final_holdout":
+            if cfg.task_id != 5:
+                raise ValueError(
+                    "deferred/backfill final_holdout requires explicit task_id=5"
+                )
+        else:
             raise ValueError(
-                "deferred/backfill filter permits only development tasks "
-                f"{ACTION_DELTA_GATE_SHADOW_DEVELOPMENT_TASK_IDS}; Task 4/5 are forbidden"
+                "deferred/backfill evaluation requires phase calibration, "
+                "screening, or final_holdout"
             )
+        if deferred_phase in {"screening", "final_holdout"}:
+            if cfg.action_delta_deferred_scorer_backend != "eager":
+                raise ValueError(
+                    f"{deferred_phase} requires "
+                    "action_delta_deferred_scorer_backend='eager'"
+                )
+            if cfg.action_delta_gate_min_terminal_iter != 2:
+                raise ValueError(
+                    f"{deferred_phase} requires "
+                    "action_delta_gate_min_terminal_iter=2"
+                )
         if not cfg.action_delta_gate_artifact_path:
             raise ValueError("deferred/backfill filter requires action_delta_gate_artifact_path")
         if not Path(cfg.action_delta_gate_artifact_path).exists():
@@ -706,12 +810,21 @@ def validate_config(cfg: GenerateConfig) -> None:
         if not cfg.profile_coda_cost:
             raise ValueError("deferred/backfill filter requires profile_coda_cost=True")
         if (
-            cfg.action_delta_gate_min_terminal_iter
-            != ACTION_DELTA_NONCONVERGENCE_MIN_TERMINAL_ITER
+            isinstance(cfg.action_delta_gate_min_terminal_iter, bool)
+            or not isinstance(cfg.action_delta_gate_min_terminal_iter, int)
+            or cfg.action_delta_gate_min_terminal_iter < 2
         ):
             raise ValueError(
-                "deferred/backfill filter requires action_delta_gate_min_terminal_iter="
-                f"{ACTION_DELTA_NONCONVERGENCE_MIN_TERMINAL_ITER}"
+                "deferred/backfill filter requires action_delta_gate_min_terminal_iter "
+                "to be an integer >= 2"
+            )
+        if (
+            cfg.action_delta_deferred_scorer_backend == "compile_default"
+            and cfg.action_delta_gate_min_terminal_iter != 2
+        ):
+            raise ValueError(
+                "compile_default deferred scorer runtime trial requires "
+                "action_delta_gate_min_terminal_iter=2"
             )
         if float(cfg.recurrence_kl_thresh) != 0.001:
             raise ValueError("deferred/backfill filter requires recurrence_kl_thresh=0.001")
@@ -775,6 +888,23 @@ def validate_config(cfg: GenerateConfig) -> None:
             raise ValueError(
                 "Initial-state protocol manifest task_suite_name does not match the runner configuration"
             )
+    if cfg.evaluation_protocol_phase == "calibration":
+        if (
+            cfg.task_id is not None
+            and cfg.task_id
+            not in ACTION_DELTA_GATE_SHADOW_DEVELOPMENT_TASK_IDS
+        ):
+            raise ValueError(
+                "calibration permits only development tasks "
+                f"{ACTION_DELTA_GATE_SHADOW_DEVELOPMENT_TASK_IDS}; task 4 "
+                "requires screening and task 5 requires final_holdout"
+            )
+    elif cfg.evaluation_protocol_phase == "screening":
+        if cfg.task_id != 4:
+            raise ValueError("screening requires explicit task_id=4")
+    elif cfg.evaluation_protocol_phase == "final_holdout":
+        if cfg.task_id != 5:
+            raise ValueError("final_holdout requires explicit task_id=5")
 
     # Validate task suite
     assert cfg.task_suite_name in [suite.value for suite in TaskSuite], f"Invalid task suite: {cfg.task_suite_name}"
@@ -1386,6 +1516,11 @@ def build_action_delta_deferred_backfill_log_fields(
         "efficiency_eligible",
         "threshold",
         "min_terminal_iter",
+        "scorer_backend",
+        "scorer_numerical_equivalence",
+        "compile_setup_ms",
+        "compile_setup_in_predictor_timing",
+        "development_decision_parity",
         "score_call_count",
         "score_trace",
         "predictor_ms_list",
@@ -1971,10 +2106,26 @@ def summarize_action_delta_deferred_backfill_filter(
         for record in requested
         for length in (record.get(prefix + "consecutive_run_lengths") or [])
     ]
+    scorer_backends = sorted(
+        {
+            str(record.get(prefix + "scorer_backend"))
+            for record in requested
+            if record.get(prefix + "scorer_backend") is not None
+        }
+    )
     return {
         "development_only": True,
         "excluded_from_production_efficiency_claims": True,
         "requested_prediction_count": len(requested),
+        "scorer_backends": scorer_backends,
+        "compile_setup_ms_one_time_per_task": max(
+            (
+                _as_float(record.get(prefix + "compile_setup_ms")) or 0.0
+                for record in requested
+            ),
+            default=0.0,
+        ),
+        "compile_setup_in_predictor_timing": False,
         "applied_prediction_count": sum(
             bool(record.get(prefix + "applied")) for record in requested
         ),
@@ -2222,6 +2373,7 @@ def run_episode(
 
     protocol_log_metadata = {
         "evaluation_protocol_phase": evaluation_protocol_phase,
+        "source_commit": episode_protocol.get("source_commit"),
         "initial_state_partition": episode_protocol.get("partition"),
         "paired_trial_id": episode_protocol.get("paired_trial_id"),
         "initial_state_id": episode_protocol.get("initial_state_id"),
@@ -2234,6 +2386,10 @@ def run_episode(
         "environment_seed_applied": environment_seed_applied,
         "smoke_excluded_from_fitting": bool(episode_protocol.get("smoke_excluded_from_fitting", False)),
     }
+    parity_hash_logging_enabled = bool(
+        cfg.shadow_full_depth
+        or evaluation_protocol_phase in {"screening", "final_holdout"}
+    )
 
     t = 0
     replay_images = []
@@ -2273,7 +2429,7 @@ def run_episode(
                 if torch.cuda.is_available():
                     torch.cuda.synchronize()
                 rng_state_before_sha256 = (
-                    _rng_state_sha256() if cfg.shadow_full_depth else None
+                    _rng_state_sha256() if parity_hash_logging_enabled else None
                 )
                 action_start = time.perf_counter()
 
@@ -2335,6 +2491,11 @@ def run_episode(
                         torch.cuda.synchronize()
                     action_latency_ms = (time.perf_counter() - action_start) * 1000.0
                     episode_action_latencies_ms.append(action_latency_ms)
+                    abort_rng_state_after_sha256 = (
+                        _rng_state_sha256()
+                        if parity_hash_logging_enabled
+                        else None
+                    )
                     abort_debug = (
                         getattr(getattr(action_head, "model", None), "last_recurrence_debug", None)
                         or {}
@@ -2352,6 +2513,26 @@ def run_episode(
                             "action_prediction_index": prediction_id,
                             "prediction_step": prediction_id,
                             **protocol_log_metadata,
+                            "action_delta_gate_artifact_sha256": (
+                                cfg.action_delta_gate_expected_sha256.lower()
+                                if cfg.use_action_delta_deferred_backfill_filter
+                                else None
+                            ),
+                            "action_delta_deferred_scorer_backend": (
+                                cfg.action_delta_deferred_scorer_backend
+                                if cfg.use_action_delta_deferred_backfill_filter
+                                else None
+                            ),
+                            "action_delta_deferred_threshold": (
+                                float(ACTION_DELTA_NONCONVERGENCE_THRESHOLD)
+                                if cfg.use_action_delta_deferred_backfill_filter
+                                else None
+                            ),
+                            "action_delta_deferred_min_terminal_iter": (
+                                int(cfg.action_delta_gate_min_terminal_iter)
+                                if cfg.use_action_delta_deferred_backfill_filter
+                                else None
+                            ),
                             "recurrent_iteration_count": None,
                             "final_mse": None,
                             "adaptive_stop": False,
@@ -2364,6 +2545,15 @@ def run_episode(
                             "first_attempt_origin": abort_debug.get("first_attempt_origin"),
                             "latency_ms": action_latency_ms,
                             "success": None,
+                            "parity_hash_schema": PARITY_HASH_SCHEMA,
+                            "returned_action_sha256": None,
+                            "next_warm_start_state_sha256": None,
+                            "rng_state_before_action_sha256": (
+                                rng_state_before_sha256
+                            ),
+                            "rng_state_after_action_sha256": (
+                                abort_rng_state_after_sha256
+                            ),
                         }
                     )
                     raise
@@ -2405,11 +2595,23 @@ def run_episode(
 
                 if torch.cuda.is_available():
                     torch.cuda.synchronize()
-                rng_state_after_sha256 = (
-                    _rng_state_sha256() if cfg.shadow_full_depth else None
-                )
                 action_latency_ms = (time.perf_counter() - action_start) * 1000.0
                 episode_action_latencies_ms.append(action_latency_ms)
+                # Parity hashing is logging-only and intentionally begins only
+                # after inference latency has been finalized.
+                rng_state_after_sha256 = (
+                    _rng_state_sha256() if parity_hash_logging_enabled else None
+                )
+                returned_action_sha256 = (
+                    _tensor_or_array_sha256(actions)
+                    if parity_hash_logging_enabled
+                    else None
+                )
+                next_warm_start_state_sha256 = (
+                    _tensor_or_array_sha256(next_warm_start_state)
+                    if parity_hash_logging_enabled
+                    else None
+                )
                 log_message(
                     f"  Action inference latency: {action_latency_ms:.2f} ms, iters={actual_iters}",
                     log_file,
@@ -2487,6 +2689,26 @@ def run_episode(
                     "reset_rng_each_episode": bool(getattr(cfg, "reset_rng_each_episode", False)),
                     "episode_seed": episode_seed,
                     **protocol_log_metadata,
+                    "action_delta_gate_artifact_sha256": (
+                        cfg.action_delta_gate_expected_sha256.lower()
+                        if cfg.use_action_delta_deferred_backfill_filter
+                        else None
+                    ),
+                    "action_delta_deferred_scorer_backend": (
+                        cfg.action_delta_deferred_scorer_backend
+                        if cfg.use_action_delta_deferred_backfill_filter
+                        else None
+                    ),
+                    "action_delta_deferred_threshold": (
+                        float(ACTION_DELTA_NONCONVERGENCE_THRESHOLD)
+                        if cfg.use_action_delta_deferred_backfill_filter
+                        else None
+                    ),
+                    "action_delta_deferred_min_terminal_iter": (
+                        int(cfg.action_delta_gate_min_terminal_iter)
+                        if cfg.use_action_delta_deferred_backfill_filter
+                        else None
+                    ),
                     "method": debug.get("strategy", recurrence_strategy),
                     "recurrence_strategy": debug.get("strategy", recurrence_strategy),
                     "requested_recurrence_strategy": debug.get("requested_recurrence_strategy", recurrence_strategy),
@@ -2639,14 +2861,9 @@ def run_episode(
                     "rollout_max_iteration": None,
                     "rollout_min_iteration": None,
                     "success": None,
-                    "returned_action_sha256": (
-                        _tensor_or_array_sha256(actions) if cfg.shadow_full_depth else None
-                    ),
-                    "next_warm_start_state_sha256": (
-                        _tensor_or_array_sha256(next_warm_start_state)
-                        if cfg.shadow_full_depth
-                        else None
-                    ),
+                    "parity_hash_schema": PARITY_HASH_SCHEMA,
+                    "returned_action_sha256": returned_action_sha256,
+                    "next_warm_start_state_sha256": next_warm_start_state_sha256,
                     "rng_state_before_action_sha256": rng_state_before_sha256,
                     "rng_state_after_action_sha256": rng_state_after_sha256,
                 }
@@ -2898,6 +3115,7 @@ def run_task(
     timing_state=None,
     raw_shadow_writer=None,
     action_delta_shadow_writer=None,
+    source_commit=None,
 ):
     """Run evaluation for a single task."""
     task = task_suite.get_task(task_id)
@@ -2949,6 +3167,7 @@ def run_task(
             episode_protocol = {
                 **trial.to_dict(),
                 "paired_rng": True,
+                "source_commit": source_commit,
                 "manifest_sha256": manifest_sha256,
                 "initial_states_sha256": protocol_task_entry["initial_states_sha256"],
                 "initial_states_file": protocol_task_entry.get("initial_states_file"),
@@ -3134,6 +3353,8 @@ def eval_libero(cfg: GenerateConfig) -> float:
     action_delta_shadow_writer = None
     shared_source_commit = None
     shared_checkpoint_identity = None
+    if cfg.evaluation_protocol_phase in {"screening", "final_holdout"}:
+        shared_source_commit = current_source_commit()
     if cfg.collect_preconvergence_raw_shadow:
         shared_source_commit = current_source_commit()
         shared_checkpoint_identity = checkpoint_identity(
@@ -3335,7 +3556,13 @@ def eval_libero(cfg: GenerateConfig) -> float:
                 "min_terminal_iter": ACTION_DELTA_NONCONVERGENCE_MIN_TERMINAL_ITER,
                 "max_skip": 1,
                 "allowed_task_ids": list(
-                    ACTION_DELTA_GATE_SHADOW_DEVELOPMENT_TASK_IDS
+                    (
+                        (4,)
+                        if cfg.evaluation_protocol_phase == "screening"
+                        else (5,)
+                        if cfg.evaluation_protocol_phase == "final_holdout"
+                        else ACTION_DELTA_GATE_SHADOW_DEVELOPMENT_TASK_IDS
+                    )
                 ),
             }
         if cfg.use_action_delta_deferred_backfill_filter:
@@ -3344,7 +3571,24 @@ def eval_libero(cfg: GenerateConfig) -> float:
                 "excluded_from_production_efficiency_claims": True,
                 "adjacent_exact_stopping_semantics": True,
                 "threshold": ACTION_DELTA_NONCONVERGENCE_THRESHOLD,
-                "min_terminal_iter": ACTION_DELTA_NONCONVERGENCE_MIN_TERMINAL_ITER,
+                "min_terminal_iter": cfg.action_delta_gate_min_terminal_iter,
+                "scorer_backend": cfg.action_delta_deferred_scorer_backend,
+                "compiled_configuration": (
+                    {
+                        "fullgraph": True,
+                        "dynamic": False,
+                        "mode": None,
+                    }
+                    if cfg.action_delta_deferred_scorer_backend
+                    == "compile_default"
+                    else None
+                ),
+                "compiled_numerical_equivalence": (
+                    ACTION_DELTA_DEFERRED_COMPILED_NUMERICAL_EQUIVALENCE
+                    if cfg.action_delta_deferred_scorer_backend
+                    == "compile_default"
+                    else "authoritative_eager"
+                ),
                 "allowed_task_ids": list(
                     ACTION_DELTA_GATE_SHADOW_DEVELOPMENT_TASK_IDS
                 ),
@@ -3356,16 +3600,34 @@ def eval_libero(cfg: GenerateConfig) -> float:
         )
         full_results["evaluation_protocol"] = {
             "phase": cfg.evaluation_protocol_phase,
+            "source_commit": shared_source_commit,
             "manifest_path": cfg.initial_state_manifest_path,
             "manifest_sha256": manifest_sha256,
             "task_suite_name": protocol_manifest["task_suite_name"],
             "num_trials_per_task": cfg.num_trials_per_task,
             "paired_rng": True,
+            "prediction_parity_hash_schema": PARITY_HASH_SCHEMA,
             "action_head_workload_schema_version": ACTION_HEAD_WORKLOAD_SCHEMA_VERSION,
             "calibration_workload_predictions_per_episode": int(
                 cfg.calibration_workload_predictions_per_episode
             ),
         }
+        if cfg.use_action_delta_deferred_backfill_filter:
+            full_results["evaluation_protocol"]["frozen_deferred_policy"] = {
+                "warm_start_source": cfg.warm_start_source,
+                "warm_start_min_iter": int(cfg.warm_start_min_iter),
+                "recurrence_threshold": float(cfg.recurrence_kl_thresh),
+                "action_delta_threshold": float(
+                    ACTION_DELTA_NONCONVERGENCE_THRESHOLD
+                ),
+                "min_terminal_iter": int(
+                    cfg.action_delta_gate_min_terminal_iter
+                ),
+                "scorer_backend": cfg.action_delta_deferred_scorer_backend,
+                "artifact_sha256": (
+                    cfg.action_delta_gate_expected_sha256.lower()
+                ),
+            }
         log_message(
             f"Frozen evaluation protocol: phase={cfg.evaluation_protocol_phase}, "
             f"manifest_sha256={manifest_sha256}",
@@ -3375,6 +3637,13 @@ def eval_libero(cfg: GenerateConfig) -> float:
     if cfg.task_id is not None:
         task_ids = [cfg.task_id]
         log_message(f"Running only task {cfg.task_id}", log_file)
+    elif cfg.evaluation_protocol_phase == "calibration":
+        task_ids = ACTION_DELTA_GATE_SHADOW_DEVELOPMENT_TASK_IDS
+        log_message(
+            "Running frozen calibration development tasks only: "
+            f"{list(task_ids)}",
+            log_file,
+        )
     elif (
         cfg.collect_action_delta_gate_shadow
         or cfg.use_action_delta_nonconvergence_filter
@@ -3437,12 +3706,22 @@ def eval_libero(cfg: GenerateConfig) -> float:
                     device=action_head_device,
                     task_id=int(task_id),
                 )
-            action_head.configure_action_delta_gate(prepared_action_delta_gate)
+            prepared_deferred_scorer = action_head.configure_action_delta_gate(
+                prepared_action_delta_gate,
+                deferred_scorer_backend=(
+                    cfg.action_delta_deferred_scorer_backend
+                    if cfg.use_action_delta_deferred_backfill_filter
+                    else "eager"
+                ),
+            )
             log_message(
                 "Bound Action-Delta Gate: "
                 f"task={task_id}, fold={prepared_action_delta_gate.outer_fold}, "
                 f"threshold={prepared_action_delta_gate.threshold:.12f}, "
-                f"nonconvergence_q={ACTION_DELTA_NONCONVERGENCE_THRESHOLD:.12f}",
+                f"nonconvergence_q={ACTION_DELTA_NONCONVERGENCE_THRESHOLD:.12f}, "
+                f"deferred_scorer_backend={cfg.action_delta_deferred_scorer_backend}, "
+                "compile_setup_ms="
+                f"{prepared_deferred_scorer.compile_setup_ms if prepared_deferred_scorer is not None else 0.0:.3f}",
                 log_file,
             )
         else:
@@ -3465,6 +3744,7 @@ def eval_libero(cfg: GenerateConfig) -> float:
             timing_state,
             raw_shadow_writer,
             action_delta_shadow_writer,
+            source_commit=shared_source_commit,
         )
         task = task_suite.get_task(task_id)
         full_results["tasks"][task.name] = task_stats

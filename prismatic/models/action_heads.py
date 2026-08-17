@@ -39,6 +39,11 @@ from prismatic.models.action_delta_gate_shadow import (
     build_action_delta_gate_shadow_transition,
     validate_action_delta_gate_shadow_configuration,
 )
+from prismatic.models.action_delta_deferred_scorer import (
+    evaluate_action_delta_deferred_scorer,
+    prepare_action_delta_deferred_scorer,
+    validate_action_delta_deferred_scorer_configuration,
+)
 from prismatic.models.action_head_workload import build_action_head_workload
 from prismatic.models.origin_aware_scheduler import (
     NonFiniteOriginAwareInferenceError,
@@ -645,6 +650,8 @@ class VLARecurrent(nn.Module):
                 collect_action_delta_gate_shadow: bool = False,
                 use_action_delta_nonconvergence_filter: bool = False,
                 use_action_delta_deferred_backfill_filter: bool = False,
+                action_delta_deferred_scorer_backend: str = "eager",
+                action_delta_deferred_scorer=None,
                 **kwargs) -> torch.Tensor:
         requested_recurrence_strategy = convergence_strategy
         canonical_recurrence_strategy = canonicalize_recurrence_strategy(convergence_strategy)
@@ -768,6 +775,12 @@ class VLARecurrent(nn.Module):
             collect_preconvergence_raw_shadow=collect_preconvergence_raw_shadow,
             use_cached_final_output=use_cached_final_output,
             profile_coda_cost=profile_coda_cost,
+            min_terminal_iter=action_delta_gate_min_terminal_iter,
+        )
+        validate_action_delta_deferred_scorer_configuration(
+            deferred_filter_enabled=use_action_delta_deferred_backfill_filter,
+            backend=action_delta_deferred_scorer_backend,
+            prepared_scorer=action_delta_deferred_scorer,
         )
         if latent_precheck_mode == "origin_aware" and self.training:
             raise ValueError("latent_precheck_mode='origin_aware' is inference-only")
@@ -1336,7 +1349,7 @@ class VLARecurrent(nn.Module):
                                 and action_delta_deferred_enabled_for_prediction
                                 and action_delta_deferred_previous_latent_state is not None
                                 and actual_iter
-                                >= ACTION_DELTA_NONCONVERGENCE_MIN_TERMINAL_ITER
+                                >= action_delta_gate_min_terminal_iter
                             ):
                                 predictor_start = time.perf_counter()
                                 deferred_score = None
@@ -1346,17 +1359,36 @@ class VLARecurrent(nn.Module):
                                         "RDVLA/action_head/"
                                         "action_delta_deferred_backfill_filter_total"
                                     ):
-                                        deferred_score, _unused_gate_decision = (
-                                            evaluate_action_delta_gate(
+                                        if (
+                                            action_delta_deferred_scorer_backend
+                                            == "eager"
+                                        ):
+                                            (
+                                                deferred_score,
+                                                _unused_gate_decision,
+                                            ) = evaluate_action_delta_gate(
                                                 action_delta_gate,
                                                 action_delta_deferred_previous_latent_state,
                                                 state,
                                             )
-                                        )
-                                    deferred_high = bool(
-                                        deferred_score
-                                        >= ACTION_DELTA_NONCONVERGENCE_THRESHOLD
-                                    )
+                                            deferred_high = bool(
+                                                deferred_score
+                                                >= ACTION_DELTA_NONCONVERGENCE_THRESHOLD
+                                            )
+                                        else:
+                                            deferred_score, deferred_high = (
+                                                evaluate_action_delta_deferred_scorer(
+                                                    action_delta_gate,
+                                                    action_delta_deferred_previous_latent_state,
+                                                    state,
+                                                    backend=(
+                                                        action_delta_deferred_scorer_backend
+                                                    ),
+                                                    prepared_scorer=(
+                                                        action_delta_deferred_scorer
+                                                    ),
+                                                )
+                                            )
                                 except NonFiniteActionDeltaGateError as exc:
                                     # An indeterminate transition is handled as
                                     # requiring exact adjacent confirmation.
@@ -1369,6 +1401,9 @@ class VLARecurrent(nn.Module):
                                 score_record = {
                                     "anchor_terminal_iteration": int(actual_iter - 1),
                                     "terminal_iteration": int(actual_iter),
+                                    "scorer_backend": (
+                                        action_delta_deferred_scorer_backend
+                                    ),
                                     "score": (
                                         float(deferred_score)
                                         if deferred_score is not None
@@ -2420,8 +2455,34 @@ class VLARecurrent(nn.Module):
                 "action_delta_deferred_backfill_filter_threshold": float(
                     ACTION_DELTA_NONCONVERGENCE_THRESHOLD
                 ),
+                "action_delta_deferred_backfill_filter_scorer_backend": (
+                    action_delta_deferred_scorer_backend
+                ),
+                "action_delta_deferred_backfill_filter_scorer_numerical_equivalence": (
+                    action_delta_deferred_scorer.numerical_equivalence
+                    if action_delta_deferred_scorer is not None
+                    else "authoritative_eager"
+                ),
+                "action_delta_deferred_backfill_filter_compile_setup_ms": (
+                    float(action_delta_deferred_scorer.compile_setup_ms)
+                    if action_delta_deferred_scorer is not None
+                    else 0.0
+                ),
+                "action_delta_deferred_backfill_filter_compile_setup_in_predictor_timing": False,
+                "action_delta_deferred_backfill_filter_development_decision_parity": (
+                    {
+                        "match_count": int(
+                            action_delta_deferred_scorer.development_decision_parity_count
+                        ),
+                        "transition_count": int(
+                            action_delta_deferred_scorer.development_decision_parity_total
+                        ),
+                    }
+                    if action_delta_deferred_scorer is not None
+                    else None
+                ),
                 "action_delta_deferred_backfill_filter_min_terminal_iter": int(
-                    ACTION_DELTA_NONCONVERGENCE_MIN_TERMINAL_ITER
+                    action_delta_gate_min_terminal_iter
                 ),
                 "action_delta_deferred_backfill_filter_score_call_count": len(
                     action_delta_deferred_score_trace
@@ -3128,6 +3189,8 @@ class ActionHeadRecurrent(nn.Module):
         # Plain prepared runtime data, deliberately not an nn.Module or
         # registered buffer, so legacy checkpoint state_dict keys are stable.
         self._action_delta_gate = None
+        self._action_delta_deferred_scorer = None
+        self._action_delta_deferred_scorer_backend = "eager"
 
     def configure_scalar_task_policy(
         self,
@@ -3157,6 +3220,7 @@ class ActionHeadRecurrent(nn.Module):
     def configure_action_delta_gate(
         self,
         gate: PreparedActionDeltaGate,
+        deferred_scorer_backend: str = "eager",
     ) -> None:
         if not isinstance(gate, PreparedActionDeltaGate):
             raise TypeError(
@@ -3177,10 +3241,18 @@ class ActionHeadRecurrent(nn.Module):
                 "Action-Delta Gate/action-head dimension mismatch: "
                 f"expected={expected}, actual={actual}"
             )
+        prepared_deferred_scorer = prepare_action_delta_deferred_scorer(
+            gate, deferred_scorer_backend
+        )
         self._action_delta_gate = gate
+        self._action_delta_deferred_scorer = prepared_deferred_scorer
+        self._action_delta_deferred_scorer_backend = deferred_scorer_backend
+        return prepared_deferred_scorer
 
     def clear_action_delta_gate(self) -> None:
         self._action_delta_gate = None
+        self._action_delta_deferred_scorer = None
+        self._action_delta_deferred_scorer_backend = "eager"
 
     def _resolve_scalar_runtime_policy(
         self,
@@ -3254,6 +3326,7 @@ class ActionHeadRecurrent(nn.Module):
                        collect_action_delta_gate_shadow=False,
                        use_action_delta_nonconvergence_filter=False,
                        use_action_delta_deferred_backfill_filter=False,
+                       action_delta_deferred_scorer_backend="eager",
                        **kwargs):
         canonical_recurrence_strategy = canonicalize_recurrence_strategy(
             convergence_strategy
@@ -3278,6 +3351,16 @@ class ActionHeadRecurrent(nn.Module):
             or use_action_delta_deferred_backfill_filter
         ) and action_delta_gate is None:
             action_delta_gate = self._action_delta_gate
+        action_delta_deferred_scorer = None
+        if use_action_delta_deferred_backfill_filter:
+            if (
+                action_delta_deferred_scorer_backend
+                != self._action_delta_deferred_scorer_backend
+            ):
+                raise ValueError(
+                    "configured and requested deferred scorer backends differ"
+                )
+            action_delta_deferred_scorer = self._action_delta_deferred_scorer
         validate_latent_only_configuration(
             convergence_strategy,
             metric=latent_only_metric,
@@ -3385,6 +3468,12 @@ class ActionHeadRecurrent(nn.Module):
                                  ),
                                  use_action_delta_deferred_backfill_filter=(
                                      use_action_delta_deferred_backfill_filter
+                                 ),
+                                 action_delta_deferred_scorer_backend=(
+                                     action_delta_deferred_scorer_backend
+                                 ),
+                                 action_delta_deferred_scorer=(
+                                     action_delta_deferred_scorer
                                  ))
             if capture_action_head_workload:
                 metadata = self.model.last_inference_metadata

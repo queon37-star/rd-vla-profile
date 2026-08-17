@@ -23,7 +23,12 @@ PARTITION_ALGORITHM = "sha256-ranked-v1"
 PAIRED_SEED_NAMESPACE = "rd-vla-libero-paired-v1"
 OFFICIAL_INITIAL_STATE_COUNT = 50
 PARTITION_SIZES = {"calibration": 10, "screening": 10, "final": 30}
-PHASE_TRIAL_COUNTS = {"smoke": 3, **PARTITION_SIZES}
+PHASE_TRIAL_COUNTS = {
+    "smoke": 3,
+    "calibration": PARTITION_SIZES["calibration"],
+    "screening": PARTITION_SIZES["screening"],
+    "final_holdout": PARTITION_SIZES["final"],
+}
 SUPPORTED_PROTOCOL_PHASES = ("legacy", *PHASE_TRIAL_COUNTS)
 
 
@@ -367,7 +372,12 @@ def resolve_phase_trials(
                 f"got {actual_file_hash}"
             )
 
-    partition = "calibration" if phase == "smoke" else phase
+    if phase == "smoke":
+        partition = "calibration"
+    elif phase == "final_holdout":
+        partition = "final"
+    else:
+        partition = phase
     state_ids = list(task_entry["partitions"][partition])
     if phase == "smoke":
         state_ids = state_ids[: PHASE_TRIAL_COUNTS["smoke"]]
