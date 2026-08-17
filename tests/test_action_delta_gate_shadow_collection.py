@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 import torch
 
+import experiments.robot.libero.run_libero_eval as run_libero_eval_module
 import prismatic.models.action_heads as action_heads_module
 from experiments.robot.libero.action_delta_gate_shadow_collection import (
     ActionDeltaGateShadowCollectionError,
@@ -740,9 +741,20 @@ def test_frozen_deferred_evaluation_task_phase_matrix_and_eager_backend():
         (4, "final_holdout", "task_id=5"),
         (5, "calibration", "task 5 requires final_holdout"),
         (5, "screening", "task_id=4"),
+        (0, "screening", "task_id=4"),
+        (0, "final_holdout", "task_id=5"),
     ):
         with pytest.raises(ValueError, match=message):
             validate_config(final_config(task_id, phase))
+
+    with pytest.raises(ValueError, match="64-character hexadecimal SHA-256"):
+        validate_config(
+            final_config(
+                4,
+                "screening",
+                action_delta_gate_expected_sha256="",
+            )
+        )
 
     for task_id, phase in ((4, "screening"), (5, "final_holdout")):
         with pytest.raises(ValueError, match="backend='eager'"):
@@ -753,3 +765,77 @@ def test_frozen_deferred_evaluation_task_phase_matrix_and_eager_backend():
                     action_delta_deferred_scorer_backend="compile_default",
                 )
             )
+
+
+def test_action_delta_artifact_preparation_dispatches_by_evaluation_phase(
+    monkeypatch,
+):
+    calls = []
+
+    def prepare_shadow(payload, *, device, task_id):
+        calls.append(("shadow", payload, device, task_id))
+        return "shadow-prepared"
+
+    def prepare_held_out(payload, *, device, task_id):
+        calls.append(("held-out", payload, device, task_id))
+        return "held-out-prepared"
+
+    monkeypatch.setattr(
+        run_libero_eval_module,
+        "prepare_action_delta_gate_shadow",
+        prepare_shadow,
+    )
+    monkeypatch.setattr(
+        run_libero_eval_module,
+        "prepare_action_delta_gate",
+        prepare_held_out,
+    )
+
+    payload = object()
+    device = torch.device("cpu")
+    cases = (
+        (0, "calibration", "shadow-prepared"),
+        (4, "screening", "held-out-prepared"),
+        (5, "final_holdout", "held-out-prepared"),
+    )
+    for task_id, phase, expected in cases:
+        cfg = _nonconvergence_runtime_config(
+            task_id=task_id,
+            evaluation_protocol_phase=phase,
+            num_trials_per_task=30 if phase == "final_holdout" else 10,
+            use_action_delta_nonconvergence_filter=False,
+            use_action_delta_deferred_backfill_filter=True,
+            action_delta_gate_min_terminal_iter=2,
+            action_delta_deferred_scorer_backend="eager",
+        )
+        validate_config(cfg)
+        assert (
+            run_libero_eval_module._prepare_action_delta_gate_for_evaluation(
+                cfg,
+                payload,
+                device=device,
+                task_id=task_id,
+            )
+            == expected
+        )
+
+    legacy_max_skip_cfg = GenerateConfig(
+        evaluation_protocol_phase="legacy",
+        use_action_delta_nonconvergence_filter=True,
+    )
+    assert (
+        run_libero_eval_module._prepare_action_delta_gate_for_evaluation(
+            legacy_max_skip_cfg,
+            payload,
+            device=device,
+            task_id=0,
+        )
+        == "shadow-prepared"
+    )
+
+    assert [(kind, task_id) for kind, _, _, task_id in calls] == [
+        ("shadow", 0),
+        ("held-out", 4),
+        ("held-out", 5),
+        ("shadow", 0),
+    ]

@@ -974,6 +974,42 @@ def validate_config(cfg: GenerateConfig) -> None:
         )
 
 
+def _prepare_action_delta_gate_for_evaluation(
+    cfg: GenerateConfig,
+    payload,
+    *,
+    device: torch.device,
+    task_id: int,
+):
+    if cfg.evaluation_protocol_phase == "calibration":
+        return prepare_action_delta_gate_shadow(
+            payload,
+            device=device,
+            task_id=task_id,
+        )
+    if cfg.evaluation_protocol_phase in {"screening", "final_holdout"}:
+        return prepare_action_delta_gate(
+            payload,
+            device=device,
+            task_id=task_id,
+        )
+    if (
+        cfg.collect_action_delta_gate_shadow
+        or cfg.use_action_delta_nonconvergence_filter
+        or cfg.use_action_delta_deferred_backfill_filter
+    ):
+        return prepare_action_delta_gate_shadow(
+            payload,
+            device=device,
+            task_id=task_id,
+        )
+    return prepare_action_delta_gate(
+        payload,
+        device=device,
+        task_id=task_id,
+    )
+
+
 def calculate_linear_decay_horizon(actual_iters: int) -> int:
     """Map recurrence iterations to number of actions via linear decay.
 
@@ -3690,22 +3726,14 @@ def eval_libero(cfg: GenerateConfig) -> float:
 
         if action_delta_gate_payload is not None:
             action_head_device = next(action_head.parameters()).device
-            if (
-                cfg.collect_action_delta_gate_shadow
-                or cfg.use_action_delta_nonconvergence_filter
-                or cfg.use_action_delta_deferred_backfill_filter
-            ):
-                prepared_action_delta_gate = prepare_action_delta_gate_shadow(
+            prepared_action_delta_gate = (
+                _prepare_action_delta_gate_for_evaluation(
+                    cfg,
                     action_delta_gate_payload,
                     device=action_head_device,
                     task_id=int(task_id),
                 )
-            else:
-                prepared_action_delta_gate = prepare_action_delta_gate(
-                    action_delta_gate_payload,
-                    device=action_head_device,
-                    task_id=int(task_id),
-                )
+            )
             prepared_deferred_scorer = action_head.configure_action_delta_gate(
                 prepared_action_delta_gate,
                 deferred_scorer_backend=(
