@@ -1,4 +1,5 @@
 import copy
+import inspect
 import json
 import types
 
@@ -8,6 +9,7 @@ import torch
 import experiments.robot.libero.run_libero_eval as run_libero_eval_module
 from experiments.robot.libero.run_libero_eval import (
     GenerateConfig,
+    build_action_delta_deferred_backfill_log_fields,
     build_action_delta_cross_suite_log_record,
     validate_config,
 )
@@ -331,3 +333,55 @@ def test_defaults_leave_both_shadow_modes_disabled():
     config = GenerateConfig()
     assert config.collect_action_delta_gate_shadow is False
     assert config.collect_action_delta_cross_suite_shadow is False
+
+
+def test_legacy_none_episode_seed_is_safe_in_generic_prediction_logging():
+    config = GenerateConfig(
+        evaluation_protocol_phase="legacy",
+        reset_rng_each_episode=False,
+    )
+    episode_seed = None
+    assert config.evaluation_protocol_phase == "legacy"
+    assert config.reset_rng_each_episode is False
+
+    identity = {
+        "task_id": 0,
+        "episode_id": 0,
+        "episode_seed": run_libero_eval_module._as_int(episode_seed),
+        "action_prediction_index": 0,
+        "environment_timestep": 10,
+        "trajectory_id": None,
+        "initial_state_id": None,
+    }
+    fields = build_action_delta_deferred_backfill_log_fields(
+        {"action_delta_deferred_backfill_filter_runs": [{"run_length": 1}]},
+        identity,
+    )
+    record = {"episode_seed": episode_seed, **fields}
+    serialized = json.loads(json.dumps(record))
+
+    assert serialized["episode_seed"] is None
+    assert serialized[
+        "action_delta_deferred_backfill_filter_runs"
+    ][0]["prediction_identity"]["episode_seed"] is None
+    run_episode_source = inspect.getsource(run_libero_eval_module.run_episode)
+    assert '"episode_seed": _as_int(episode_seed)' in run_episode_source
+    assert '"episode_seed": int(episode_seed)' not in run_episode_source
+
+
+def test_non_null_episode_seed_remains_an_integer_in_generic_prediction_logging():
+    episode_seed = 17
+    identity = {
+        "episode_seed": run_libero_eval_module._as_int(episode_seed),
+    }
+    fields = build_action_delta_deferred_backfill_log_fields(
+        {"action_delta_deferred_backfill_filter_runs": [{"run_length": 1}]},
+        identity,
+    )
+    serialized = json.loads(json.dumps(fields))
+
+    value = serialized["action_delta_deferred_backfill_filter_runs"][0][
+        "prediction_identity"
+    ]["episode_seed"]
+    assert value == 17
+    assert isinstance(value, int)

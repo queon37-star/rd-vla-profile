@@ -2978,7 +2978,7 @@ def run_episode(
                         {
                             "task_id": int(task_id),
                             "episode_id": int(episode_idx),
-                            "episode_seed": int(episode_seed),
+                            "episode_seed": _as_int(episode_seed),
                             "action_prediction_index": int(prediction_id),
                             "environment_timestep": int(t),
                             "trajectory_id": protocol_log_metadata.get(
