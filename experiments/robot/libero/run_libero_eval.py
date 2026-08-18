@@ -93,7 +93,14 @@ from prismatic.models.action_delta_gate import (
     ACTION_DELTA_GATE_RETURN_MODES,
     load_action_delta_gate_artifact,
     prepare_action_delta_gate,
+    prepare_action_delta_gate_cross_suite_shadow,
     prepare_action_delta_gate_shadow,
+)
+from prismatic.models.action_delta_cross_suite_shadow import (
+    ACTION_DELTA_CROSS_SUITE_ANALYSIS_TYPE,
+    ACTION_DELTA_CROSS_SUITE_SHADOW_SCHEMA_VERSION,
+    ACTION_DELTA_CROSS_SUITE_SUPPORTED_SUITES,
+    ACTION_DELTA_CROSS_SUITE_TRAINING_SUITE,
 )
 from prismatic.models.action_delta_gate_shadow import (
     ACTION_DELTA_GATE_SHADOW_DEVELOPMENT_TASK_IDS,
@@ -310,6 +317,7 @@ class GenerateConfig:
     action_delta_gate_exact_coda_audit: bool = False
     action_delta_gate_return_mode: str = "anchor"
     collect_action_delta_gate_shadow: bool = False
+    collect_action_delta_cross_suite_shadow: bool = False
     # Development-only high-side predictor filter; never a convergence gate.
     use_action_delta_nonconvergence_filter: bool = False
     use_action_delta_deferred_backfill_filter: bool = False
@@ -493,13 +501,14 @@ def validate_config(cfg: GenerateConfig) -> None:
         for value in (
             cfg.use_action_delta_gate,
             cfg.collect_action_delta_gate_shadow,
+            cfg.collect_action_delta_cross_suite_shadow,
             cfg.use_action_delta_nonconvergence_filter,
             cfg.use_action_delta_deferred_backfill_filter,
         )
     )
     if action_delta_mode_count > 1:
         raise ValueError(
-            "production Action-Delta Gate, diagnostic shadow collection, and "
+            "production Action-Delta Gate, both diagnostic shadow modes, and "
             "both diagnostic non-convergence filters are mutually exclusive"
         )
     if (
@@ -605,6 +614,7 @@ def validate_config(cfg: GenerateConfig) -> None:
             )
     elif not (
         cfg.collect_action_delta_gate_shadow
+        or cfg.collect_action_delta_cross_suite_shadow
         or cfg.use_action_delta_nonconvergence_filter
         or cfg.use_action_delta_deferred_backfill_filter
     ) and (
@@ -694,6 +704,80 @@ def validate_config(cfg: GenerateConfig) -> None:
             "action_delta_gate_shadow_dir requires "
             "collect_action_delta_gate_shadow=True"
         )
+
+    if cfg.collect_action_delta_cross_suite_shadow:
+        if not cfg.use_recurrent:
+            raise ValueError("cross-suite Action-Delta shadow requires use_recurrent=True")
+        if canonical_recurrence_strategy != "adjacent_action_mse":
+            raise ValueError(
+                "cross-suite Action-Delta shadow requires adjacent action-MSE recurrence"
+            )
+        cross_suite_name = (
+            cfg.task_suite_name.value
+            if isinstance(cfg.task_suite_name, TaskSuite)
+            else str(cfg.task_suite_name)
+        )
+        if cross_suite_name not in ACTION_DELTA_CROSS_SUITE_SUPPORTED_SUITES:
+            raise ValueError(
+                "cross-suite Action-Delta shadow supports only "
+                f"{ACTION_DELTA_CROSS_SUITE_SUPPORTED_SUITES}"
+            )
+        if not cfg.action_delta_gate_artifact_path:
+            raise ValueError(
+                "cross-suite Action-Delta shadow requires action_delta_gate_artifact_path"
+            )
+        if not Path(cfg.action_delta_gate_artifact_path).exists():
+            raise ValueError(
+                "Action-Delta artifact path does not exist: "
+                f"{cfg.action_delta_gate_artifact_path}"
+            )
+        expected_hash = cfg.action_delta_gate_expected_sha256
+        if (
+            len(expected_hash) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in expected_hash.lower()
+            )
+        ):
+            raise ValueError(
+                "action_delta_gate_expected_sha256 must be a 64-character "
+                "hexadecimal SHA-256"
+            )
+        if not cfg.use_warm_start or cfg.warm_start_source != "midpoint":
+            raise ValueError("cross-suite Action-Delta shadow requires midpoint warm-start")
+        if cfg.warm_start_min_iter != 2:
+            raise ValueError("cross-suite Action-Delta shadow requires warm_start_min_iter=2")
+        if cfg.use_latent_precheck or cfg.latent_precheck_mode != "off":
+            raise ValueError("cross-suite Action-Delta shadow requires latent pre-check off")
+        if cfg.latent_precheck_trace_level != "off":
+            raise ValueError(
+                "cross-suite Action-Delta shadow requires latent_precheck_trace_level='off'"
+            )
+        if cfg.shadow_full_depth or cfg.collect_preconvergence_raw_shadow:
+            raise ValueError(
+                "cross-suite Action-Delta shadow cannot enable other shadow recurrence"
+            )
+        if not cfg.use_cached_final_output:
+            raise ValueError(
+                "cross-suite Action-Delta shadow requires exact terminal-output reuse"
+            )
+        if (
+            isinstance(cfg.action_delta_gate_min_terminal_iter, bool)
+            or not isinstance(cfg.action_delta_gate_min_terminal_iter, int)
+            or cfg.action_delta_gate_min_terminal_iter < 2
+        ):
+            raise ValueError(
+                "cross-suite Action-Delta shadow minimum terminal iteration "
+                "must be an integer >= 2"
+            )
+        if float(cfg.recurrence_kl_thresh) != 0.001:
+            raise ValueError(
+                "cross-suite Action-Delta shadow requires recurrence_kl_thresh=0.001"
+            )
+        if cfg.action_delta_gate_exact_coda_audit:
+            raise ValueError("cross-suite Action-Delta shadow cannot enable exact-Coda audit")
+        if cfg.action_delta_gate_return_mode != "anchor":
+            raise ValueError("cross-suite Action-Delta shadow does not use a return policy")
 
     if cfg.use_action_delta_nonconvergence_filter:
         if not cfg.use_recurrent:
@@ -1018,6 +1102,11 @@ def _prepare_action_delta_gate_for_evaluation(
     device: torch.device,
     task_id: int,
 ):
+    if cfg.collect_action_delta_cross_suite_shadow:
+        return prepare_action_delta_gate_cross_suite_shadow(
+            payload,
+            device=device,
+        )
     if cfg.evaluation_protocol_phase == "calibration":
         return prepare_action_delta_gate_shadow(
             payload,
@@ -1900,6 +1989,48 @@ def get_step_log_file(cfg):
     return None
 
 
+def build_action_delta_cross_suite_log_record(
+    payload: Mapping[str, Any],
+    *,
+    provenance: Mapping[str, Any],
+    task_id: int,
+    task_name: str,
+    episode_id: int,
+    initial_state_id: int,
+    episode_seed: Optional[int],
+    prediction_id: int,
+    environment_timestep: int,
+    actual_origin: str,
+    recurrent_k: Optional[int],
+    evaluation_protocol_phase: str,
+    min_terminal_iteration: int,
+) -> dict[str, Any]:
+    """Attach rollout identity/provenance to one compact shadow payload."""
+
+    if payload.get("actual_origin") != actual_origin:
+        raise RuntimeError(
+            "cross-suite shadow origin does not match rollout metadata"
+        )
+    return {
+        **provenance,
+        "schema_version": ACTION_DELTA_CROSS_SUITE_SHADOW_SCHEMA_VERSION,
+        "task_id": int(task_id),
+        "task_name": task_name,
+        "episode_id": int(episode_id),
+        "initial_state_id": int(initial_state_id),
+        "episode_seed": episode_seed,
+        "action_prediction_index": int(prediction_id),
+        "environment_timestep": int(environment_timestep),
+        "actual_origin": actual_origin,
+        "K_t": recurrent_k,
+        "evaluation_protocol_phase": evaluation_protocol_phase,
+        "min_terminal_iteration": int(min_terminal_iteration),
+        "transitions": payload["transitions"],
+        "collection_error": payload["error"],
+        "exact_coda_call_count": payload["exact_coda_call_count"],
+    }
+
+
 def configure_recurrent_convergence_paths(cfg, run_id: str):
     """Derive stable JSONL/JSON paths for recurrence convergence metrics."""
     output_dir = getattr(cfg, "recurrent_convergence_dir", "") or "./benchmark_results/recurrent_convergence"
@@ -2439,6 +2570,7 @@ def run_episode(
     timing_state=None,
     raw_shadow_writer=None,
     action_delta_shadow_writer=None,
+    action_delta_cross_suite_provenance=None,
 ):
     """Run a single episode in the environment."""
     episode_protocol = dict(episode_protocol or {})
@@ -2662,6 +2794,9 @@ def run_episode(
                     action_delta_gate_shadow = inference_metadata.get(
                         "action_delta_gate_shadow"
                     )
+                    action_delta_cross_suite_shadow = inference_metadata.get(
+                        "action_delta_cross_suite_shadow"
+                    )
                 else:
                     recurrence_debug = {}
                     warm_start_metadata = {}
@@ -2669,6 +2804,7 @@ def run_episode(
                     action_head_workload = None
                     preconvergence_raw_shadow = None
                     action_delta_gate_shadow = None
+                    action_delta_cross_suite_shadow = None
 
                 warm_start_enabled = bool(
                     warm_start_metadata.get("enabled", getattr(cfg, "use_warm_start", False))
@@ -3073,6 +3209,59 @@ def run_episode(
                     )
                 else:
                     step_record["action_delta_gate_shadow_collected"] = False
+                if cfg.collect_action_delta_cross_suite_shadow:
+                    if action_delta_cross_suite_provenance is None:
+                        raise RuntimeError(
+                            "cross-suite Action-Delta shadow enabled without provenance"
+                        )
+                    if action_delta_cross_suite_shadow is None:
+                        raise RuntimeError(
+                            "cross-suite Action-Delta shadow was requested but "
+                            "the action head returned no payload"
+                        )
+                    expected_origin = (
+                        "ACTUAL_WARM" if warm_start_used else "COLD"
+                    )
+                    cross_suite_record = (
+                        build_action_delta_cross_suite_log_record(
+                            action_delta_cross_suite_shadow,
+                            provenance=action_delta_cross_suite_provenance,
+                            task_id=int(task_id),
+                            task_name=task_description,
+                            episode_id=int(episode_idx),
+                            initial_state_id=(
+                                int(protocol_log_metadata["initial_state_id"])
+                                if protocol_log_metadata["initial_state_id"]
+                                is not None
+                                else int(episode_idx)
+                            ),
+                            episode_seed=episode_seed,
+                            prediction_id=int(prediction_id),
+                            environment_timestep=int(t),
+                            actual_origin=expected_origin,
+                            recurrent_k=recurrent_iteration_count,
+                            evaluation_protocol_phase=(
+                                evaluation_protocol_phase
+                            ),
+                            min_terminal_iteration=int(
+                                cfg.action_delta_gate_min_terminal_iter
+                            ),
+                        )
+                    )
+                    step_record.update(
+                        {
+                            "action_delta_cross_suite_shadow_collected": True,
+                            "action_delta_cross_suite_shadow": cross_suite_record,
+                            "action_delta_cross_suite_shadow_eligible_row_count": len(
+                                cross_suite_record["transitions"]
+                            ),
+                            "action_delta_cross_suite_shadow_influenced_control": False,
+                        }
+                    )
+                else:
+                    step_record[
+                        "action_delta_cross_suite_shadow_collected"
+                    ] = False
                 step_record["profiling_enabled"] = bool(debug.get("profiling_enabled", False))
                 step_record["use_cached_final_output"] = bool(
                     debug.get("use_cached_final_output", getattr(cfg, "use_cached_final_output", False))
@@ -3214,6 +3403,7 @@ def run_task(
     raw_shadow_writer=None,
     action_delta_shadow_writer=None,
     source_commit=None,
+    action_delta_cross_suite_provenance=None,
 ):
     """Run evaluation for a single task."""
     task = task_suite.get_task(task_id)
@@ -3302,6 +3492,9 @@ def run_task(
             timing_state=timing_state,
             raw_shadow_writer=raw_shadow_writer,
             action_delta_shadow_writer=action_delta_shadow_writer,
+            action_delta_cross_suite_provenance=(
+                action_delta_cross_suite_provenance
+            ),
         )
 
         if episode_iters:
@@ -3412,6 +3605,7 @@ def eval_libero(cfg: GenerateConfig) -> float:
     if (
         cfg.use_action_delta_gate
         or cfg.collect_action_delta_gate_shadow
+        or cfg.collect_action_delta_cross_suite_shadow
         or cfg.use_action_delta_nonconvergence_filter
         or cfg.use_action_delta_deferred_backfill_filter
     ):
@@ -3437,10 +3631,15 @@ def eval_libero(cfg: GenerateConfig) -> float:
     if action_delta_gate_manifest is not None:
         log_message(
             (
-                "Loaded frozen fold-4 Action-Delta predictor for "
-                "development shadow collection: "
-                if cfg.collect_action_delta_gate_shadow
-                else "Loaded fold-4 Action-Delta Gate artifact: "
+                "Loaded frozen Spatial Action-Delta predictor for "
+                "cross-suite diagnostic shadow: "
+                if cfg.collect_action_delta_cross_suite_shadow
+                else (
+                    "Loaded frozen fold-4 Action-Delta predictor for "
+                    "development shadow collection: "
+                    if cfg.collect_action_delta_gate_shadow
+                    else "Loaded fold-4 Action-Delta Gate artifact: "
+                )
             )
             + f"sha256={action_delta_gate_manifest['artifact_sha256']}, "
             f"tasks={action_delta_gate_manifest['held_out_task_ids']}",
@@ -3453,6 +3652,40 @@ def eval_libero(cfg: GenerateConfig) -> float:
         cfg.evaluation_protocol_phase
     )
     shared_checkpoint_identity = None
+    cross_suite_provenance = None
+    if cfg.collect_action_delta_cross_suite_shadow:
+        shared_source_commit = current_source_commit()
+        shared_checkpoint_identity = checkpoint_identity(
+            Path(cfg.pretrained_checkpoint)
+        )
+        cross_suite_provenance = {
+            "analysis_type": ACTION_DELTA_CROSS_SUITE_ANALYSIS_TYPE,
+            "diagnostic_only": True,
+            "production_efficiency_claim": False,
+            "source_commit": shared_source_commit,
+            "predictor_training_suite": ACTION_DELTA_CROSS_SUITE_TRAINING_SUITE,
+            "predictor_artifact_path": str(
+                Path(cfg.action_delta_gate_artifact_path).resolve()
+            ),
+            "predictor_artifact_sha256": action_delta_gate_manifest[
+                "artifact_sha256"
+            ],
+            "checkpoint_path": str(Path(cfg.pretrained_checkpoint).resolve()),
+            "checkpoint_identity": shared_checkpoint_identity,
+            "evaluation_suite": (
+                cfg.task_suite_name.value
+                if isinstance(cfg.task_suite_name, TaskSuite)
+                else str(cfg.task_suite_name)
+            ),
+            "high_side_threshold": float(
+                ACTION_DELTA_NONCONVERGENCE_THRESHOLD
+            ),
+        }
+        log_message(
+            "Cross-suite zero-shot Action-Delta shadow enabled; "
+            "diagnostic only, no production efficiency claim",
+            log_file,
+        )
     if cfg.collect_preconvergence_raw_shadow:
         shared_source_commit = current_source_commit()
         shared_checkpoint_identity = checkpoint_identity(
@@ -3645,6 +3878,20 @@ def eval_libero(cfg: GenerateConfig) -> float:
         if cfg.collect_action_delta_gate_shadow:
             full_results["action_delta_gate"]["shadow_collection_only"] = True
             full_results["action_delta_gate"]["production_gate_enabled"] = False
+        if cfg.collect_action_delta_cross_suite_shadow:
+            full_results["action_delta_cross_suite_shadow"] = {
+                **cross_suite_provenance,
+                "schema_version": (
+                    ACTION_DELTA_CROSS_SUITE_SHADOW_SCHEMA_VERSION
+                ),
+                "production_inference_control_unchanged": True,
+                "minimum_terminal_iteration": int(
+                    cfg.action_delta_gate_min_terminal_iter
+                ),
+                "recurrence_mse_threshold": float(
+                    cfg.recurrence_kl_thresh
+                ),
+            }
         if cfg.use_action_delta_nonconvergence_filter:
             full_results["action_delta_nonconvergence_filter"] = {
                 "development_only": True,
@@ -3837,6 +4084,7 @@ def eval_libero(cfg: GenerateConfig) -> float:
             raw_shadow_writer,
             action_delta_shadow_writer,
             source_commit=shared_source_commit,
+            action_delta_cross_suite_provenance=cross_suite_provenance,
         )
         task = task_suite.get_task(task_id)
         full_results["tasks"][task.name] = task_stats

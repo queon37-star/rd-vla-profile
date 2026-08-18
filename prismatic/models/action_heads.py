@@ -39,6 +39,13 @@ from prismatic.models.action_delta_gate_shadow import (
     build_action_delta_gate_shadow_transition,
     validate_action_delta_gate_shadow_configuration,
 )
+from prismatic.models.action_delta_cross_suite_shadow import (
+    ACTION_DELTA_CROSS_SUITE_ANALYSIS_TYPE,
+    ACTION_DELTA_CROSS_SUITE_SHADOW_SCHEMA_VERSION,
+    ACTION_DELTA_CROSS_SUITE_TRAINING_SUITE,
+    build_action_delta_cross_suite_transition,
+    validate_action_delta_cross_suite_shadow_configuration,
+)
 from prismatic.models.action_delta_deferred_scorer import (
     evaluate_action_delta_deferred_scorer,
     prepare_action_delta_deferred_scorer,
@@ -648,6 +655,7 @@ class VLARecurrent(nn.Module):
                 action_delta_gate_exact_coda_audit: bool = False,
                 action_delta_gate_return_mode: str = "anchor",
                 collect_action_delta_gate_shadow: bool = False,
+                collect_action_delta_cross_suite_shadow: bool = False,
                 use_action_delta_nonconvergence_filter: bool = False,
                 use_action_delta_deferred_backfill_filter: bool = False,
                 action_delta_deferred_scorer_backend: str = "eager",
@@ -740,6 +748,27 @@ class VLARecurrent(nn.Module):
             use_cached_final_output=use_cached_final_output,
             min_terminal_iter=action_delta_gate_min_terminal_iter,
         )
+        validate_action_delta_cross_suite_shadow_configuration(
+            enabled=collect_action_delta_cross_suite_shadow,
+            production_gate_enabled=use_action_delta_gate,
+            gate_shadow_enabled=collect_action_delta_gate_shadow,
+            nonconvergence_filter_enabled=use_action_delta_nonconvergence_filter,
+            deferred_backfill_filter_enabled=use_action_delta_deferred_backfill_filter,
+            canonical_recurrence_strategy=canonical_recurrence_strategy,
+            prepared_gate=action_delta_gate,
+            batch_size=h_a.size(0),
+            use_warm_start=enable_warm_start,
+            warm_start_source=warm_start_source,
+            warm_start_min_iter=warm_start_min_iter,
+            use_latent_precheck=use_latent_precheck,
+            latent_precheck_mode=latent_precheck_mode,
+            latent_precheck_trace_level=latent_precheck_trace_level,
+            shadow_full_depth=shadow_full_depth,
+            collect_preconvergence_raw_shadow=collect_preconvergence_raw_shadow,
+            use_cached_final_output=use_cached_final_output,
+            min_terminal_iter=action_delta_gate_min_terminal_iter,
+            recurrence_mse_threshold=kl_thresh,
+        )
         validate_action_delta_nonconvergence_filter_configuration(
             enabled=use_action_delta_nonconvergence_filter,
             production_gate_enabled=use_action_delta_gate,
@@ -809,6 +838,8 @@ class VLARecurrent(nn.Module):
             raise ValueError("Action-Delta Gate is inference-only")
         if collect_action_delta_gate_shadow and self.training:
             raise ValueError("Action-Delta Gate shadow collection is inference-only")
+        if collect_action_delta_cross_suite_shadow and self.training:
+            raise ValueError("Action-Delta cross-suite shadow collection is inference-only")
         if use_action_delta_nonconvergence_filter and self.training:
             raise ValueError("Action-Delta non-convergence filter is inference-only")
         if use_action_delta_deferred_backfill_filter and self.training:
@@ -1158,6 +1189,10 @@ class VLARecurrent(nn.Module):
             action_delta_gate_shadow_error = None
             action_delta_gate_shadow_exact_outputs = []
             action_delta_gate_shadow_exact_output_iterations = []
+            action_delta_cross_suite_anchor_state = None
+            action_delta_cross_suite_anchor_iteration = None
+            action_delta_cross_suite_transitions = []
+            action_delta_cross_suite_error = None
             action_delta_nonconvergence_requested = bool(
                 use_action_delta_nonconvergence_filter
             )
@@ -1313,6 +1348,7 @@ class VLARecurrent(nn.Module):
                         action_delta_gate_diagnostic_trigger_pending = None
                         gate_predicted_delta = None
                         action_delta_gate_shadow_pending = None
+                        action_delta_cross_suite_pending = None
                         action_delta_nonconvergence_forced_confirmation = False
                         action_delta_deferred_backfill_output = None
                         action_delta_deferred_comparison_iteration = None
@@ -1375,6 +1411,43 @@ class VLARecurrent(nn.Module):
                                     action_delta_gate_shadow_error = (
                                         f"{type(exc).__name__}: {exc}"
                                     )
+                            if (
+                                should_call_coda
+                                and collect_action_delta_cross_suite_shadow
+                                and action_delta_cross_suite_anchor_state is not None
+                                and actual_iter >= action_delta_gate_min_terminal_iter
+                            ):
+                                try:
+                                    (
+                                        cross_suite_score,
+                                        _unused_low_side_decision,
+                                    ) = evaluate_action_delta_gate(
+                                        action_delta_gate,
+                                        action_delta_cross_suite_anchor_state,
+                                        state,
+                                    )
+                                    action_delta_cross_suite_pending = {
+                                        "anchor_iteration": int(
+                                            action_delta_cross_suite_anchor_iteration
+                                        ),
+                                        "score": float(cross_suite_score),
+                                        "scoring_error": None,
+                                    }
+                                except Exception as exc:
+                                    # Instrumentation is deliberately fail-open
+                                    # with respect to the exact recurrence path.
+                                    action_delta_cross_suite_error = (
+                                        f"{type(exc).__name__}: {exc}"
+                                    )
+                                    action_delta_cross_suite_pending = {
+                                        "anchor_iteration": int(
+                                            action_delta_cross_suite_anchor_iteration
+                                        ),
+                                        "score": None,
+                                        "scoring_error": (
+                                            action_delta_cross_suite_error
+                                        ),
+                                    }
                             if (
                                 should_call_coda
                                 and action_delta_deferred_enabled_for_prediction
@@ -2164,6 +2237,32 @@ class VLARecurrent(nn.Module):
                                             f"{type(exc).__name__}: {exc}"
                                         )
 
+                                if action_delta_cross_suite_pending is not None:
+                                    try:
+                                        action_delta_cross_suite_transitions.append(
+                                            build_action_delta_cross_suite_transition(
+                                                anchor_iteration=(
+                                                    action_delta_cross_suite_pending[
+                                                        "anchor_iteration"
+                                                    ]
+                                                ),
+                                                terminal_iteration=int(actual_iter),
+                                                score=action_delta_cross_suite_pending[
+                                                    "score"
+                                                ],
+                                                exact_adjacent_action_mse=action_mse,
+                                                scoring_error=(
+                                                    action_delta_cross_suite_pending[
+                                                        "scoring_error"
+                                                    ]
+                                                ),
+                                            )
+                                        )
+                                    except Exception as exc:
+                                        action_delta_cross_suite_error = (
+                                            f"{type(exc).__name__}: {exc}"
+                                        )
+
                                 if action_delta_gate_diagnostic_trigger_pending is not None:
                                     exact_safe = bool(
                                         action_mse is not None
@@ -2320,6 +2419,13 @@ class VLARecurrent(nn.Module):
                                     action_delta_gate_shadow_anchor_state = state.detach()
                                     action_delta_gate_shadow_anchor_output = curr_output.detach()
                                     action_delta_gate_shadow_anchor_iteration = int(
+                                        actual_iter
+                                    )
+                                if collect_action_delta_cross_suite_shadow:
+                                    # This anchor advances after every exact Coda;
+                                    # predictor scores can never affect it.
+                                    action_delta_cross_suite_anchor_state = state.detach()
+                                    action_delta_cross_suite_anchor_iteration = int(
                                         actual_iter
                                     )
                                 if (
@@ -2904,6 +3010,15 @@ class VLARecurrent(nn.Module):
                     action_delta_gate_shadow_transitions
                 ),
                 "action_delta_gate_shadow_error": action_delta_gate_shadow_error,
+                "collect_action_delta_cross_suite_shadow": bool(
+                    collect_action_delta_cross_suite_shadow
+                ),
+                "action_delta_cross_suite_shadow_eligible_row_count": len(
+                    action_delta_cross_suite_transitions
+                ),
+                "action_delta_cross_suite_shadow_error": (
+                    action_delta_cross_suite_error
+                ),
                 **action_delta_gate_exact_audit,
                 "action_delta_gate_returned_previous_coda": bool(
                     action_delta_gate_triggered
@@ -3102,6 +3217,36 @@ class VLARecurrent(nn.Module):
                             float(value) for value in conv_score_list
                         ],
                     },
+                }
+
+            if collect_action_delta_cross_suite_shadow:
+                self.last_inference_metadata[
+                    "action_delta_cross_suite_shadow"
+                ] = {
+                    "schema_version": (
+                        ACTION_DELTA_CROSS_SUITE_SHADOW_SCHEMA_VERSION
+                    ),
+                    "analysis_type": ACTION_DELTA_CROSS_SUITE_ANALYSIS_TYPE,
+                    "diagnostic_only": True,
+                    "production_efficiency_claim": False,
+                    "predictor_training_suite": (
+                        ACTION_DELTA_CROSS_SUITE_TRAINING_SUITE
+                    ),
+                    "collection_applied": True,
+                    "min_terminal_iteration": int(
+                        action_delta_gate_min_terminal_iter
+                    ),
+                    "high_side_threshold": float(
+                        ACTION_DELTA_NONCONVERGENCE_THRESHOLD
+                    ),
+                    "recurrence_mse_threshold": float(kl_thresh),
+                    "actual_origin": (
+                        "ACTUAL_WARM" if cached_state_used else "COLD"
+                    ),
+                    "K_t": int(actual_iter),
+                    "transitions": action_delta_cross_suite_transitions,
+                    "error": action_delta_cross_suite_error,
+                    "exact_coda_call_count": int(get_output_call_count),
                 }
 
             if shadow_full_depth and shadow_error is None:
@@ -3470,6 +3615,7 @@ class ActionHeadRecurrent(nn.Module):
                        action_delta_gate_exact_coda_audit=False,
                        action_delta_gate_return_mode="anchor",
                        collect_action_delta_gate_shadow=False,
+                       collect_action_delta_cross_suite_shadow=False,
                        use_action_delta_nonconvergence_filter=False,
                        use_action_delta_deferred_backfill_filter=False,
                        action_delta_deferred_scorer_backend="eager",
@@ -3494,6 +3640,7 @@ class ActionHeadRecurrent(nn.Module):
         if (
             use_action_delta_gate
             or collect_action_delta_gate_shadow
+            or collect_action_delta_cross_suite_shadow
             or use_action_delta_nonconvergence_filter
             or use_action_delta_deferred_backfill_filter
         ) and action_delta_gate is None:
@@ -3609,6 +3756,9 @@ class ActionHeadRecurrent(nn.Module):
                                  ),
                                  collect_action_delta_gate_shadow=(
                                      collect_action_delta_gate_shadow
+                                 ),
+                                 collect_action_delta_cross_suite_shadow=(
+                                     collect_action_delta_cross_suite_shadow
                                  ),
                                  use_action_delta_nonconvergence_filter=(
                                      use_action_delta_nonconvergence_filter

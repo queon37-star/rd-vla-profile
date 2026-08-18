@@ -341,6 +341,48 @@ def prepare_action_delta_gate_shadow(
     )
 
 
+def prepare_action_delta_gate_cross_suite_shadow(
+    payload: Mapping[str, Any],
+    *,
+    device: torch.device | str,
+) -> PreparedActionDeltaGate:
+    """Prepare the Spatial predictor for diagnostic cross-suite shadowing.
+
+    Unlike the production and Phase-A preparation entry points, this function
+    does not authorize a task split: runtime validation confines the prepared
+    predictor to the non-intervening cross-suite shadow mode.
+    """
+
+    validate_action_delta_gate_artifact(payload)
+    target_device = torch.device(device)
+
+    def move(name: str) -> torch.Tensor:
+        return payload[name].detach().to(
+            device=target_device, dtype=torch.float32
+        ).contiguous().clone()
+
+    return PreparedActionDeltaGate(
+        schema_version=int(payload["schema_version"]),
+        artifact_type=str(payload["artifact_type"]),
+        model_type=str(payload["model_type"]),
+        hidden_dim=int(payload["hidden_dim"]),
+        action_dim=int(payload["action_dim"]),
+        action_chunk_len=int(payload["action_chunk_len"]),
+        held_out_task_ids=tuple(int(value) for value in payload["held_out_task_ids"]),
+        outer_fold=int(payload["outer_fold"]),
+        threshold=float(payload["threshold"]),
+        x_mean=move("x_mean"),
+        x_std=move("x_std"),
+        y_mean=move("y_mean"),
+        y_std=move("y_std"),
+        linear_weight=move("linear_weight"),
+        linear_bias=move("linear_bias"),
+        delta_quantization_dtype=str(payload["delta_quantization_dtype"]),
+        training_seed=int(payload["training_seed"]),
+        calibration_method=str(payload["calibration_method"]),
+    )
+
+
 def score_action_delta_gate(
     gate: PreparedActionDeltaGate,
     anchor_state: torch.Tensor,

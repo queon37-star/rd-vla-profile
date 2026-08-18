@@ -829,6 +829,7 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
         action_delta_gate_exact_coda_audit=False,
         action_delta_gate_return_mode="anchor",
         collect_action_delta_gate_shadow=False,
+        collect_action_delta_cross_suite_shadow=False,
         use_action_delta_nonconvergence_filter=False,
         use_action_delta_deferred_backfill_filter=False,
         action_delta_deferred_scorer_backend="eager",
@@ -940,6 +941,9 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
                     collect_action_delta_gate_shadow=(
                         collect_action_delta_gate_shadow
                     ),
+                    collect_action_delta_cross_suite_shadow=(
+                        collect_action_delta_cross_suite_shadow
+                    ),
                     use_action_delta_nonconvergence_filter=(
                         use_action_delta_nonconvergence_filter
                     ),
@@ -1030,6 +1034,7 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
         action_delta_gate_exact_coda_audit: bool = False,
         action_delta_gate_return_mode: str = "anchor",
         collect_action_delta_gate_shadow: bool = False,
+        collect_action_delta_cross_suite_shadow: bool = False,
         use_action_delta_nonconvergence_filter: bool = False,
         use_action_delta_deferred_backfill_filter: bool = False,
         action_delta_deferred_scorer_backend: str = "eager",
@@ -1131,6 +1136,9 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
             ),
             collect_action_delta_gate_shadow=(
                 collect_action_delta_gate_shadow
+            ),
+            collect_action_delta_cross_suite_shadow=(
+                collect_action_delta_cross_suite_shadow
             ),
             use_action_delta_nonconvergence_filter=(
                 use_action_delta_nonconvergence_filter

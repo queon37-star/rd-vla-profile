@@ -502,6 +502,13 @@ def get_vla_action(
                                 False,
                             )
                         ),
+                        collect_action_delta_cross_suite_shadow=bool(
+                            getattr(
+                                cfg,
+                                "collect_action_delta_cross_suite_shadow",
+                                False,
+                            )
+                        ),
                         use_action_delta_nonconvergence_filter=bool(
                             getattr(
                                 cfg,
@@ -544,6 +551,11 @@ def get_vla_action(
             ),
             "action_delta_gate_shadow": action_head_inference_metadata.get(
                 "action_delta_gate_shadow"
+            ),
+            "action_delta_cross_suite_shadow": (
+                action_head_inference_metadata.get(
+                    "action_delta_cross_suite_shadow"
+                )
             ),
             "warm_start": {
                 "enabled": bool(getattr(cfg, "use_warm_start", False)),
