@@ -654,6 +654,7 @@ def test_nonconvergence_runtime_config_is_development_only_and_fixed_terminal_fi
 
 def test_deferred_backfill_runtime_config_is_separate_development_mode():
     assert GenerateConfig().action_delta_deferred_scorer_backend == "eager"
+    assert GenerateConfig().action_delta_deferred_runtime_policy == "frozen_v1"
     for minimum in (2, 5):
         cfg = _nonconvergence_runtime_config(
             task_id=0,
@@ -672,6 +673,32 @@ def test_deferred_backfill_runtime_config_is_separate_development_mode():
             action_delta_deferred_scorer_backend="compile_default",
         )
     )
+    validate_config(
+        _nonconvergence_runtime_config(
+            task_id=0,
+            use_action_delta_nonconvergence_filter=False,
+            use_action_delta_deferred_backfill_filter=True,
+            action_delta_gate_min_terminal_iter=2,
+            action_delta_deferred_runtime_policy="lazy_prefix_exact",
+        )
+    )
+    with pytest.raises(ValueError, match="runtime_policy must be one of"):
+        validate_config(
+            _nonconvergence_runtime_config(
+                task_id=0,
+                use_action_delta_nonconvergence_filter=False,
+                use_action_delta_deferred_backfill_filter=True,
+                action_delta_gate_min_terminal_iter=2,
+                action_delta_deferred_runtime_policy="unknown",
+            )
+        )
+    with pytest.raises(ValueError, match="deferred/backfill-only"):
+        validate_config(
+            _nonconvergence_runtime_config(
+                task_id=0,
+                action_delta_deferred_runtime_policy="lazy_prefix_exact",
+            )
+        )
     with pytest.raises(ValueError, match="min_terminal_iter=2"):
         validate_config(
             _nonconvergence_runtime_config(

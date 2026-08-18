@@ -521,6 +521,11 @@ def get_vla_action(
                             "action_delta_deferred_scorer_backend",
                             "eager",
                         ),
+                        action_delta_deferred_runtime_policy=getattr(
+                            cfg,
+                            "action_delta_deferred_runtime_policy",
+                            "frozen_v1",
+                        ),
                     )
                     recurrence_debug = getattr(getattr(action_head, "model", None), "last_recurrence_debug", None)
                     action_head_inference_metadata = (

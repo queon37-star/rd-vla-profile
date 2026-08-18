@@ -87,6 +87,7 @@ from prismatic.models.scalar_stopping_policy import (
     prepare_scalar_task_policy,
 )
 from prismatic.models.action_delta_gate import (
+    ACTION_DELTA_DEFERRED_RUNTIME_POLICIES,
     ACTION_DELTA_NONCONVERGENCE_MIN_TERMINAL_ITER,
     ACTION_DELTA_NONCONVERGENCE_THRESHOLD,
     ACTION_DELTA_GATE_RETURN_MODES,
@@ -293,6 +294,7 @@ class GenerateConfig:
     use_action_delta_nonconvergence_filter: bool = False
     use_action_delta_deferred_backfill_filter: bool = False
     action_delta_deferred_scorer_backend: str = "eager"
+    action_delta_deferred_runtime_policy: str = "frozen_v1"
     action_delta_gate_shadow_dir: str = ""
     action_delta_gate_shadow_shard_size: int = 64
 
@@ -494,6 +496,21 @@ def validate_config(cfg: GenerateConfig) -> None:
     ):
         raise ValueError(
             "compile_default scorer backend is deferred/backfill-only"
+        )
+    if (
+        cfg.action_delta_deferred_runtime_policy
+        not in ACTION_DELTA_DEFERRED_RUNTIME_POLICIES
+    ):
+        raise ValueError(
+            "action_delta_deferred_runtime_policy must be one of "
+            f"{ACTION_DELTA_DEFERRED_RUNTIME_POLICIES}"
+        )
+    if (
+        cfg.action_delta_deferred_runtime_policy != "frozen_v1"
+        and not cfg.use_action_delta_deferred_backfill_filter
+    ):
+        raise ValueError(
+            "lazy_prefix_exact runtime policy is deferred/backfill-only"
         )
 
     if cfg.use_action_delta_gate:
@@ -1596,6 +1613,21 @@ def build_action_delta_deferred_backfill_log_fields(
         )
     }
     fields.update({prefix + name: debug.get(prefix + name) for name in names})
+    for name in (
+        "action_delta_deferred_runtime_policy",
+        "probe_score_call_count",
+        "probe_high_count",
+        "lazy_first_coda_suppressed",
+        "first_nonhigh_terminal_iteration",
+        "entered_exact_only",
+        "exact_only_start_terminal_iteration",
+        "exact_only_coda_call_count",
+        "lazy_first_coda_saved_count",
+        "prefix_deferred_coda_saved_count",
+        "total_exact_coda_call_count",
+        "truly_eliminated_coda_call_count",
+    ):
+        fields[name] = debug.get(name)
     if prediction_identity is not None:
         fields[prefix + "runs"] = [
             {**run, "prediction_identity": dict(prediction_identity)}
@@ -2559,6 +2591,11 @@ def run_episode(
                                 if cfg.use_action_delta_deferred_backfill_filter
                                 else None
                             ),
+                            "action_delta_deferred_runtime_policy": (
+                                cfg.action_delta_deferred_runtime_policy
+                                if cfg.use_action_delta_deferred_backfill_filter
+                                else None
+                            ),
                             "action_delta_deferred_threshold": (
                                 float(ACTION_DELTA_NONCONVERGENCE_THRESHOLD)
                                 if cfg.use_action_delta_deferred_backfill_filter
@@ -2732,6 +2769,11 @@ def run_episode(
                     ),
                     "action_delta_deferred_scorer_backend": (
                         cfg.action_delta_deferred_scorer_backend
+                        if cfg.use_action_delta_deferred_backfill_filter
+                        else None
+                    ),
+                    "action_delta_deferred_runtime_policy": (
+                        cfg.action_delta_deferred_runtime_policy
                         if cfg.use_action_delta_deferred_backfill_filter
                         else None
                     ),
@@ -3609,6 +3651,7 @@ def eval_libero(cfg: GenerateConfig) -> float:
                 "threshold": ACTION_DELTA_NONCONVERGENCE_THRESHOLD,
                 "min_terminal_iter": cfg.action_delta_gate_min_terminal_iter,
                 "scorer_backend": cfg.action_delta_deferred_scorer_backend,
+                "runtime_policy": cfg.action_delta_deferred_runtime_policy,
                 "compiled_configuration": (
                     {
                         "fullgraph": True,
@@ -3660,6 +3703,7 @@ def eval_libero(cfg: GenerateConfig) -> float:
                     cfg.action_delta_gate_min_terminal_iter
                 ),
                 "scorer_backend": cfg.action_delta_deferred_scorer_backend,
+                "runtime_policy": cfg.action_delta_deferred_runtime_policy,
                 "artifact_sha256": (
                     cfg.action_delta_gate_expected_sha256.lower()
                 ),

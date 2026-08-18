@@ -34,6 +34,10 @@ ACTION_DELTA_NONCONVERGENCE_MIN_TERMINAL_ITER = 5
 # values.
 ACTION_DELTA_NONCONVERGENCE_SCORER_COST_MS = 0.36627289134678936
 ACTION_DELTA_NONCONVERGENCE_CODA_COST_MS = 1.864207385085098
+ACTION_DELTA_DEFERRED_RUNTIME_POLICIES = (
+    "frozen_v1",
+    "lazy_prefix_exact",
+)
 ACTION_DELTA_GATE_PRODUCTION_RETURN_MODES = (
     "anchor",
     "predicted_correction",
@@ -607,9 +611,15 @@ def validate_action_delta_deferred_backfill_configuration(
     use_cached_final_output: bool,
     profile_coda_cost: bool,
     min_terminal_iter: int,
+    runtime_policy: str = "frozen_v1",
 ) -> None:
     """Validate the development-only adjacent-history deferred policy."""
 
+    _require(
+        runtime_policy in ACTION_DELTA_DEFERRED_RUNTIME_POLICIES,
+        "deferred/backfill runtime policy must be 'frozen_v1' or "
+        "'lazy_prefix_exact'",
+    )
     if not enabled:
         return
     _require(

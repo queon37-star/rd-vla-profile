@@ -651,6 +651,7 @@ class VLARecurrent(nn.Module):
                 use_action_delta_nonconvergence_filter: bool = False,
                 use_action_delta_deferred_backfill_filter: bool = False,
                 action_delta_deferred_scorer_backend: str = "eager",
+                action_delta_deferred_runtime_policy: str = "frozen_v1",
                 action_delta_deferred_scorer=None,
                 **kwargs) -> torch.Tensor:
         requested_recurrence_strategy = convergence_strategy
@@ -776,6 +777,7 @@ class VLARecurrent(nn.Module):
             use_cached_final_output=use_cached_final_output,
             profile_coda_cost=profile_coda_cost,
             min_terminal_iter=action_delta_gate_min_terminal_iter,
+            runtime_policy=action_delta_deferred_runtime_policy,
         )
         validate_action_delta_deferred_scorer_configuration(
             deferred_filter_enabled=use_action_delta_deferred_backfill_filter,
@@ -1186,6 +1188,11 @@ class VLARecurrent(nn.Module):
             action_delta_deferred_applied = bool(
                 action_delta_deferred_requested and cached_state_used
             )
+            action_delta_deferred_lazy_policy = bool(
+                action_delta_deferred_applied
+                and action_delta_deferred_runtime_policy
+                == "lazy_prefix_exact"
+            )
             action_delta_deferred_enabled_for_prediction = (
                 action_delta_deferred_applied
             )
@@ -1209,6 +1216,19 @@ class VLARecurrent(nn.Module):
             action_delta_deferred_exact_stop_mse_trace = []
             action_delta_deferred_max_iter_fallback_count = 0
             action_delta_deferred_fallback_reason = None
+            action_delta_deferred_probe_active = bool(
+                action_delta_deferred_lazy_policy
+            )
+            action_delta_deferred_probe_score_call_count = 0
+            action_delta_deferred_probe_high_count = 0
+            action_delta_deferred_lazy_first_coda_suppressed = False
+            action_delta_deferred_lazy_first_coda_materialized = False
+            action_delta_deferred_first_nonhigh_terminal_iteration = None
+            action_delta_deferred_entered_exact_only = False
+            action_delta_deferred_exact_only_start_terminal_iteration = None
+            action_delta_deferred_exact_only_coda_call_count = 0
+            action_delta_deferred_lazy_confirmation_iteration = None
+            action_delta_deferred_lazy_prefix_backfill_call_count = 0
 
             run_one_iteration_ms_list = []
             # Output timing lists include the final return-path call unless the
@@ -1297,6 +1317,17 @@ class VLARecurrent(nn.Module):
                         action_delta_deferred_backfill_output = None
                         action_delta_deferred_comparison_iteration = None
                         action_delta_deferred_suppress_stop_comparison = False
+                        if (
+                            action_delta_deferred_lazy_policy
+                            and action_delta_deferred_probe_active
+                            and actual_iter == 1
+                            and actual_iter < max_iter
+                        ):
+                            # Lazy policy only: S1 is the first adjacent latent
+                            # anchor. Materialize its action only if the first
+                            # later non-high transition needs confirmation.
+                            should_call_coda = False
+                            action_delta_deferred_lazy_first_coda_suppressed = True
                         if action_delta_nonconvergence_force_exact_next:
                             # max_skip=1: the iteration immediately following a
                             # diagnostic skip is always routed through the normal
@@ -1350,6 +1381,10 @@ class VLARecurrent(nn.Module):
                                 and action_delta_deferred_previous_latent_state is not None
                                 and actual_iter
                                 >= action_delta_gate_min_terminal_iter
+                                and (
+                                    not action_delta_deferred_lazy_policy
+                                    or action_delta_deferred_probe_active
+                                )
                             ):
                                 predictor_start = time.perf_counter()
                                 deferred_score = None
@@ -1419,6 +1454,10 @@ class VLARecurrent(nn.Module):
                                     ),
                                 }
                                 action_delta_deferred_score_trace.append(score_record)
+                                if action_delta_deferred_lazy_policy:
+                                    action_delta_deferred_probe_score_call_count += 1
+                                    if deferred_high:
+                                        action_delta_deferred_probe_high_count += 1
 
                                 if deferred_high and actual_iter < max_iter:
                                     should_call_coda = False
@@ -1485,14 +1524,40 @@ class VLARecurrent(nn.Module):
                                             action_delta_deferred_open_run = None
                                             action_delta_deferred_retained_state = None
                                             action_delta_deferred_retained_iteration = None
-                                    elif action_delta_deferred_open_run is not None:
+                                    elif (
+                                        action_delta_deferred_open_run is not None
+                                        or (
+                                            action_delta_deferred_lazy_policy
+                                            and not deferred_high
+                                        )
+                                    ):
                                         # Low or non-finite score: reconstruct only
                                         # a[k-1], then the normal path below executes
                                         # a[k] and applies the original adjacent MSE.
-                                        action_delta_deferred_confirmation_run_pending = (
-                                            action_delta_deferred_open_run
-                                        )
+                                        if action_delta_deferred_open_run is not None:
+                                            action_delta_deferred_confirmation_run_pending = (
+                                                action_delta_deferred_open_run
+                                            )
                                         action_delta_deferred_open_run = None
+                                        backfill_state = (
+                                            action_delta_deferred_retained_state
+                                        )
+                                        backfill_iteration = (
+                                            action_delta_deferred_retained_iteration
+                                        )
+                                        if action_delta_deferred_lazy_policy:
+                                            action_delta_deferred_probe_active = False
+                                            action_delta_deferred_enabled_for_prediction = False
+                                            action_delta_deferred_first_nonhigh_terminal_iteration = int(
+                                                actual_iter
+                                            )
+                                            action_delta_deferred_lazy_confirmation_iteration = int(
+                                                actual_iter
+                                            )
+                                            backfill_state = (
+                                                action_delta_deferred_previous_latent_state
+                                            )
+                                            backfill_iteration = int(actual_iter - 1)
                                         backfill_start = time.perf_counter()
                                         try:
                                             with rdvla_range(
@@ -1501,7 +1566,7 @@ class VLARecurrent(nn.Module):
                                             ):
                                                 action_delta_deferred_backfill_output = (
                                                     self._get_output(
-                                                        action_delta_deferred_retained_state,
+                                                        backfill_state,
                                                         h_a,
                                                         h_t,
                                                         p,
@@ -1511,8 +1576,13 @@ class VLARecurrent(nn.Module):
                                             get_output_call_count += 1
                                             action_delta_deferred_backfill_call_count += 1
                                             action_delta_deferred_comparison_iteration = int(
-                                                action_delta_deferred_retained_iteration
+                                                backfill_iteration
                                             )
+                                            if action_delta_deferred_lazy_policy:
+                                                if backfill_iteration == 1:
+                                                    action_delta_deferred_lazy_first_coda_materialized = True
+                                                else:
+                                                    action_delta_deferred_lazy_prefix_backfill_call_count += 1
                                             if profile_coda_cost:
                                                 append_get_output_timing()
                                                 action_delta_deferred_backfill_get_output_ms_list.append(
@@ -1837,6 +1907,13 @@ class VLARecurrent(nn.Module):
 
                                 if action_delta_deferred_applied:
                                     action_delta_deferred_current_coda_call_count += 1
+                                    if (
+                                        action_delta_deferred_lazy_policy
+                                        and action_delta_deferred_entered_exact_only
+                                        and actual_iter
+                                        > action_delta_deferred_exact_only_start_terminal_iteration
+                                    ):
+                                        action_delta_deferred_exact_only_coda_call_count += 1
                                     if profile_coda_cost:
                                         action_delta_deferred_current_get_output_ms_list.append(
                                             float(
@@ -2000,6 +2077,18 @@ class VLARecurrent(nn.Module):
                                     action_delta_deferred_confirmation_run_pending = None
                                     action_delta_deferred_retained_state = None
                                     action_delta_deferred_retained_iteration = None
+
+                                if (
+                                    action_delta_deferred_lazy_policy
+                                    and action_delta_deferred_lazy_confirmation_iteration
+                                    == actual_iter
+                                ):
+                                    if not adaptive_stop:
+                                        action_delta_deferred_entered_exact_only = True
+                                        action_delta_deferred_exact_only_start_terminal_iteration = int(
+                                            actual_iter
+                                        )
+                                    action_delta_deferred_lazy_confirmation_iteration = None
 
                                 if action_delta_nonconvergence_forced_confirmation:
                                     if action_delta_nonconvergence_pending_event is None:
@@ -2330,18 +2419,41 @@ class VLARecurrent(nn.Module):
                 raise RuntimeError(
                     "deferred/backfill prediction ended with unresolved deferred state"
                 )
-            action_delta_deferred_eliminated_count = sum(
-                int(run["truly_eliminated_coda_calls"] or 0)
-                for run in action_delta_deferred_runs
+            action_delta_deferred_lazy_first_coda_saved_count = int(
+                action_delta_deferred_lazy_first_coda_suppressed
+                and not action_delta_deferred_lazy_first_coda_materialized
             )
-            if (
-                action_delta_deferred_eliminated_count
-                != action_delta_deferred_high_score_count
-                - action_delta_deferred_backfill_call_count
-            ):
-                raise RuntimeError(
-                    "deferred/backfill eliminated-Coda accounting is inconsistent"
+            action_delta_deferred_prefix_deferred_coda_saved_count = (
+                action_delta_deferred_high_score_count
+                - action_delta_deferred_lazy_prefix_backfill_call_count
+                if action_delta_deferred_lazy_policy
+                else 0
+            )
+            if action_delta_deferred_lazy_policy:
+                action_delta_deferred_eliminated_count = (
+                    action_delta_deferred_lazy_first_coda_saved_count
+                    + action_delta_deferred_prefix_deferred_coda_saved_count
                 )
+                if (
+                    action_delta_deferred_eliminated_count
+                    != actual_iter - get_output_call_count
+                ):
+                    raise RuntimeError(
+                        "lazy deferred/backfill eliminated-Coda accounting is inconsistent"
+                    )
+            else:
+                action_delta_deferred_eliminated_count = sum(
+                    int(run["truly_eliminated_coda_calls"] or 0)
+                    for run in action_delta_deferred_runs
+                )
+                if (
+                    action_delta_deferred_eliminated_count
+                    != action_delta_deferred_high_score_count
+                    - action_delta_deferred_backfill_call_count
+                ):
+                    raise RuntimeError(
+                        "deferred/backfill eliminated-Coda accounting is inconsistent"
+                    )
 
             reuse_terminal_output = bool(
                 not action_delta_gate_triggered
@@ -2449,6 +2561,40 @@ class VLARecurrent(nn.Module):
                 ),
                 "action_delta_deferred_backfill_filter_applied": bool(
                     action_delta_deferred_applied
+                ),
+                "action_delta_deferred_runtime_policy": (
+                    action_delta_deferred_runtime_policy
+                ),
+                "probe_score_call_count": int(
+                    action_delta_deferred_probe_score_call_count
+                ),
+                "probe_high_count": int(
+                    action_delta_deferred_probe_high_count
+                ),
+                "lazy_first_coda_suppressed": bool(
+                    action_delta_deferred_lazy_first_coda_suppressed
+                ),
+                "first_nonhigh_terminal_iteration": (
+                    action_delta_deferred_first_nonhigh_terminal_iteration
+                ),
+                "entered_exact_only": bool(
+                    action_delta_deferred_entered_exact_only
+                ),
+                "exact_only_start_terminal_iteration": (
+                    action_delta_deferred_exact_only_start_terminal_iteration
+                ),
+                "exact_only_coda_call_count": int(
+                    action_delta_deferred_exact_only_coda_call_count
+                ),
+                "lazy_first_coda_saved_count": int(
+                    action_delta_deferred_lazy_first_coda_saved_count
+                ),
+                "prefix_deferred_coda_saved_count": int(
+                    action_delta_deferred_prefix_deferred_coda_saved_count
+                ),
+                "total_exact_coda_call_count": int(get_output_call_count),
+                "truly_eliminated_coda_call_count": int(
+                    action_delta_deferred_eliminated_count
                 ),
                 "action_delta_deferred_backfill_filter_development_only": True,
                 "action_delta_deferred_backfill_filter_efficiency_eligible": False,
@@ -3327,6 +3473,7 @@ class ActionHeadRecurrent(nn.Module):
                        use_action_delta_nonconvergence_filter=False,
                        use_action_delta_deferred_backfill_filter=False,
                        action_delta_deferred_scorer_backend="eager",
+                       action_delta_deferred_runtime_policy="frozen_v1",
                        **kwargs):
         canonical_recurrence_strategy = canonicalize_recurrence_strategy(
             convergence_strategy
@@ -3471,6 +3618,9 @@ class ActionHeadRecurrent(nn.Module):
                                  ),
                                  action_delta_deferred_scorer_backend=(
                                      action_delta_deferred_scorer_backend
+                                 ),
+                                 action_delta_deferred_runtime_policy=(
+                                     action_delta_deferred_runtime_policy
                                  ),
                                  action_delta_deferred_scorer=(
                                      action_delta_deferred_scorer

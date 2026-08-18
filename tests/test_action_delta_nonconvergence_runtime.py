@@ -307,13 +307,21 @@ def test_timing_and_savings_accounting_is_internally_consistent():
     assert ACTION_DELTA_NONCONVERGENCE_THRESHOLD == 0.0015
 
 
-def deferred_kwargs(gate, *, max_iter=8, min_terminal_iter=5):
+def deferred_kwargs(
+    gate,
+    *,
+    max_iter=8,
+    min_terminal_iter=5,
+    runtime_policy=None,
+):
     values = kwargs(gate, max_iter=max_iter)
     values.update(
         use_action_delta_nonconvergence_filter=False,
         use_action_delta_deferred_backfill_filter=True,
         action_delta_gate_min_terminal_iter=min_terminal_iter,
     )
+    if runtime_policy is not None:
+        values["action_delta_deferred_runtime_policy"] = runtime_policy
     return values
 
 
@@ -349,7 +357,14 @@ def action(value):
     return torch.full((1, 2, 2), float(value))
 
 
-def run_deferred(model, gate, *, max_iter, min_terminal_iter=5):
+def run_deferred(
+    model,
+    gate,
+    *,
+    max_iter,
+    min_terminal_iter=5,
+    runtime_policy=None,
+):
     return model(
         *inputs(),
         warm_start_state=torch.zeros(1, 2, 4, dtype=torch.bfloat16),
@@ -357,6 +372,7 @@ def run_deferred(model, gate, *, max_iter, min_terminal_iter=5):
             gate,
             max_iter=max_iter,
             min_terminal_iter=min_terminal_iter,
+            runtime_policy=runtime_policy,
         ),
     )
 
@@ -749,3 +765,274 @@ def test_deferred_mode_off_does_not_score_or_change_exact_control(monkeypatch):
     assert result[1] == 5
     assert score_calls == 0
     assert model.test_coda_iterations == [1, 2, 3, 4, 5]
+
+
+def test_deferred_runtime_policy_default_matches_explicit_frozen_v1(monkeypatch):
+    outputs = {
+        1: action(0),
+        2: action(1),
+        3: action(2),
+        4: action(3),
+        5: action(4),
+        6: action(4.01),
+    }
+    calls = install_score_trace(monkeypatch, {5: 0.002, 6: 0.0005})
+    observed = []
+    for runtime_policy in (None, "frozen_v1"):
+        model = make_model()
+        install_state_indexed_outputs(model, outputs)
+        result = run_deferred(
+            model,
+            make_gate(0.0),
+            max_iter=6,
+            runtime_policy=runtime_policy,
+        )
+        debug = model.last_recurrence_debug
+        observed.append(
+            (
+                result[1],
+                result[2],
+                list(model.test_coda_iterations),
+                debug["action_delta_deferred_backfill_filter_score_trace"],
+                debug[
+                    "action_delta_deferred_backfill_filter_backfill_coda_call_count"
+                ],
+                debug[
+                    "action_delta_deferred_backfill_filter_truly_eliminated_coda_call_count"
+                ],
+            )
+        )
+
+    assert observed[0] == observed[1]
+    assert calls == [(4, 5), (5, 6), (4, 5), (5, 6)]
+
+
+def test_lazy_prefix_low_at_t2_materializes_t1_t2_then_stays_exact(monkeypatch):
+    model = make_model()
+    outputs = {index: action(index) for index in range(1, 5)}
+    install_state_indexed_outputs(model, outputs)
+    calls = install_score_trace(monkeypatch, {2: 0.0005})
+
+    _, terminal, _ = run_deferred(
+        model,
+        make_gate(0.0),
+        max_iter=4,
+        min_terminal_iter=2,
+        runtime_policy="lazy_prefix_exact",
+    )
+
+    assert terminal == 4
+    assert calls == [(1, 2)]
+    assert model.test_coda_iterations == [1, 2, 3, 4]
+    debug = model.last_recurrence_debug
+    assert debug["probe_score_call_count"] == 1
+    assert debug["lazy_first_coda_suppressed"] is True
+    assert debug["lazy_first_coda_saved_count"] == 0
+    assert debug["first_nonhigh_terminal_iteration"] == 2
+    assert debug["entered_exact_only"] is True
+    assert debug["exact_only_start_terminal_iteration"] == 2
+    assert debug["exact_only_coda_call_count"] == 2
+    assert debug["truly_eliminated_coda_call_count"] == 0
+
+
+def test_lazy_prefix_two_high_then_low_eliminates_t1_t2(monkeypatch):
+    model = make_model()
+    outputs = {
+        1: action(-10),
+        2: action(-5),
+        3: action(0),
+        4: action(5),
+        5: action(7),
+        6: action(9),
+    }
+    install_state_indexed_outputs(model, outputs)
+    calls = install_score_trace(
+        monkeypatch,
+        {2: 0.002, 3: 0.002, 4: 0.0005},
+    )
+
+    run_deferred(
+        model,
+        make_gate(0.0),
+        max_iter=6,
+        min_terminal_iter=2,
+        runtime_policy="lazy_prefix_exact",
+    )
+
+    assert calls == [(1, 2), (2, 3), (3, 4)]
+    assert model.test_coda_iterations == [3, 4, 5, 6]
+    debug = model.last_recurrence_debug
+    assert debug["probe_high_count"] == 2
+    assert debug["lazy_first_coda_saved_count"] == 1
+    assert debug["prefix_deferred_coda_saved_count"] == 1
+    assert debug["truly_eliminated_coda_call_count"] == 2
+    assert debug["total_exact_coda_call_count"] == 4
+    assert debug["exact_only_coda_call_count"] == 2
+
+
+def test_lazy_prefix_one_high_then_safe_low_returns_exact_current(monkeypatch):
+    model = make_model()
+    outputs = {1: action(-3), 2: action(1), 3: action(1.01)}
+    install_state_indexed_outputs(model, outputs)
+    calls = install_score_trace(monkeypatch, {2: 0.002, 3: 0.0005})
+
+    output, terminal, final_mse = run_deferred(
+        model,
+        make_gate(0.0),
+        max_iter=5,
+        min_terminal_iter=2,
+        runtime_policy="lazy_prefix_exact",
+    )
+
+    assert terminal == 3
+    assert calls == [(1, 2), (2, 3)]
+    assert model.test_coda_iterations == [2, 3]
+    torch.testing.assert_close(output, outputs[3], rtol=0, atol=0)
+    assert final_mse == pytest.approx(0.0001, rel=1e-4)
+    debug = model.last_recurrence_debug
+    assert debug["entered_exact_only"] is False
+    assert debug["lazy_first_coda_saved_count"] == 1
+    assert debug["prefix_deferred_coda_saved_count"] == 0
+    assert debug["truly_eliminated_coda_call_count"] == 1
+
+
+def test_lazy_prefix_reproduces_baseline_k_output_and_next_warm_state(monkeypatch):
+    outputs = {
+        1: action(0),
+        2: action(5),
+        3: action(10),
+        4: action(10.01),
+    }
+    baseline = make_model()
+    install_state_indexed_outputs(baseline, outputs)
+    baseline_result = baseline(
+        *inputs(),
+        warm_start_state=torch.zeros(1, 2, 4, dtype=torch.bfloat16),
+        convergence_strategy="adjacent_action_mse",
+        kl_thresh=0.001,
+        enable_warm_start=True,
+        warm_start_source="midpoint",
+        warm_start_min_iter=2,
+        use_cached_final_output=True,
+        latent_precheck_mode="off",
+        latent_precheck_trace_level="off",
+        max_iter=4,
+    )
+
+    lazy = make_model()
+    install_state_indexed_outputs(lazy, outputs)
+    install_score_trace(
+        monkeypatch,
+        {2: 0.002, 3: 0.002, 4: 0.0005},
+    )
+    lazy_result = run_deferred(
+        lazy,
+        make_gate(0.0),
+        max_iter=4,
+        min_terminal_iter=2,
+        runtime_policy="lazy_prefix_exact",
+    )
+
+    assert baseline_result[1:] == lazy_result[1:]
+    torch.testing.assert_close(
+        baseline_result[0], lazy_result[0], rtol=0, atol=0
+    )
+    torch.testing.assert_close(
+        baseline.last_inference_metadata["next_warm_start_state"],
+        lazy.last_inference_metadata["next_warm_start_state"],
+        rtol=0,
+        atol=0,
+    )
+
+
+def test_lazy_prefix_exact_only_is_absorbing_after_unsafe_low(monkeypatch):
+    model = make_model()
+    outputs = {index: action(index) for index in range(1, 6)}
+    install_state_indexed_outputs(model, outputs)
+    calls = install_score_trace(
+        monkeypatch,
+        {2: 0.0005, 3: 0.004, 4: 0.004, 5: 0.004},
+    )
+
+    run_deferred(
+        model,
+        make_gate(0.0),
+        max_iter=5,
+        min_terminal_iter=2,
+        runtime_policy="lazy_prefix_exact",
+    )
+
+    assert calls == [(1, 2)]
+    assert model.test_coda_iterations == [1, 2, 3, 4, 5]
+    assert model.last_recurrence_debug["exact_only_coda_call_count"] == 3
+
+
+def test_lazy_prefix_all_high_returns_only_exact_max_output(monkeypatch):
+    model = make_model()
+    outputs = {index: action(index) for index in range(1, 6)}
+    install_state_indexed_outputs(model, outputs)
+    calls = install_score_trace(
+        monkeypatch,
+        {2: 0.002, 3: 0.002, 4: 0.002, 5: 0.002},
+    )
+
+    output, terminal, _ = run_deferred(
+        model,
+        make_gate(0.0),
+        max_iter=5,
+        min_terminal_iter=2,
+        runtime_policy="lazy_prefix_exact",
+    )
+
+    assert terminal == 5
+    assert calls == [(1, 2), (2, 3), (3, 4), (4, 5)]
+    assert model.test_coda_iterations == [5]
+    torch.testing.assert_close(output, outputs[5], rtol=0, atol=0)
+    debug = model.last_recurrence_debug
+    assert debug["stop_reason"] == "max_iter"
+    assert debug["probe_high_count"] == 4
+    assert debug["first_nonhigh_terminal_iteration"] is None
+    assert debug["entered_exact_only"] is False
+    assert debug["lazy_first_coda_saved_count"] == 1
+    assert debug["prefix_deferred_coda_saved_count"] == 3
+    assert debug["truly_eliminated_coda_call_count"] == 4
+    assert debug["total_exact_coda_call_count"] == 1
+
+
+def test_lazy_prefix_nonfinite_score_fails_closed_then_stays_exact(monkeypatch):
+    model = make_model()
+    outputs = {index: action(index) for index in range(1, 5)}
+    install_state_indexed_outputs(model, outputs)
+    calls = []
+
+    def evaluate(_gate, anchor_state, current_state, **_kwargs):
+        calls.append(
+            (
+                int(anchor_state[0, 0, 0].item()),
+                int(current_state[0, 0, 0].item()),
+            )
+        )
+        raise action_heads_score_module().NonFiniteActionDeltaGateError(
+            "non-finite lazy probe"
+        )
+
+    monkeypatch.setattr(
+        action_heads_score_module(), "evaluate_action_delta_gate", evaluate
+    )
+    run_deferred(
+        model,
+        make_gate(0.0),
+        max_iter=4,
+        min_terminal_iter=2,
+        runtime_policy="lazy_prefix_exact",
+    )
+
+    assert calls == [(1, 2)]
+    assert model.test_coda_iterations == [1, 2, 3, 4]
+    debug = model.last_recurrence_debug
+    assert debug["first_nonhigh_terminal_iteration"] == 2
+    assert debug["entered_exact_only"] is True
+    assert debug["exact_only_coda_call_count"] == 2
+    assert "non-finite" in debug[
+        "action_delta_deferred_backfill_filter_fallback_reason"
+    ]
