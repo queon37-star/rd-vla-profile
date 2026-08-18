@@ -123,6 +123,26 @@ PARITY_HASH_SCHEMA = {
     "byte_order": "little-endian",
     "memory_order": "C-contiguous",
 }
+PARITY_PROVENANCE_PROTOCOL_PHASES = frozenset(
+    {"calibration", "screening", "final_holdout"}
+)
+
+
+def _should_log_parity_hashes(
+    *, shadow_full_depth: bool, evaluation_protocol_phase: str
+) -> bool:
+    return bool(
+        shadow_full_depth
+        or evaluation_protocol_phase in PARITY_PROVENANCE_PROTOCOL_PHASES
+    )
+
+
+def _resolve_protocol_source_commit(
+    evaluation_protocol_phase: str,
+) -> Optional[str]:
+    if evaluation_protocol_phase in PARITY_PROVENANCE_PROTOCOL_PHASES:
+        return current_source_commit()
+    return None
 
 
 def _tensor_or_array_sha256(value) -> Optional[str]:
@@ -2454,9 +2474,9 @@ def run_episode(
         "environment_seed_applied": environment_seed_applied,
         "smoke_excluded_from_fitting": bool(episode_protocol.get("smoke_excluded_from_fitting", False)),
     }
-    parity_hash_logging_enabled = bool(
-        cfg.shadow_full_depth
-        or evaluation_protocol_phase in {"screening", "final_holdout"}
+    parity_hash_logging_enabled = _should_log_parity_hashes(
+        shadow_full_depth=cfg.shadow_full_depth,
+        evaluation_protocol_phase=evaluation_protocol_phase,
     )
 
     t = 0
@@ -3429,10 +3449,10 @@ def eval_libero(cfg: GenerateConfig) -> float:
 
     raw_shadow_writer = None
     action_delta_shadow_writer = None
-    shared_source_commit = None
+    shared_source_commit = _resolve_protocol_source_commit(
+        cfg.evaluation_protocol_phase
+    )
     shared_checkpoint_identity = None
-    if cfg.evaluation_protocol_phase in {"screening", "final_holdout"}:
-        shared_source_commit = current_source_commit()
     if cfg.collect_preconvergence_raw_shadow:
         shared_source_commit = current_source_commit()
         shared_checkpoint_identity = checkpoint_identity(

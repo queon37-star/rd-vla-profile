@@ -1,7 +1,9 @@
 import inspect
 import random
+from pathlib import Path
 
 import numpy as np
+import pytest
 import torch
 
 from experiments.robot.libero import run_libero_eval
@@ -83,3 +85,71 @@ def test_parity_hashing_occurs_after_action_latency_is_finalized():
     assert final_latency_assignment >= 0
     assert final_latency_assignment < parity_marker < returned_hash
     assert parity_marker < next_state_hash
+
+
+@pytest.mark.parametrize(
+    "phase",
+    ("calibration", "screening", "final_holdout"),
+)
+def test_frozen_protocol_phases_enable_parity_hash_logging(phase):
+    assert run_libero_eval._should_log_parity_hashes(
+        shadow_full_depth=False,
+        evaluation_protocol_phase=phase,
+    )
+
+
+def test_legacy_parity_hash_logging_stays_opt_in_via_shadow_full_depth():
+    assert not run_libero_eval._should_log_parity_hashes(
+        shadow_full_depth=False,
+        evaluation_protocol_phase="legacy",
+    )
+    assert run_libero_eval._should_log_parity_hashes(
+        shadow_full_depth=True,
+        evaluation_protocol_phase="legacy",
+    )
+    assert not run_libero_eval._should_log_parity_hashes(
+        shadow_full_depth=False,
+        evaluation_protocol_phase="smoke",
+    )
+
+
+def test_calibration_uses_the_shared_protocol_source_commit_path(monkeypatch):
+    calls = []
+
+    def source_commit():
+        calls.append("called")
+        return "exact-source-commit"
+
+    monkeypatch.setattr(run_libero_eval, "current_source_commit", source_commit)
+
+    for phase in ("calibration", "screening", "final_holdout"):
+        assert (
+            run_libero_eval._resolve_protocol_source_commit(phase)
+            == "exact-source-commit"
+        )
+    assert run_libero_eval._resolve_protocol_source_commit("legacy") is None
+    assert calls == ["called", "called", "called"]
+
+
+def test_calibration_protocol_still_requires_official_ten_state_partition():
+    manifest = Path(
+        "experiments/robot/libero/manifests/"
+        "libero_spatial_official_50_v1.json"
+    )
+    kwargs = {
+        "phase": "calibration",
+        "task_suite_name": "libero_spatial",
+        "initial_states_path": "DEFAULT",
+        "manifest_path": str(manifest),
+        "reset_rng_each_episode": True,
+    }
+
+    run_libero_eval.validate_protocol_configuration(
+        num_trials_per_task=10,
+        **kwargs,
+    )
+    with pytest.raises(ValueError, match="requires num_trials_per_task=10"):
+        run_libero_eval.validate_protocol_configuration(
+            num_trials_per_task=9,
+            **kwargs,
+        )
