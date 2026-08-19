@@ -536,6 +536,7 @@ def validate_action_delta_nonconvergence_filter_configuration(
     collect_preconvergence_raw_shadow: bool,
     use_cached_final_output: bool,
     profile_coda_cost: bool,
+    allow_cold_without_warm_start: bool = False,
 ) -> None:
     """Validate the development-only high-side non-convergence filter."""
 
@@ -558,15 +559,23 @@ def validate_action_delta_nonconvergence_filter_configuration(
         canonical_recurrence_strategy == "adjacent_action_mse",
         "non-convergence filter requires adjacent action-MSE recurrence",
     )
-    _require(use_warm_start, "non-convergence filter requires warm-start inference")
     _require(
-        warm_start_source == "midpoint",
-        "non-convergence filter requires midpoint warm-start",
+        isinstance(allow_cold_without_warm_start, bool),
+        "non-convergence filter cold-start exemption must be boolean",
     )
     _require(
-        warm_start_min_iter == 2,
-        "non-convergence filter requires warm_start_min_iter=2",
+        use_warm_start or allow_cold_without_warm_start,
+        "non-convergence filter requires warm-start inference",
     )
+    if use_warm_start:
+        _require(
+            warm_start_source == "midpoint",
+            "non-convergence filter requires midpoint warm-start",
+        )
+        _require(
+            warm_start_min_iter == 2,
+            "non-convergence filter requires warm_start_min_iter=2",
+        )
     _require(not use_latent_precheck, "non-convergence filter cannot use latent pre-check")
     _require(
         latent_precheck_mode == "off",
@@ -612,6 +621,8 @@ def validate_action_delta_deferred_backfill_configuration(
     profile_coda_cost: bool,
     min_terminal_iter: int,
     runtime_policy: str = "frozen_v1",
+    apply_to_cold: bool = False,
+    scorer_backend: str = "eager",
 ) -> None:
     """Validate the development-only adjacent-history deferred policy."""
 
@@ -622,6 +633,23 @@ def validate_action_delta_deferred_backfill_configuration(
     )
     if not enabled:
         return
+    _require(
+        isinstance(apply_to_cold, bool),
+        "deferred/backfill apply-to-cold option must be boolean",
+    )
+    _require(
+        not apply_to_cold or runtime_policy == "lazy_prefix_exact",
+        "deferred/backfill cold-start ablation requires "
+        "runtime_policy='lazy_prefix_exact'",
+    )
+    _require(
+        not apply_to_cold or min_terminal_iter == 2,
+        "deferred/backfill cold-start ablation requires min_terminal_iter=2",
+    )
+    _require(
+        not apply_to_cold or scorer_backend == "eager",
+        "deferred/backfill cold-start ablation requires eager scorer",
+    )
     _require(
         not max_skip_filter_enabled,
         "deferred/backfill filter cannot run with the max-skip=1 non-convergence filter",
@@ -649,4 +677,5 @@ def validate_action_delta_deferred_backfill_configuration(
         collect_preconvergence_raw_shadow=collect_preconvergence_raw_shadow,
         use_cached_final_output=use_cached_final_output,
         profile_coda_cost=profile_coda_cost,
+        allow_cold_without_warm_start=apply_to_cold,
     )

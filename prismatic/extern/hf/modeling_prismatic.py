@@ -833,6 +833,7 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
         use_action_delta_deferred_backfill_filter=False,
         action_delta_deferred_scorer_backend="eager",
         action_delta_deferred_runtime_policy="frozen_v1",
+        action_delta_deferred_apply_to_cold=False,
     ):
         """Run L1 regression-based continuous action prediction or discrete action tokens prediction."""
 
@@ -952,6 +953,9 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
                     action_delta_deferred_runtime_policy=(
                         action_delta_deferred_runtime_policy
                     ),
+                    action_delta_deferred_apply_to_cold=(
+                        action_delta_deferred_apply_to_cold
+                    ),
                 )
             # Handle convergence-based return (output, num_iters, final_kl) vs fixed return (output)
             actual_iters = None
@@ -1034,6 +1038,7 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
         use_action_delta_deferred_backfill_filter: bool = False,
         action_delta_deferred_scorer_backend: str = "eager",
         action_delta_deferred_runtime_policy: str = "frozen_v1",
+        action_delta_deferred_apply_to_cold: bool = False,
         **kwargs: str,
     ) -> np.ndarray:
 
@@ -1143,6 +1148,9 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
             ),
             action_delta_deferred_runtime_policy=(
                 action_delta_deferred_runtime_policy
+            ),
+            action_delta_deferred_apply_to_cold=(
+                action_delta_deferred_apply_to_cold
             ),
             )
 

@@ -313,12 +313,17 @@ def deferred_kwargs(
     max_iter=8,
     min_terminal_iter=5,
     runtime_policy=None,
+    enable_warm_start=True,
+    apply_to_cold=False,
 ):
     values = kwargs(gate, max_iter=max_iter)
     values.update(
+        enable_warm_start=enable_warm_start,
+        warm_start_source=("midpoint" if enable_warm_start else "s1"),
         use_action_delta_nonconvergence_filter=False,
         use_action_delta_deferred_backfill_filter=True,
         action_delta_gate_min_terminal_iter=min_terminal_iter,
+        action_delta_deferred_apply_to_cold=apply_to_cold,
     )
     if runtime_policy is not None:
         values["action_delta_deferred_runtime_policy"] = runtime_policy
@@ -364,17 +369,181 @@ def run_deferred(
     max_iter,
     min_terminal_iter=5,
     runtime_policy=None,
+    enable_warm_start=True,
+    apply_to_cold=False,
+    provide_warm_state=True,
 ):
     return model(
         *inputs(),
-        warm_start_state=torch.zeros(1, 2, 4, dtype=torch.bfloat16),
+        warm_start_state=(
+            torch.zeros(1, 2, 4, dtype=torch.bfloat16)
+            if provide_warm_state
+            else None
+        ),
         **deferred_kwargs(
             gate,
             max_iter=max_iter,
             min_terminal_iter=min_terminal_iter,
             runtime_policy=runtime_policy,
+            enable_warm_start=enable_warm_start,
+            apply_to_cold=apply_to_cold,
         ),
     )
+
+
+def test_lazy_prefix_cold_default_is_requested_but_not_applied(monkeypatch):
+    model = make_model()
+    calls = install_score_trace(monkeypatch, {2: 0.002})
+
+    run_deferred(
+        model,
+        make_gate(0.0),
+        max_iter=4,
+        min_terminal_iter=2,
+        runtime_policy="lazy_prefix_exact",
+        provide_warm_state=False,
+    )
+
+    assert calls == []
+    assert model.test_coda_iterations == [1, 2, 3, 4]
+    debug = model.last_recurrence_debug
+    assert debug["action_delta_deferred_backfill_filter_requested"] is True
+    assert debug["action_delta_deferred_backfill_filter_applied"] is False
+    assert debug["action_delta_deferred_backfill_filter_apply_to_cold"] is False
+    assert debug["action_delta_deferred_backfill_filter_actual_origin"] == "COLD"
+
+
+def test_lazy_prefix_cold_opt_in_confirms_then_enters_exact_only(monkeypatch):
+    model = make_model()
+    outputs = {index: action(index) for index in range(1, 6)}
+    install_state_indexed_outputs(model, outputs)
+    calls = install_score_trace(monkeypatch, {2: 0.002, 3: 0.0005})
+
+    run_deferred(
+        model,
+        make_gate(0.0),
+        max_iter=5,
+        min_terminal_iter=2,
+        runtime_policy="lazy_prefix_exact",
+        enable_warm_start=False,
+        apply_to_cold=True,
+        provide_warm_state=False,
+    )
+
+    assert calls == [(1, 2), (2, 3)]
+    assert model.test_coda_iterations == [2, 3, 4, 5]
+    debug = model.last_recurrence_debug
+    assert debug["action_delta_deferred_backfill_filter_applied"] is True
+    assert debug["action_delta_deferred_backfill_filter_apply_to_cold"] is True
+    assert debug["action_delta_deferred_backfill_filter_actual_origin"] == "COLD"
+    assert debug["first_nonhigh_terminal_iteration"] == 3
+    assert debug["entered_exact_only"] is True
+    assert debug["exact_only_start_terminal_iteration"] == 3
+    assert debug["probe_score_call_count"] == 2
+    assert debug["exact_only_coda_call_count"] == 2
+
+
+def test_lazy_prefix_cold_opt_in_max_iter_returns_exact_output(monkeypatch):
+    model = make_model()
+    outputs = {index: action(index) for index in range(1, 5)}
+    install_state_indexed_outputs(model, outputs)
+    calls = install_score_trace(
+        monkeypatch,
+        {2: 0.002, 3: 0.002, 4: 0.002},
+    )
+
+    output, terminal, _ = run_deferred(
+        model,
+        make_gate(0.0),
+        max_iter=4,
+        min_terminal_iter=2,
+        runtime_policy="lazy_prefix_exact",
+        enable_warm_start=False,
+        apply_to_cold=True,
+        provide_warm_state=False,
+    )
+
+    assert terminal == 4
+    assert calls == [(1, 2), (2, 3), (3, 4)]
+    assert model.test_coda_iterations == [4]
+    torch.testing.assert_close(output, outputs[4], rtol=0, atol=0)
+    debug = model.last_recurrence_debug
+    assert debug["stop_reason"] == "max_iter"
+    assert debug["total_exact_coda_call_count"] == 1
+
+
+def test_lazy_prefix_cold_nonfinite_fails_closed_and_stays_exact(monkeypatch):
+    model = make_model()
+    outputs = {index: action(index) for index in range(1, 5)}
+    install_state_indexed_outputs(model, outputs)
+    calls = []
+
+    def evaluate(_gate, anchor_state, current_state, **_kwargs):
+        calls.append(
+            (
+                int(anchor_state[0, 0, 0].item()),
+                int(current_state[0, 0, 0].item()),
+            )
+        )
+        raise action_heads_score_module().NonFiniteActionDeltaGateError(
+            "non-finite cold lazy probe"
+        )
+
+    monkeypatch.setattr(
+        action_heads_score_module(), "evaluate_action_delta_gate", evaluate
+    )
+    run_deferred(
+        model,
+        make_gate(0.0),
+        max_iter=4,
+        min_terminal_iter=2,
+        runtime_policy="lazy_prefix_exact",
+        enable_warm_start=False,
+        apply_to_cold=True,
+        provide_warm_state=False,
+    )
+
+    assert calls == [(1, 2)]
+    assert model.test_coda_iterations == [1, 2, 3, 4]
+    debug = model.last_recurrence_debug
+    assert debug["entered_exact_only"] is True
+    assert debug["probe_score_call_count"] == 1
+    assert "non-finite" in debug[
+        "action_delta_deferred_backfill_filter_fallback_reason"
+    ]
+
+
+def test_lazy_prefix_warm_path_is_unchanged_by_apply_to_cold_flag():
+    observed = []
+    outputs = {index: action(index) for index in range(1, 5)}
+    for apply_to_cold in (False, True):
+        model = make_model()
+        install_state_indexed_outputs(model, outputs)
+        result = run_deferred(
+            model,
+            make_gate(0.01),
+            max_iter=4,
+            min_terminal_iter=2,
+            runtime_policy="lazy_prefix_exact",
+            apply_to_cold=apply_to_cold,
+        )
+        observed.append(
+            (
+                result,
+                list(model.test_coda_iterations),
+                model.last_recurrence_debug["probe_score_call_count"],
+                model.last_recurrence_debug[
+                    "action_delta_deferred_backfill_filter_score_trace"
+                ],
+            )
+        )
+
+    for left, right in zip(observed[0][0], observed[1][0]):
+        if isinstance(left, torch.Tensor):
+            torch.testing.assert_close(left, right, rtol=0, atol=0)
+        else:
+            assert left == right
+    assert observed[0][1:] == observed[1][1:]
 
 
 def test_deferred_min_two_scores_t2_after_exact_t1(monkeypatch):

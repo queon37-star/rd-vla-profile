@@ -315,6 +315,7 @@ class GenerateConfig:
     use_action_delta_deferred_backfill_filter: bool = False
     action_delta_deferred_scorer_backend: str = "eager"
     action_delta_deferred_runtime_policy: str = "frozen_v1"
+    action_delta_deferred_apply_to_cold: bool = False
     action_delta_gate_shadow_dir: str = ""
     action_delta_gate_shadow_shard_size: int = 64
 
@@ -531,6 +532,23 @@ def validate_config(cfg: GenerateConfig) -> None:
     ):
         raise ValueError(
             "lazy_prefix_exact runtime policy is deferred/backfill-only"
+        )
+    if not isinstance(cfg.action_delta_deferred_apply_to_cold, bool):
+        raise ValueError("action_delta_deferred_apply_to_cold must be boolean")
+    if (
+        cfg.action_delta_deferred_apply_to_cold
+        and not cfg.use_action_delta_deferred_backfill_filter
+    ):
+        raise ValueError(
+            "action_delta_deferred_apply_to_cold is deferred/backfill-only"
+        )
+    if (
+        cfg.action_delta_deferred_apply_to_cold
+        and cfg.action_delta_deferred_runtime_policy != "lazy_prefix_exact"
+    ):
+        raise ValueError(
+            "action_delta_deferred_apply_to_cold requires "
+            "action_delta_deferred_runtime_policy='lazy_prefix_exact'"
         )
 
     if cfg.use_action_delta_gate:
@@ -800,6 +818,16 @@ def validate_config(cfg: GenerateConfig) -> None:
                 "deferred/backfill evaluation requires phase calibration, "
                 "screening, or final_holdout"
             )
+        if cfg.action_delta_deferred_apply_to_cold:
+            if cfg.action_delta_deferred_scorer_backend != "eager":
+                raise ValueError(
+                    "deferred/backfill cold-start ablation requires eager scorer"
+                )
+            if cfg.action_delta_gate_min_terminal_iter != 2:
+                raise ValueError(
+                    "deferred/backfill cold-start ablation requires "
+                    "action_delta_gate_min_terminal_iter=2"
+                )
         if deferred_phase in {"screening", "final_holdout"}:
             if cfg.action_delta_deferred_scorer_backend != "eager":
                 raise ValueError(
@@ -830,10 +858,13 @@ def validate_config(cfg: GenerateConfig) -> None:
                 "action_delta_gate_expected_sha256 must be a 64-character "
                 "hexadecimal SHA-256"
             )
-        if not cfg.use_warm_start or cfg.warm_start_source != "midpoint":
+        if cfg.use_warm_start:
+            if cfg.warm_start_source != "midpoint":
+                raise ValueError("deferred/backfill filter requires midpoint warm-start")
+            if cfg.warm_start_min_iter != 2:
+                raise ValueError("deferred/backfill filter requires warm_start_min_iter=2")
+        elif not cfg.action_delta_deferred_apply_to_cold:
             raise ValueError("deferred/backfill filter requires midpoint warm-start")
-        if cfg.warm_start_min_iter != 2:
-            raise ValueError("deferred/backfill filter requires warm_start_min_iter=2")
         if cfg.use_latent_precheck or cfg.latent_precheck_mode != "off":
             raise ValueError("deferred/backfill filter requires latent pre-check off")
         if cfg.latent_precheck_trace_level != "off":
@@ -1585,6 +1616,8 @@ def build_action_delta_deferred_backfill_log_fields(
     names = (
         "requested",
         "applied",
+        "apply_to_cold",
+        "actual_origin",
         "development_only",
         "efficiency_eligible",
         "threshold",
@@ -1635,6 +1668,7 @@ def build_action_delta_deferred_backfill_log_fields(
     fields.update({prefix + name: debug.get(prefix + name) for name in names})
     for name in (
         "action_delta_deferred_runtime_policy",
+        "action_delta_deferred_apply_to_cold",
         "probe_score_call_count",
         "probe_high_count",
         "lazy_first_coda_suppressed",
@@ -2616,6 +2650,11 @@ def run_episode(
                                 if cfg.use_action_delta_deferred_backfill_filter
                                 else None
                             ),
+                            "action_delta_deferred_apply_to_cold": (
+                                bool(cfg.action_delta_deferred_apply_to_cold)
+                                if cfg.use_action_delta_deferred_backfill_filter
+                                else None
+                            ),
                             "action_delta_deferred_threshold": (
                                 float(ACTION_DELTA_NONCONVERGENCE_THRESHOLD)
                                 if cfg.use_action_delta_deferred_backfill_filter
@@ -2794,6 +2833,11 @@ def run_episode(
                     ),
                     "action_delta_deferred_runtime_policy": (
                         cfg.action_delta_deferred_runtime_policy
+                        if cfg.use_action_delta_deferred_backfill_filter
+                        else None
+                    ),
+                    "action_delta_deferred_apply_to_cold": (
+                        bool(cfg.action_delta_deferred_apply_to_cold)
                         if cfg.use_action_delta_deferred_backfill_filter
                         else None
                     ),
@@ -3672,6 +3716,9 @@ def eval_libero(cfg: GenerateConfig) -> float:
                 "min_terminal_iter": cfg.action_delta_gate_min_terminal_iter,
                 "scorer_backend": cfg.action_delta_deferred_scorer_backend,
                 "runtime_policy": cfg.action_delta_deferred_runtime_policy,
+                "apply_to_cold": bool(
+                    cfg.action_delta_deferred_apply_to_cold
+                ),
                 "compiled_configuration": (
                     {
                         "fullgraph": True,
@@ -3724,6 +3771,9 @@ def eval_libero(cfg: GenerateConfig) -> float:
                 ),
                 "scorer_backend": cfg.action_delta_deferred_scorer_backend,
                 "runtime_policy": cfg.action_delta_deferred_runtime_policy,
+                "apply_to_cold": bool(
+                    cfg.action_delta_deferred_apply_to_cold
+                ),
                 "artifact_sha256": (
                     cfg.action_delta_gate_expected_sha256.lower()
                 ),

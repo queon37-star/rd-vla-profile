@@ -652,6 +652,7 @@ class VLARecurrent(nn.Module):
                 use_action_delta_deferred_backfill_filter: bool = False,
                 action_delta_deferred_scorer_backend: str = "eager",
                 action_delta_deferred_runtime_policy: str = "frozen_v1",
+                action_delta_deferred_apply_to_cold: bool = False,
                 action_delta_deferred_scorer=None,
                 **kwargs) -> torch.Tensor:
         requested_recurrence_strategy = convergence_strategy
@@ -778,6 +779,8 @@ class VLARecurrent(nn.Module):
             profile_coda_cost=profile_coda_cost,
             min_terminal_iter=action_delta_gate_min_terminal_iter,
             runtime_policy=action_delta_deferred_runtime_policy,
+            apply_to_cold=action_delta_deferred_apply_to_cold,
+            scorer_backend=action_delta_deferred_scorer_backend,
         )
         validate_action_delta_deferred_scorer_configuration(
             deferred_filter_enabled=use_action_delta_deferred_backfill_filter,
@@ -1186,7 +1189,11 @@ class VLARecurrent(nn.Module):
                 use_action_delta_deferred_backfill_filter
             )
             action_delta_deferred_applied = bool(
-                action_delta_deferred_requested and cached_state_used
+                action_delta_deferred_requested
+                and (
+                    cached_state_used
+                    or action_delta_deferred_apply_to_cold
+                )
             )
             action_delta_deferred_lazy_policy = bool(
                 action_delta_deferred_applied
@@ -2562,6 +2569,15 @@ class VLARecurrent(nn.Module):
                 "action_delta_deferred_backfill_filter_applied": bool(
                     action_delta_deferred_applied
                 ),
+                "action_delta_deferred_backfill_filter_apply_to_cold": bool(
+                    action_delta_deferred_apply_to_cold
+                ),
+                "action_delta_deferred_backfill_filter_actual_origin": (
+                    "ACTUAL_WARM" if cached_state_used else "COLD"
+                ),
+                "action_delta_deferred_apply_to_cold": bool(
+                    action_delta_deferred_apply_to_cold
+                ),
                 "action_delta_deferred_runtime_policy": (
                     action_delta_deferred_runtime_policy
                 ),
@@ -3474,6 +3490,7 @@ class ActionHeadRecurrent(nn.Module):
                        use_action_delta_deferred_backfill_filter=False,
                        action_delta_deferred_scorer_backend="eager",
                        action_delta_deferred_runtime_policy="frozen_v1",
+                       action_delta_deferred_apply_to_cold=False,
                        **kwargs):
         canonical_recurrence_strategy = canonicalize_recurrence_strategy(
             convergence_strategy
@@ -3621,6 +3638,9 @@ class ActionHeadRecurrent(nn.Module):
                                  ),
                                  action_delta_deferred_runtime_policy=(
                                      action_delta_deferred_runtime_policy
+                                 ),
+                                 action_delta_deferred_apply_to_cold=(
+                                     action_delta_deferred_apply_to_cold
                                  ),
                                  action_delta_deferred_scorer=(
                                      action_delta_deferred_scorer

@@ -526,6 +526,13 @@ def get_vla_action(
                             "action_delta_deferred_runtime_policy",
                             "frozen_v1",
                         ),
+                        action_delta_deferred_apply_to_cold=bool(
+                            getattr(
+                                cfg,
+                                "action_delta_deferred_apply_to_cold",
+                                False,
+                            )
+                        ),
                     )
                     recurrence_debug = getattr(getattr(action_head, "model", None), "last_recurrence_debug", None)
                     action_head_inference_metadata = (
