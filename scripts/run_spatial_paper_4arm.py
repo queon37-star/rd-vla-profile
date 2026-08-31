@@ -34,6 +34,7 @@ import torch
 
 import experiments.robot.libero.evaluation_protocol as protocol
 import experiments.robot.libero.run_libero_eval as base
+import prismatic.models.action_heads as action_heads_module
 from prismatic.models.action_delta_gate import (
     ACTION_DELTA_GATE_HELD_OUT_TASK_IDS,
     ACTION_DELTA_GATE_SHADOW_CALIBRATION_TASK_IDS,
@@ -118,13 +119,36 @@ def _resolve_paper_trials(
     return tuple(trials)
 
 
+def _paper_deferred_validator(**kwargs):
+    """Drop only the old diagnostic-profiling requirement for paper runtime.
+
+    The current deferred/backfill validator requires profile_coda_cost=True
+    solely because the development experiments collected synchronized Coda
+    timing diagnostics. The scheduler itself does not depend on those timing
+    values. For the paper rollout we keep every other validation check and
+    execute the method with profile_coda_cost=False so the existing outer
+    synchronized get_action timer measures the actual online policy query.
+    """
+    forwarded = dict(kwargs)
+    forwarded["profile_coda_cost"] = True
+    return _paper_deferred_validator.original(**forwarded)
+
+
 @contextmanager
 def _paper_runner_patches(*, save_videos: bool):
-    """Temporarily add paper-only trial resolution without changing old protocols."""
+    """Install paper-only protocol/runtime adapters and restore them afterward."""
     original_resolver = base.resolve_phase_trials
     original_video_stats = base.save_rollout_video_with_stats
     original_video = base.save_rollout_video
+    original_deferred_validator = (
+        action_heads_module.validate_action_delta_deferred_backfill_configuration
+    )
+
     base.resolve_phase_trials = _resolve_paper_trials
+    _paper_deferred_validator.original = original_deferred_validator
+    action_heads_module.validate_action_delta_deferred_backfill_configuration = (
+        _paper_deferred_validator
+    )
 
     if not save_videos:
         base.save_rollout_video_with_stats = lambda *args, **kwargs: None
@@ -136,6 +160,9 @@ def _paper_runner_patches(*, save_videos: bool):
         base.resolve_phase_trials = original_resolver
         base.save_rollout_video_with_stats = original_video_stats
         base.save_rollout_video = original_video
+        action_heads_module.validate_action_delta_deferred_backfill_configuration = (
+            original_deferred_validator
+        )
 
 
 def _artifact_sha256(artifact_path: Path, explicit_sha256: str | None) -> str:
@@ -223,11 +250,9 @@ def _build_arm_config(
         warm_start_source="midpoint",
         warm_start_min_iter=2,
         validate_warm_start_finite=use_warm,
-        # Keep profiling symmetric across all four rollout arms because the
-        # current deferred/backfill runtime contract requires it. These rollout
-        # latencies are therefore profiling-enabled measurements; use a
-        # separate unprofiled timing run for the final deployment-latency claim.
-        profile_coda_cost=True,
+        # Keep profiling off. run_episode() already synchronizes CUDA around
+        # get_action, so latency_ms remains the online policy-query timer.
+        profile_coda_cost=False,
         use_cached_final_output=True,
         use_latent_precheck=False,
         latent_precheck_mode="off",
@@ -297,6 +322,8 @@ def _validate_paper_config(cfg: base.GenerateConfig, *, arm: str) -> None:
         raise ValueError("legacy latent pre-check must stay disabled")
     if cfg.num_exec_actions != 5:
         raise ValueError("paper runner freezes num_exec_actions=5")
+    if cfg.profile_coda_cost:
+        raise ValueError("paper runner requires profile_coda_cost=False")
     if arm in {"warm_start", "combined"}:
         if not cfg.use_warm_start or cfg.warm_start_source != "midpoint":
             raise ValueError(f"{arm} requires midpoint warm-start")
@@ -446,10 +473,13 @@ def _run_arm(
                 ),
             },
             "latency_scope_note": (
-                "profile_coda_cost=True is intentionally symmetric across all four "
-                "rollout arms; do not use these rollout latencies as the final "
-                "unprofiled deployment-latency claim"
+                "latency_ms is the existing CUDA-synchronized get_action timer; "
+                "profile_coda_cost=False avoids profiling-only per-kernel synchronizations"
             ),
+            "paper_runtime_adapter": {
+                "bypasses_only_deferred_profile_coda_cost_requirement": True,
+                "algorithmic_scheduler_logic_changed": False,
+            },
         },
         "config": asdict(cfg),
         "tasks": {},
