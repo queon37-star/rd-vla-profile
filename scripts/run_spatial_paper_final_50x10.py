@@ -225,7 +225,10 @@ def _read_formal_records(step_path: Path, task_id: int):
             if not line:
                 continue
             record = json.loads(line)
-            if record.get("evaluation_protocol_phase") != profiler.PROFILE_PHASE:
+            if record.get("evaluation_protocol_phase") not in {
+                profiler.PROFILE_PHASE,
+                profiler.SMOKE_PHASE,
+            }:
                 continue
             if int(record.get("task_id", -1)) != int(task_id):
                 continue
